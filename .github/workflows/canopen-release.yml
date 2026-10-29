@@ -3,11 +3,16 @@ name: CANopen release
 # Publishes a release of this fork (docs/CANOPEN_RELEASES.md): the runtime image
 # ghcr.io/<owner>/openplc-runtime:<tag> for linux/arm64 and linux/amd64, `latest`,
 # and a GitHub Release. Started by a v<x.y.z>-canopen.<N> tag on canopen, or by
-# hand on canopen, where the next N is picked and the tag created here.
+# hand on canopen, where the next N is picked and the tag created here. A pull request that
+# changes the release files runs it as a dry run: built, nothing published.
 
 on:
   push:
     tags: ['v*-canopen.*']
+  pull_request:
+    paths:
+      - '.github/workflows/canopen-release.yml'
+      - '.github/scripts/canopen_release.py'
   workflow_dispatch:
     inputs:
       notes:
@@ -28,13 +33,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: canopen-release
+  group: canopen-release-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
   cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/openplc-runtime
   PLUGIN_DIR: core/src/drivers/plugins/native/canopen
-  DRY_RUN: ${{ inputs.dry_run == true }}
+  DRY_RUN: ${{ inputs.dry_run == true || github.event_name == 'pull_request' }}
 
 jobs:
   prepare:
@@ -176,7 +181,7 @@ jobs:
   publish:
     name: Tag the image and publish the release
     needs: [prepare, image]
-    if: inputs.dry_run != true
+    if: inputs.dry_run != true && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

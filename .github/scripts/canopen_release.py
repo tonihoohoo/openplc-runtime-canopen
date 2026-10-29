@@ -128,6 +128,7 @@ def resolve(args: argparse.Namespace) -> Tuple[Release, List[str]]:
         sha = git("rev-parse", f"{tag}^{{commit}}")
         create = False
     else:
+        # A manual run, or a pull request testing the workflow (always a dry run).
         if args.ref_name != BRANCH:
             problems.append(f"releases are made from {BRANCH}, not {args.ref_name}")
         sha = git("rev-parse", "HEAD")
@@ -195,7 +196,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("resolve")
     p.add_argument("--base-file", required=True)
-    p.add_argument("--event", required=True, choices=["push", "workflow_dispatch"])
+    p.add_argument("--event", required=True, choices=["push", "workflow_dispatch", "pull_request"])
     p.add_argument("--ref-name", required=True)
     p.add_argument("--version", default="")
     p.add_argument("--require-workflow", action="append", default=[])

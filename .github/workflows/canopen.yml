@@ -133,6 +133,11 @@ jobs:
           echo "::error::the runtime API did not come up"
           exit 1
 
+      - name: The runtime reports CANopen support
+        run: |
+          curl -ks https://127.0.0.1:8443/api/capabilities | tee /dev/stderr \
+            | python3 -c 'import json, sys; assert 1 in json.load(sys.stdin)["canopen"]["configVersions"]'
+
       - name: Upload the project with the editor CLI
         working-directory: editor
         env:

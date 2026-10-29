@@ -26,18 +26,19 @@ release is `v4.3.2-canopen.1`.
   above the list of changes; leave the version empty to get the next N. **Dry run** builds the images
   without creating a tag, pushing or releasing.
 - **By tag**: `git tag v4.3.1-canopen.2 origin/canopen && git push origin v4.3.1-canopen.2`.
+- A pull request that changes the workflow or `.github/scripts/canopen_release.py` runs it as a dry run.
 
 The workflow:
 
 1. Refuses the release unless the commit is on `canopen`, the **CANopen** workflow passed on it,
    the tag matches `VERSION` and is new, and the notes pass the banned-word check.
-2. Creates the tag (when started by hand).
-3. Builds `linux/arm64` on an arm64 runner and `linux/amd64` on an x64 runner, with no emulation.
+2. Builds `linux/arm64` on an arm64 runner and `linux/amd64` on an x64 runner, with no emulation.
    Lely is built once per pinned commit in the image's base OS and cached; Docker layers use the
    GitHub Actions cache.
-4. Joins the two images into `ghcr.io/<owner>/openplc-runtime:<tag>`, moves `latest` to it and checks
+3. Joins the two images into `ghcr.io/<owner>/openplc-runtime:<tag>`, moves `latest` to it and checks
    that both architectures are there.
-5. Creates the GitHub Release: the upstream version, the fork's commits since the previous release
+4. Creates the tag (when started by hand), only now so that a failed build leaves none, and the
+   GitHub Release: the upstream version, the fork's commits since the previous release
    and a link to the source at the tag.
 
 It needs no secrets beyond the workflow token and the `BANNED_WORDS` list.
