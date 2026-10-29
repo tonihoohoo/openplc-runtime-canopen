@@ -155,11 +155,12 @@ jobs:
           token=$(curl -ks -X POST https://127.0.0.1:8443/api/login -H 'Content-Type: application/json' \
             -d '{"username": "ci", "password": "ci-canopen-e2e"}' \
             | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
+          # The simulated node may finish its steps and leave before a poll, so its boot event counts too.
           seen=
           for _ in $(seq 1 60); do
             if curl -ks -H "Authorization: Bearer $token" https://127.0.0.1:8443/api/canopen/status \
               | tee /tmp/canopen-status.json \
-              | python3 -c 'import json, sys; n = json.load(sys.stdin)["networks"][0]; assert n["bus"]["state"] == "error_active" and n["nodes"][0]["state"] == "operational"' 2>/dev/null; then
+              | python3 -c 'import json, sys; n = json.load(sys.stdin)["networks"][0]; assert n["bus"]["state"] == "error_active" and (n["nodes"][0]["state"] == "operational" or any(e["kind"] == "boot_ok" and e.get("node") == 2 for e in n["events"]))' 2>/dev/null; then
               seen=1
               break
             fi
