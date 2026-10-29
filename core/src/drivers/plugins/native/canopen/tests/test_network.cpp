@@ -3,14 +3,15 @@
 // The master end to end on Lely's in-process virtual CAN bus (or on the SocketCAN interface named
 // by CANOPEN_TEST_INTERFACE, such as a vcan link), against simulated generic I/O modules: boot with
 // identity check and configuration SDOs (PDO remapping as the editor writes it), inputs into %I,
-// outputs from %Q, node state, loss and recovery, a node with the wrong identity, and the NMT
-// command on stop, sent only to the configured nodes.
+// outputs from %Q, node state, loss and recovery, a node with the wrong identity, a configured node
+// that never answers, and the NMT command on stop, sent only to the configured nodes.
 
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -68,7 +69,8 @@ const char *kConfig = R"({
        "identity": {"vendor_id": 153},
        "state_location": "%IB11",
        "tpdos": [{"number": 1, "cob_id": 387, "entries": [
-         {"index": 24576, "subindex": 1, "type": "UNSIGNED8", "location": "%IB1"}]}]}
+         {"index": 24576, "subindex": 1, "type": "UNSIGNED8", "location": "%IB1"}]}]},
+      {"node_id": 9, "name": "absent", "state_location": "%IB12"}
     ]
   }]
 })";
@@ -146,10 +148,28 @@ bool scan_until(ProcessImage &image, const plugin_runtime_args_t &rt, std::funct
     return false;
 }
 
+std::mutex g_log_mutex;
+std::vector<std::string> g_warnings;
+
 void quiet_sink(LogLevel level, const char *msg)
 {
-    if (level != LogLevel::Debug)
-        std::printf("%s\n", msg);
+    if (level == LogLevel::Debug)
+        return;
+    std::printf("%s\n", msg);
+    if (level == LogLevel::Warn)
+    {
+        std::lock_guard<std::mutex> lock(g_log_mutex);
+        g_warnings.push_back(msg);
+    }
+}
+
+size_t warnings_with(const std::string &text)
+{
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    size_t n = 0;
+    for (const auto &w : g_warnings)
+        n += w.find(text) != std::string::npos;
+    return n;
 }
 
 } // namespace
@@ -253,6 +273,12 @@ int main()
     node = io1.get();
     CHECK(
         scan_until(image, rt, [node] { return node->outputs() == 0x5A; }, std::chrono::seconds(2)));
+
+    // The configured node that is not on the bus is reported once; the others are not.
+    CHECK(scan_until(
+        image, rt, [] { return warnings_with("node 9 (absent) has not answered") > 0; },
+        std::chrono::seconds(10)));
+    CHECK(warnings_with("has not answered") == 1);
 
     // PLC stop: the configured nodes go to PRE-OPERATIONAL, a node the master does not manage is
     // left alone.
