@@ -108,24 +108,23 @@ void Network::StopNodes()
     }
     for (auto &it : nodes_)
         it.second.stopped = true;
-    try
+    if (cfg_.on_stop == OnStop::None)
+        return;
+    const NmtCommand cmd =
+        cfg_.on_stop == OnStop::Stopped ? NmtCommand::STOP : NmtCommand::ENTER_PREOP;
+    // Addressed to each configured node: a broadcast would also reach devices this master does
+    // not manage.
+    for (const auto &it : nodes_)
     {
-        switch (cfg_.on_stop)
+        try
         {
-        case OnStop::PreOperational:
-            Command(NmtCommand::ENTER_PREOP, 0);
-            break;
-        case OnStop::Stopped:
-            Command(NmtCommand::STOP, 0);
-            break;
-        case OnStop::None:
-            break;
+            Command(cmd, static_cast<uint8_t>(it.first));
         }
-    }
-    catch (const std::exception &e)
-    {
-        log_warn("%s: cannot send the NMT command for PLC stop: %s", cfg_.label().c_str(),
-                 e.what());
+        catch (const std::exception &e)
+        {
+            log_warn("%s: cannot send the NMT command for PLC stop to node %u: %s",
+                     cfg_.label().c_str(), it.first, e.what());
+        }
     }
 }
 
