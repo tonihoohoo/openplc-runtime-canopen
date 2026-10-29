@@ -4,11 +4,12 @@
 // end-to-end check of a PLC program that copies the module's digital inputs to its outputs:
 //
 //   canopen_sim_slave --interface vcan0 [--node 2] [--steps 5] [--timeout 60]
-//                     [--expect-parameter 0x12345678] [--expect-master-loss 5]
+//                     [--expect-parameter 0x12345678] [--expect-master-loss 5] [--linger 10]
 //
 // It sets its digital inputs to 1, 2, ... and waits each time until its outputs follow. With
 // --expect-master-loss it then prints "watching the master" and waits up to that many seconds
-// for its master watch (0x1016) to put it in pre-operational. Exit status 0 when every step
+// for its master watch (0x1016) to put it in pre-operational. With --linger it stays on the bus
+// that many seconds more, so its status can be read. Exit status 0 when every step
 // matched (and the parameter was written, and the master loss was seen), 1 otherwise.
 
 #include <chrono>
@@ -33,6 +34,7 @@ int main(int argc, char **argv)
     bool check_param    = false;
     unsigned long param = 0;
     int master_loss_s   = 0;
+    int linger_s        = 0;
     for (int i = 1; i + 1 < argc; i += 2)
     {
         std::string opt = argv[i];
@@ -45,6 +47,8 @@ int main(int argc, char **argv)
             steps = std::atoi(val);
         else if (opt == "--timeout")
             timeout_s = std::atoi(val);
+        else if (opt == "--linger")
+            linger_s = std::atoi(val);
         else if (opt == "--expect-master-loss")
             master_loss_s = std::atoi(val);
         else if (opt == "--expect-parameter")
@@ -109,6 +113,8 @@ int main(int argc, char **argv)
         }
         std::printf("master loss seen: pre-operational\n");
     }
+    if (linger_s > 0)
+        std::this_thread::sleep_for(std::chrono::seconds(linger_s));
     std::printf("PASS\n");
     return 0;
 }

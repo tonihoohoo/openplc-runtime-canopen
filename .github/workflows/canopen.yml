@@ -150,7 +150,7 @@ jobs:
 
       - name: Inputs reach the outputs through the program, and the status shows the nodes
         run: |
-          "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 5 --timeout 180 &
+          "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 5 --timeout 180 --linger 30 &
           sim=$!
           token=$(curl -ks -X POST https://127.0.0.1:8443/api/login -H 'Content-Type: application/json' \
             -d '{"username": "ci", "password": "ci-canopen-e2e"}' \
