@@ -57,8 +57,9 @@ BusMonitor::BusMonitor(std::string interface) : interface_(std::move(interface))
 BusStatus BusMonitor::update(const LinkInfo &li, clock::time_point now)
 {
     BusStatus b;
-    b.state     = state_of(li);
-    bool is_can = li.kind == "can";
+    b.state      = state_of(li);
+    bool is_can  = li.kind == "can";
+    b.has_resets = is_can;
     if (!have_base_)
     {
         have_base_ = true;

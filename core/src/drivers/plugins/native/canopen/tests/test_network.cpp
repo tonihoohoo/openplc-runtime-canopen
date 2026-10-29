@@ -5,8 +5,8 @@
 // identity check and configuration SDOs (PDO remapping as the editor writes it), inputs into %I,
 // outputs from %Q, node state, loss and recovery, a node with the wrong identity, a configured node
 // that never answers, a refused configuration SDO, emergencies, late PDOs with their inputs held
-// and zeroed, the status record and its socket, and the NMT command on stop, sent only to the
-// configured nodes.
+// and zeroed, the status record and its socket, the NMT command on stop, sent only to the
+// configured nodes, and the reset of a bus-off link (on a stood-in link state).
 
 #include <algorithm>
 #include <atomic>
@@ -34,6 +34,7 @@
 #include "cJSON.h"
 #include "check.h"
 #include "config.h"
+#include "fake_link.h"
 #include "log.h"
 #include "master_dcf.h"
 #include "process_image.h"
@@ -63,6 +64,7 @@ void operator delete(void *p, std::size_t) noexcept
 using namespace canopen_plugin;
 using canopen_sim::SimSlave;
 using canopen_sim::SimSlaveSpec;
+using canopen_test::FakeLink;
 
 namespace
 {
@@ -188,17 +190,27 @@ bool scan_until(ProcessImage &image, const plugin_runtime_args_t &rt, std::funct
 
 std::mutex g_log_mutex;
 std::vector<std::string> g_warnings;
+std::vector<std::string> g_errors;
 
 void quiet_sink(LogLevel level, const char *msg)
 {
     if (level == LogLevel::Debug)
         return;
     std::printf("%s\n", msg);
+    std::lock_guard<std::mutex> lock(g_log_mutex);
     if (level == LogLevel::Warn)
-    {
-        std::lock_guard<std::mutex> lock(g_log_mutex);
         g_warnings.push_back(msg);
-    }
+    else if (level == LogLevel::Error)
+        g_errors.push_back(msg);
+}
+
+size_t errors_with(const std::string &text)
+{
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    size_t n = 0;
+    for (const auto &w : g_errors)
+        n += w.find(text) != std::string::npos;
+    return n;
 }
 
 size_t warnings_with(const std::string &text)
@@ -408,6 +420,91 @@ std::string ask(const std::string &path, const std::string &request)
     }
     close(fd);
     return answer;
+}
+
+uint32_t link_resets(const NetworkStatus &status)
+{
+    return status.snapshot().bus.resets;
+}
+
+size_t resets_of(const NetworkStatus &status, ResetOutcome outcome)
+{
+    size_t n = 0;
+    for (const Event &e : status.snapshot().events)
+        n += e.kind == EventKind::BusReset && e.reset == outcome;
+    return n;
+}
+
+// A bus-off link without auto-restart is reset by the master and the node comes back; without
+// permission the master says so once and keeps the session.
+void check_bus_off_reset(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                         const std::string &dir, const plugin_runtime_args_t &rt)
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(kWatchConfig, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/busoff.dcf";
+    {
+        FILE *f       = std::fopen(dcf.c_str(), "w");
+        std::string t = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+    }
+    SimSlaveSpec spec;
+    spec.node_id = 2;
+    SimSlave io(spec, dir + "/busoff_node2.dcf", vbus, "");
+    io.start();
+
+    {
+        FakeLink link;
+        NetworkStatus status(net);
+        Bus bus(net, layout, image, status, dcf, vbus, &link);
+        bus.start();
+        CHECK(scan_until(image, rt, [] { return g_byte_in[10] == 5; }, std::chrono::seconds(10)));
+        unsigned boots = node_status(status, 2).boots;
+        link.set_can_state(canopen_test::kCanBusOff);
+        CHECK(scan_until(
+            image, rt, [&link] { return link.downs() == 1 && link.ups() == 1; },
+            std::chrono::seconds(3)));
+        CHECK(errors_with("is bus-off; resetting the link") == 1);
+        CHECK(link_resets(status) == 1 && resets_of(status, ResetOutcome::Done) == 1);
+        CHECK(scan_until(
+            image, rt,
+            [&status, boots]
+            {
+                return node_status(status, 2).state == NodeRun::Operational &&
+                       node_status(status, 2).boots > boots;
+            },
+            std::chrono::seconds(10)));
+        CHECK(g_byte_in[10] == 5);
+        bus.stop();
+    }
+
+    {
+        FakeLink link;
+        link.refuse_all();
+        NetworkStatus status(net);
+        Bus bus(net, layout, image, status, dcf, vbus, &link);
+        bus.start();
+        CHECK(scan_until(image, rt, [] { return g_byte_in[10] == 5; }, std::chrono::seconds(10)));
+        link.set_can_state(canopen_test::kCanBusOff);
+        CHECK(scan_until(
+            image, rt, [&status] { return resets_of(status, ResetOutcome::NotPermitted) == 1; },
+            std::chrono::seconds(3)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        CHECK(errors_with("not permitted to reset it") == 1);
+        CHECK(resets_of(status, ResetOutcome::NotPermitted) == 1 && link_resets(status) == 0);
+        CHECK(link.downs() == 0);
+        CHECK(node_status(status, 2).state == NodeRun::Operational);
+        bus.stop();
+    }
+    io.stop();
 }
 
 } // namespace
@@ -662,6 +759,8 @@ int main()
     refuses.stop();
 
     check_master_watch(vbus, wire, dir, rt);
+    if (vbus)
+        check_bus_off_reset(vbus, dir, rt);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }
