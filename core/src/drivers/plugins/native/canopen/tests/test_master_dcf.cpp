@@ -20,7 +20,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 2,
+  "version": 3,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 250000, "master_node_id": 1,
     "heartbeat_producer_ms": 200,
@@ -35,7 +35,8 @@ const char *kConfig = R"({
          {"index": 25601, "subindex": 1, "type": "INTEGER16", "location": "%IW0"}]}],
        "rpdos": [{"number": 1, "cob_id": 514, "entries": [
          {"index": 25088, "subindex": 1, "type": "UNSIGNED8", "location": "%QB0"}]}]},
-      {"node_id": 5,
+      {"node_id": 5, "configure": false, "emcy": {"enabled": false},
+       "supervision": {"type": "guarding", "guard_time_ms": 100, "life_time_factor": 3},
        "tpdos": [{"number": 2, "cob_id": 645, "receive_timeout_ms": 250, "entries": [
          {"index": 24832, "subindex": 1, "type": "BOOLEAN", "location": "%IX4.0"},
          {"index": 24832, "subindex": 2, "type": "REAL32", "location": "%ID2"}]}],
@@ -72,7 +73,9 @@ void test_layout_and_dcf()
     }
     CHECK(co_dev_get_id(dev) == 1);
     CHECK(u32(dev, 0x1F80, 0) == 0x1);
-    CHECK(u32(dev, 0x1F81, 2) == 0x05 && u32(dev, 0x1F81, 5) == 0x05);
+    // Never mandatory (bit 3); node 5 is not booted (bit 2) and is guarded (100 ms, factor 3).
+    CHECK(u32(dev, 0x1F81, 2) == 0x05);
+    CHECK(u32(dev, 0x1F81, 5) == (100u << 16 | 3u << 8 | 0x01));
     CHECK(u32(dev, 0x1F81, 3) == 0);
     CHECK(u32(dev, 0x1F85, 2) == 1 && u32(dev, 0x1F86, 2) == 2);
     CHECK(u32(dev, 0x1005, 0) == 0x40000080);
@@ -80,7 +83,8 @@ void test_layout_and_dcf()
     CHECK(co_dev_get_val_u16(dev, 0x1017, 0) == 200);
     CHECK(co_dev_get_val_u8(dev, 0x1016, 0) == 1);
     CHECK(u32(dev, 0x1016, 1) == (2u << 16 | 500));
-    CHECK(u32(dev, 0x1028, 2) == 0x82 && u32(dev, 0x1028, 5) == 0x85);
+    // Emergency consumer; node 5's emergency is off.
+    CHECK(u32(dev, 0x1028, 2) == 0x82 && u32(dev, 0x1028, 5) == 0x80000085);
     // Node TPDOs are the master's RPDOs; node RPDOs its TPDOs.
     CHECK(u32(dev, 0x1400, 1) == 0x182 && u32(dev, 0x1401, 1) == 0x285);
     // A receive timeout is the master RPDO's event timer; without one there is no sub 5.

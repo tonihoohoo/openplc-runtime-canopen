@@ -162,6 +162,19 @@ MasterLayout master_layout(const NetworkConfig &net)
     return l;
 }
 
+uint32_t slave_assignment(const NodeConfig &n)
+{
+    // Bit 0: in the network. Bit 2: boot it (identity check and configuration); clear for a node
+    // that is not initialized. Never mandatory (bit 3), which would hold the master in
+    // pre-operational while the node is away, and never keep-alive (bit 4).
+    uint32_t v = 0x01;
+    if (n.configure)
+        v |= 0x04;
+    if (n.supervision == Supervision::Guarding)
+        v |= (n.guard_time_ms & 0xFFFFu) << 16 | (n.life_time_factor & 0xFFu) << 8;
+    return v;
+}
+
 std::string master_dcf(const NetworkConfig &net, const MasterLayout &layout)
 {
     DcfWriter w;
@@ -194,10 +207,11 @@ std::string master_dcf(const NetworkConfig &net, const MasterLayout &layout)
     w.sub(0x1018, 3, "Revision number", CoType::UNSIGNED32, "ro", 0);
     w.sub(0x1018, 4, "Serial number", CoType::UNSIGNED32, "ro", 0);
 
-    // Emergency consumer: the predefined EMCY COB-ID of each node (sub-index = node ID).
+    // Emergency consumer: each node's EMCY COB-ID (sub-index = node ID); bit 31 when it is off.
     w.begin(0x1028, "Emergency consumer object", 0x8, static_cast<unsigned>(net.nodes.size()), 127);
     for (const auto &n : net.nodes)
-        w.sub(0x1028, n.node_id, "Emergency consumer", CoType::UNSIGNED32, "rw", 0x80 + n.node_id);
+        w.sub(0x1028, n.node_id, "Emergency consumer", CoType::UNSIGNED32, "rw",
+              n.emcy_cob_id | (n.emcy_enabled ? 0u : 0x80000000u));
 
     mirror_pdos(w, layout.rpdos, true);
     mirror_pdos(w, layout.tpdos, false);
@@ -212,9 +226,7 @@ std::string master_dcf(const NetworkConfig &net, const MasterLayout &layout)
         uint32_t (*value)(const NodeConfig &);
     };
     const Array arrays[] = {
-        // Slave, and boot it again after an error control event; optional (not mandatory).
-        {0x1F81, "Slave assignment", CoType::UNSIGNED32,
-         [](const NodeConfig &) -> uint32_t { return 0x05; }},
+        {0x1F81, "Slave assignment", CoType::UNSIGNED32, slave_assignment},
         {0x1F84, "Device type identification", CoType::UNSIGNED32,
          [](const NodeConfig &n) { return n.device_type; }},
         {0x1F85, "Vendor identification", CoType::UNSIGNED32,

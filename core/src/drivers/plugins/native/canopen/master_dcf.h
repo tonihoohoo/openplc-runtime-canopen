@@ -42,6 +42,9 @@ MasterLayout master_layout(const NetworkConfig &net);
 // The DCF text for the network's master.
 std::string master_dcf(const NetworkConfig &net, const MasterLayout &layout);
 
+// The node's slave assignment (0x1F81, CiA 302-2).
+uint32_t slave_assignment(const NodeConfig &node);
+
 // The node's configuration SDOs as a concise DCF (CiA 302-3: count, then index, sub-index, size
 // and data of each entry, all little-endian).
 std::vector<uint8_t> concise_dcf(const std::vector<SdoWrite> &sdo);

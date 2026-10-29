@@ -6,7 +6,9 @@
 // outputs from %Q, node state, loss and recovery, a node with the wrong identity, a configured node
 // that never answers, a refused configuration SDO, emergencies, late PDOs with their inputs held
 // and zeroed, the status record and its socket, the NMT command on stop, sent only to the
-// configured nodes, and the reset of a bus-off link (on a stood-in link state).
+// configured nodes, and the reset of a bus-off link (on a stood-in link state). Then the node
+// options: restore defaults before the configuration, a node that is not initialized, an optional
+// node that is absent, node guarding, a node stopped after an error, and the TIME producer.
 
 #include <algorithm>
 #include <atomic>
@@ -70,7 +72,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 2,
+  "version": 3,
   "networks": [{
     "name": "test", "interface": "vcan-test", "bitrate": 0,
     "sync": {"mode": "plc_cycle"},
@@ -316,8 +318,17 @@ void check_scan_exchange(std::shared_ptr<lely::io::VirtualCanController> vbus, P
     g_byte_out[0] = 0x5A;
 }
 
+NodeStatus node_status(const NetworkStatus &status, unsigned id)
+{
+    NetworkSnapshot s = status.snapshot();
+    for (const NodeStatus &n : s.nodes)
+        if (n.node_id == id)
+            return n;
+    return NodeStatus();
+}
+
 const char *kWatchConfig = R"({
-  "version": 2,
+  "version": 3,
   "networks": [{
     "name": "watch", "interface": "vcan-test", "bitrate": 0,
     "heartbeat_producer_ms": 50,
@@ -374,13 +385,151 @@ void check_master_watch(std::shared_ptr<lely::io::VirtualCanController> vbus,
     io.stop();
 }
 
-NodeStatus node_status(const NetworkStatus &status, unsigned id)
+const char *kOptionsConfig = R"({
+  "version": 3,
+  "networks": [{
+    "name": "options", "interface": "vcan-test", "bitrate": 0,
+    "on_node_error": "stop", "boot_timeout_ms": 1000, "sdo_timeout_ms": 500,
+    "time": {"cob_id": 256, "period_ms": 100},
+    "nodes": [
+      {"node_id": 2, "name": "restored", "restore_defaults": 1,
+       "supervision": {"type": "guarding", "guard_time_ms": 100, "life_time_factor": 3},
+       "state_location": "%IB10",
+       "sdo": [{"index": 8448, "subindex": 0, "data": "78563412"},
+               {"index": 4119, "subindex": 0, "data": "0000"},
+               {"index": 4108, "subindex": 0, "data": "6400"},
+               {"index": 4109, "subindex": 0, "data": "03"}]},
+      {"node_id": 3, "name": "as-is", "configure": false,
+       "supervision": {"type": "heartbeat", "consumer_ms": 300},
+       "state_location": "%IB11"},
+      {"node_id": 4, "name": "maybe", "optional": true, "state_location": "%IB12"},
+      {"node_id": 7, "name": "keeps", "restore_defaults": 3, "state_location": "%IB13"}
+    ]
+  }]
+})";
+
+// Restore defaults before the configuration, a node that is not initialized, an absent optional
+// node, a refused restore, node guarding with the node stopped after the error, and TIME.
+void check_node_options(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                        const std::string &wire, const std::string &dir,
+                        const plugin_runtime_args_t &rt)
 {
-    NetworkSnapshot s = status.snapshot();
-    for (const NodeStatus &n : s.nodes)
-        if (n.node_id == id)
-            return n;
-    return NodeStatus();
+    std::string text = kOptionsConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(text, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/options.dcf";
+    {
+        FILE *f       = std::fopen(dcf.c_str(), "w");
+        std::string t = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+    }
+    SimSlaveSpec spec2;
+    spec2.node_id = 2;
+    SimSlaveSpec spec3;
+    spec3.node_id = 3;
+    SimSlaveSpec spec7;
+    spec7.node_id         = 7;
+    spec7.restore_refused = true;
+    std::unique_ptr<SimSlave> restored(new SimSlave(spec2, dir + "/opt_node2.dcf", vbus, wire));
+    SimSlave as_is(spec3, dir + "/opt_node3.dcf", vbus, wire);
+    SimSlave keeps(spec7, dir + "/opt_node7.dcf", vbus, wire);
+    restored->start();
+    as_is.start();
+    keeps.start();
+    std::memset(g_byte_in, 0, sizeof(g_byte_in));
+
+    std::atomic<bool> run{true};
+    std::vector<Frame> frames;
+    std::thread listener;
+    if (vbus)
+        listener = std::thread([&] { listen(vbus, run, frames); });
+
+    size_t warnings_before = warnings_with("node 4 (maybe)");
+    NetworkStatus status(net);
+    Bus bus(net, layout, image, status, dcf, vbus);
+    bus.start();
+
+    // Restored, then configured: the parameter written by the configuration survived the reset
+    // that made the defaults take effect.
+    CHECK(scan_until(image, rt, [] { return g_byte_in[10] == 5; }, std::chrono::seconds(10)));
+    CHECK(restored->restores() == 1);
+    SimSlave *node2 = restored.get();
+    CHECK(scan_until(
+        image, rt, [node2] { return node2->parameter() == 0x12345678; }, std::chrono::seconds(1)));
+    CHECK(restored->last_command() == 1);
+    // Not initialized: started, nothing written.
+    CHECK(scan_until(image, rt, [] { return g_byte_in[11] == 5; }, std::chrono::seconds(5)));
+    CHECK(as_is.parameter() == 0 && as_is.restores() == 0 && as_is.last_command() == 1);
+    // The refused restore fails the boot with the object and the abort code.
+    CHECK(scan_until(
+        image, rt,
+        [&status]
+        {
+            Problem p = node_status(status, 7).problem;
+            return node_status(status, 7).state == NodeRun::Failed &&
+                   p.kind == ProblemKind::SdoAbort && p.index == 0x1011 && p.subindex == 3;
+        },
+        std::chrono::seconds(5)));
+    CHECK(node_status(status, 7).problem.abort_code == 0x06010002);
+    // The optional node is absent, without a warning.
+    CHECK(scan_until(
+        image, rt, [&status] { return node_status(status, 4).state == NodeRun::Absent; },
+        std::chrono::seconds(3)));
+    CHECK(warnings_with("node 4 (maybe)") == warnings_before);
+    {
+        NetworkSnapshot snap = status.snapshot();
+        CHECK(!snap.all_up(false) && !snap.all_up(true));
+    }
+
+    // Node guarding: the node goes away, is lost with the reason guarding, sent NMT stop and left
+    // alone, also when it comes back.
+    restored.reset();
+    CHECK(scan_until(image, rt, [] { return g_byte_in[10] == 0; }, std::chrono::seconds(2)));
+    {
+        NodeStatus n = node_status(status, 2);
+        CHECK(n.state == NodeRun::Lost && n.problem.kind == ProblemKind::Guarding && n.held);
+    }
+    restored.reset(new SimSlave(spec2, dir + "/opt_node2.dcf", vbus, wire));
+    restored->start();
+    CHECK(!scan_until(image, rt, [] { return g_byte_in[10] != 0; }, std::chrono::seconds(3)));
+    CHECK(restored->restores() == 0 && restored->parameter() == 0);
+    CHECK(g_byte_in[11] == 5);
+
+    // A new session in the same PLC run (as after a lost or reset link) keeps the node stopped.
+    bus.stop();
+    Bus again(net, layout, image, status, dcf, vbus);
+    again.start();
+    CHECK(scan_until(image, rt, [] { return g_byte_in[11] == 5; }, std::chrono::seconds(10)));
+    CHECK(!scan_until(image, rt, [] { return g_byte_in[10] != 0; }, std::chrono::seconds(2)));
+    CHECK(node_status(status, 2).held && restored->last_command() == 2);
+    CHECK(restored->restores() == 0);
+
+    again.stop();
+    run = false;
+    if (listener.joinable())
+        listener.join();
+    if (vbus)
+    {
+        // TIME every 100 ms: 6 bytes on 0x100.
+        size_t time_frames = 0;
+        for (const Frame &f : frames)
+            time_frames += f.id == 0x100;
+        std::printf("node options: %zu TIME frames\n", time_frames);
+        CHECK(time_frames >= 20);
+    }
+    restored.reset();
+    as_is.stop();
+    keeps.stop();
 }
 
 size_t events_of(const NetworkStatus &status, unsigned id, EventKind kind)
@@ -761,6 +910,7 @@ int main()
     check_master_watch(vbus, wire, dir, rt);
     if (vbus)
         check_bus_off_reset(vbus, dir, rt);
+    check_node_options(vbus, wire, dir, rt);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }

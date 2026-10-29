@@ -95,6 +95,12 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     Dcf d;
     d.var("1000", "Device type", 0x7, "ro", s.device_type);
     d.var("1001", "Error register", 0x5, "ro", 0);
+    d.var("100C", "Guard time", 0x6, "rw", 0);
+    d.var("100D", "Life time factor", 0x5, "rw", 0);
+    d.rec("1011", "Restore default parameters", 4, 3);
+    d.sub("1011", 1, "Restore all", 0x7, "rw", 1);
+    d.sub("1011", 2, "Restore communication", 0x7, "rw", 1);
+    d.sub("1011", 3, "Restore application", 0x7, "rw", 1);
     d.var("1014", "COB-ID EMCY", 0x7, "rw", 0x80 + s.node_id);
     d.rec("1016", "Consumer heartbeat time", 2, 1);
     d.sub("1016", 1, "Consumer heartbeat time", 0x7, "rw", 0);
@@ -136,9 +142,25 @@ class Slave : public lely::canopen::BasicSlave
 {
   public:
     Slave(ev_exec_t *exec, lely::io::TimerBase &timer, lely::io::CanChannelBase &chan,
-          const std::string &dcf, std::atomic<uint8_t> &nmt)
+          const std::string &dcf, std::atomic<uint8_t> &nmt, std::atomic<unsigned> &restores,
+          bool refuse)
         : BasicSlave(exec, timer, chan, dcf, ""), nmt_(nmt)
     {
+        // Every object comes back from the DCF at the next reset anyway, so a restore only has
+        // to be accepted and counted.
+        for (uint8_t sub = 1; sub <= 3; ++sub)
+            OnWrite<uint32_t>(
+                0x1011, sub,
+                [&restores, refuse](uint16_t, uint8_t, uint32_t &value, uint32_t) -> std::error_code
+                {
+                    if (refuse)
+                        return lely::canopen::SdoErrc::NO_WRITE;
+                    if (value != 0x64616F6C)
+                        return lely::canopen::SdoErrc::DATA;
+                    ++restores;
+                    value = 1;
+                    return {};
+                });
     }
 
     void SendEmcy(uint16_t code, uint8_t reg)
@@ -181,9 +203,10 @@ void SimSlave::start()
     if (thread_.joinable())
         return;
     std::ofstream(dcf_path_, std::ios::trunc) << sim_slave_dcf(spec_);
-    stop_   = false;
-    ready_  = false;
-    thread_ = std::thread([this] { thread_main(); });
+    stop_     = false;
+    ready_    = false;
+    restores_ = 0;
+    thread_   = std::thread([this] { thread_main(); });
     while (!ready_ && !stop_)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }
@@ -245,7 +268,7 @@ void SimSlave::thread_main()
             chan->open(*ctrl);
             base = chan.get();
         }
-        Slave slave(exec, timer, *base, dcf_path_, nmt_state_);
+        Slave slave(exec, timer, *base, dcf_path_, nmt_state_, restores_, spec_.restore_refused);
         slave.Reset();
         ready_ = true;
         while (!stop_)

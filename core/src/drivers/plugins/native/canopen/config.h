@@ -16,7 +16,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 2;
+constexpr int kConfigVersion = 3;
 
 // One object mapped into a PDO, bound to one IEC location.
 struct PdoEntry
@@ -50,7 +50,8 @@ struct SdoWrite
 enum class Supervision
 {
     None,
-    Heartbeat
+    Heartbeat,
+    Guarding
 };
 
 enum class OnLoss
@@ -64,12 +65,22 @@ struct NodeConfig
     unsigned node_id = 0;
     std::string name;
     // Expected identity; 0 skips that check.
-    uint32_t device_type           = 0;
-    uint32_t vendor_id             = 0;
-    uint32_t product_code          = 0;
-    uint32_t revision              = 0;
+    uint32_t device_type  = 0;
+    uint32_t vendor_id    = 0;
+    uint32_t product_code = 0;
+    uint32_t revision     = 0;
+    // Optional: absent is not an error. Mandatory nodes are told apart only by the plugin.
+    bool optional = false;
+    // false: no identity check, restore or configuration SDOs; the node is only started.
+    bool configure = true;
+    // 0x1011 sub-index written with "load" before the configuration SDOs; 0 for none.
+    unsigned restore_defaults      = 0;
     Supervision supervision        = Supervision::None;
     unsigned heartbeat_consumer_ms = 0;
+    unsigned guard_time_ms         = 0; // node guarding
+    unsigned life_time_factor      = 0;
+    bool emcy_enabled              = true;
+    uint32_t emcy_cob_id           = 0; // 11-bit; 0x80 + node ID by default
     OnLoss on_loss                 = OnLoss::Hold;
     bool has_state_location        = false;
     IecLocation state_location; // %IB: CiA 301 NMT state, 0 while not running
@@ -84,6 +95,12 @@ enum class SyncMode
     None,
     Period,
     PlcCycle
+};
+
+enum class OnNodeError
+{
+    Restart, // boot the node again in the background
+    Stop     // send NMT stop and leave it until the next PLC start
 };
 
 enum class OnStop
@@ -109,7 +126,13 @@ struct NetworkConfig
     unsigned sync_period_us        = 0;
     unsigned sdo_timeout_ms        = 1000;
     OnStop on_stop                 = OnStop::PreOperational;
-    int priority                   = kDefaultPriority; // SCHED_FIFO of the bus thread in a session
+    // A mandatory node not booted this long after the start is reported as not answering.
+    unsigned boot_timeout_ms  = 2000;
+    OnNodeError on_node_error = OnNodeError::Restart;
+    bool time_producer        = false; // TIME (CiA 301) with the host's clock
+    uint32_t time_cob_id      = 0x100;
+    unsigned time_period_ms   = 1000;
+    int priority              = kDefaultPriority; // SCHED_FIFO of the bus thread in a session
     std::vector<NodeConfig> nodes;
     std::string label() const; // "network \"CANopen 1\" (can0)"
 };

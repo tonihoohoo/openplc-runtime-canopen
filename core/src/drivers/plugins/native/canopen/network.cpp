@@ -28,7 +28,8 @@ using lely::canopen::NmtState;
 constexpr std::chrono::milliseconds Network::kTick;
 constexpr std::chrono::milliseconds Network::kRetryMin;
 constexpr std::chrono::milliseconds Network::kRetryMax;
-constexpr std::chrono::milliseconds Network::kSilentAfter;
+constexpr std::chrono::milliseconds Network::kPollEvery;
+constexpr uint32_t Network::kRestoreSignature;
 
 uint64_t pdo_get_bits(const uint8_t *data, size_t len, unsigned offset, unsigned bits)
 {
@@ -107,10 +108,19 @@ void Network::Start()
     running_      = true;
     synced_scans_ = image_.scans();
     started_      = clock::now();
+    next_time_    = started_;
+    for (auto &it : nodes_)
+    {
+        it.second.next_poll = started_ + kPollEvery; // after the boot-ups of the reset
+        it.second.held      = status_.is_held(it.first);
+    }
     status_.begin_session();
     log_info("%s: starting, %zu node(s), %zu input and %zu output PDO(s)", cfg_.label().c_str(),
              nodes_.size(), layout_.rpdos.size(), layout_.tpdos.size());
     Reset();
+    for (auto &it : nodes_)
+        if (it.second.held)
+            StopHeld(it.first);
     tick_.settime(kTick, kTick);
     tick_.submit_wait(tick_wait_);
     image_.drain_wake();
@@ -226,6 +236,11 @@ void Network::OnBoot(uint8_t id, NmtState st, char es, const std::string &what) 
 void Network::OnConfig(uint8_t id) noexcept
 {
     NodeState *n = Find(id);
+    if (n && n->cfg->restore_defaults && !n->restored)
+    {
+        Defer([this, id] { HandleRestore(id); });
+        return;
+    }
     if (!n || n->concise.size() <= 4)
     {
         ConfigResult(id, {});
@@ -238,6 +253,12 @@ void Network::OnHeartbeat(uint8_t id, bool occurred) noexcept
 {
     if (occurred)
         HandleLoss(id, ProblemKind::Heartbeat);
+}
+
+void Network::OnNodeGuarding(uint8_t id, bool occurred) noexcept
+{
+    if (occurred)
+        HandleLoss(id, ProblemKind::Guarding);
 }
 
 void Network::OnState(uint8_t id, NmtState st) noexcept
@@ -268,8 +289,22 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
 {
     (void)st;
     NodeState *n = Find(id);
-    if (!n || n->stopped)
+    if (!n || n->stopped || n->held)
         return;
+    n->booting = false;
+    if (n->restore_pending)
+    {
+        // The boot ended so that the node can reset with its defaults; it boots again after.
+        n->restore_pending = false;
+        n->heard           = true;
+        return;
+    }
+    if (!n->heard && (es == 'B' || es == 'K'))
+    {
+        // Looked for and not there (no answer, or no heartbeat): look again.
+        n->next_poll = clock::now() + kPollEvery;
+        return;
+    }
     n->heard = true;
     if (es == 0 || es == 'L')
     {
@@ -283,6 +318,37 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
         n->has_abort     = false;
         status_.boot_ok(id);
         SetUp(*n, true);
+        if (!n->cfg->configure)
+        {
+            // Lely boots such a node without starting it.
+            Defer(
+                [this, id]
+                {
+                    try
+                    {
+                        Command(NmtCommand::START, id);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        log_warn("node %u: cannot send NMT start: %s", id, e.what());
+                    }
+                });
+        }
+        if (cfg_.on_node_error == OnNodeError::Stop)
+        {
+            // Out of the network list for Lely (bit 0 of 0x1F81), so that an error of the node
+            // does not make Lely reset and boot it again; the plugin stops it instead.
+            uint32_t value = slave_assignment(*n->cfg) & ~0x01u;
+            Defer(
+                [this, id, value]
+                {
+                    std::error_code ec;
+                    Write<uint32_t>(0x1F81, id, value, ec);
+                    if (ec)
+                        log_warn("node %u: cannot keep the master from restarting it: %s", id,
+                                 ec.message().c_str());
+                });
+        }
         return;
     }
     Problem p    = BootProblem(*n, es, what);
@@ -354,20 +420,116 @@ void Network::HandleConfig(uint8_t id)
     }
 }
 
+void Network::HandleRestore(uint8_t id)
+{
+    NodeState *n = Find(id);
+    if (!n)
+        return;
+    const uint8_t sub = static_cast<uint8_t>(n->cfg->restore_defaults);
+    auto con          = [this, sub](uint8_t id, uint16_t idx, uint8_t subidx, std::error_code ec)
+    {
+        NodeState *n = Find(id);
+        if (!n)
+            return;
+        if (ec)
+        {
+            log_error("%s: restoring the defaults (0x1011:%u) failed: %s", n->cfg->label().c_str(),
+                      sub, ec.message().c_str());
+            uint32_t code       = ec.category() == lely::canopen::SdoCategory()
+                                      ? static_cast<uint32_t>(ec.value())
+                                      : 0x08000000u;
+            n->has_abort        = true;
+            n->abort            = Problem();
+            n->abort.kind       = ProblemKind::SdoAbort;
+            n->abort.index      = idx;
+            n->abort.subindex   = subidx;
+            n->abort.abort_code = code;
+            status_.sdo_abort(id, idx, subidx, code);
+            std::lock_guard<lely::util::BasicLockable> lock(*this);
+            ConfigResult(id, ec);
+            return;
+        }
+        log_info("%s: defaults restored (0x1011:%u); resetting the node", n->cfg->label().c_str(),
+                 sub);
+        n->restored        = true;
+        n->restore_pending = true;
+        {
+            // Ends this boot without a failure; the node boots again after its reset.
+            std::lock_guard<lely::util::BasicLockable> lock(*this);
+            ConfigResult(id, std::make_error_code(std::errc::operation_canceled));
+        }
+        try
+        {
+            // Communication objects take effect at a communication reset, the rest at a reset
+            // of the node (CiA 301).
+            Command(sub == 2 ? NmtCommand::RESET_COMM : NmtCommand::RESET_NODE, id);
+        }
+        catch (const std::exception &e)
+        {
+            log_warn("%s: cannot reset the node after restoring its defaults: %s",
+                     n->cfg->label().c_str(), e.what());
+        }
+    };
+    std::error_code ec;
+    try
+    {
+        SubmitWrite(exec_, id, 0x1011, sub, uint32_t{kRestoreSignature}, con,
+                    std::chrono::milliseconds(cfg_.sdo_timeout_ms), ec);
+    }
+    catch (const std::exception &e)
+    {
+        log_error("%s: cannot restore the defaults: %s", n->cfg->label().c_str(), e.what());
+        ec = std::make_error_code(std::errc::io_error);
+    }
+    if (ec)
+    {
+        std::lock_guard<lely::util::BasicLockable> lock(*this);
+        ConfigResult(id, ec);
+    }
+}
+
 void Network::HandleLoss(uint8_t id, ProblemKind kind)
 {
     NodeState *n = Find(id);
-    if (!n || !n->up || n->stopped)
+    if (!n || !n->up || n->stopped || n->held)
         return;
-    const char *why = kind == ProblemKind::Heartbeat ? "heartbeat timeout" : "node reset";
-    log_warn("%s lost (%s); %s its inputs and booting it again", n->cfg->label().c_str(), why,
-             n->cfg->on_loss == OnLoss::Zero ? "zeroing" : "holding");
+    const char *why = kind == ProblemKind::Heartbeat  ? "heartbeat timeout"
+                      : kind == ProblemKind::Guarding ? "node guarding timeout"
+                                                      : "node reset";
+    const bool stop = cfg_.on_node_error == OnNodeError::Stop;
+    log_warn("%s lost (%s); %s its inputs and %s", n->cfg->label().c_str(), why,
+             n->cfg->on_loss == OnLoss::Zero ? "zeroing" : "holding",
+             stop ? "stopping it until the next PLC start" : "booting it again");
     n->last_problem = why;
+    n->restored     = false;
     Problem p;
     p.kind = kind;
     status_.lost(id, p);
     SetUp(*n, false);
-    ScheduleRetry(*n);
+    if (!stop)
+    {
+        ScheduleRetry(*n);
+        return;
+    }
+    n->held = true;
+    status_.held(id);
+    StopHeld(id);
+}
+
+void Network::StopHeld(uint8_t id)
+{
+    Defer(
+        [this, id]
+        {
+            try
+            {
+                Command(NmtCommand::STOP, id);
+            }
+            catch (const std::exception &e)
+            {
+                log_warn("node %u: cannot send NMT stop: %s", id, e.what());
+            }
+        });
 }
 
 void Network::HandleState(uint8_t id, NmtState st)
@@ -391,11 +553,20 @@ void Network::HandleState(uint8_t id, NmtState st)
         status_.set_nmt(id, NmtSeen::Unknown);
         break;
     }
+    if (n->held && st == NmtState::BOOTUP)
+    {
+        // A held node that restarted (power cycle, new session) is stopped again.
+        StopHeld(id);
+        return;
+    }
     if (!n->up)
     {
         // A boot-up message starts Lely's boot of the node.
-        if (st == NmtState::BOOTUP && !n->stopped)
+        if (st == NmtState::BOOTUP && !n->stopped && !n->held)
+        {
+            n->booting = true;
             status_.set_state(id, NodeRun::Booting);
+        }
         return;
     }
     if (st == NmtState::BOOTUP)
@@ -615,27 +786,111 @@ void Network::OnTick()
     for (auto &it : nodes_)
     {
         NodeState &n = it.second;
-        if (!n.heard && !n.silent_logged && now - started_ >= kSilentAfter)
+        if (!n.heard && !n.silent_logged &&
+            now - started_ >= std::chrono::milliseconds(cfg_.boot_timeout_ms))
         {
-            // Lely waits for an optional node that never answers without reporting it.
+            // Lely waits for a node that never answers without reporting it.
             n.silent_logged = true;
             status_.silent(it.first);
-            log_warn("%s has not answered since the master started; check that it is powered, "
-                     "connected, set to node ID %u and to the bus bit rate",
-                     n.cfg->label().c_str(), it.first);
+            if (n.cfg->optional)
+                log_info("%s (optional) is absent; it is started when it answers",
+                         n.cfg->label().c_str());
+            else
+                log_warn("%s has not answered since the master started; check that it is "
+                         "powered, connected, set to node ID %u and to the bus bit rate",
+                         n.cfg->label().c_str(), it.first);
         }
-        if (!n.retry_pending || n.up || n.stopped || now < n.retry_at)
+        if (n.up || n.stopped || n.held || n.booting)
+            continue;
+        if (!n.retry_pending)
+        {
+            if (!n.heard && !n.polling && now >= n.next_poll)
+                Poll(n, static_cast<uint8_t>(it.first));
+            continue;
+        }
+        if (now < n.retry_at)
             continue;
         if (Boot(static_cast<uint8_t>(it.first)))
         {
             n.retry_pending = false;
+            n.booting       = true;
             status_.set_state(it.first, NodeRun::Booting);
         }
         else
             n.retry_at = now + kRetryMin; // a boot is already running
     }
+    if (cfg_.time_producer && now >= next_time_)
+    {
+        SendTime();
+        next_time_ += std::chrono::milliseconds(cfg_.time_period_ms);
+        if (next_time_ < now)
+            next_time_ = now + std::chrono::milliseconds(cfg_.time_period_ms);
+    }
     // A fallback only: each scan wakes the exchange itself.
     Exchange();
+}
+
+// Looks for a node that has not answered: a boot-up message missed while the master started (the
+// node was already running, or connected later) leaves Lely waiting for nothing. Once asked, Lely
+// keeps trying to boot an optional node about every second without reporting each attempt. A node
+// that Lely starts without checking it (not initialized, no heartbeat to wait for) is first asked
+// for 0x1000, so that an absent node is not taken as up.
+void Network::Poll(NodeState &node, uint8_t id)
+{
+    if (node.cfg->configure || node.cfg->supervision == Supervision::Heartbeat)
+    {
+        if (Boot(id))
+            node.booting = true;
+        else
+            node.next_poll = clock::now() + kPollEvery;
+        return;
+    }
+    node.polling = true;
+    try
+    {
+        SubmitRead<uint32_t>(
+            exec_, id, 0x1000, 0,
+            [this](uint8_t id, uint16_t, uint8_t, std::error_code ec, uint32_t)
+            {
+                NodeState *n = Find(id);
+                if (!n)
+                    return;
+                n->polling   = false;
+                n->next_poll = clock::now() + kPollEvery;
+                if (ec || !running_ || n->up || n->booting || n->held || n->retry_pending)
+                    return;
+                if (Boot(id))
+                    n->booting = true;
+            },
+            std::chrono::milliseconds(std::min<unsigned>(cfg_.sdo_timeout_ms, 500)));
+    }
+    catch (const std::exception &e)
+    {
+        node.polling   = false;
+        node.next_poll = clock::now() + kPollEvery;
+        log_debug("node %u: cannot look for it: %s", id, e.what());
+    }
+}
+
+// TIME (CiA 301 TIME_OF_DAY): milliseconds after midnight and days since 1 January 1984, UTC.
+void Network::SendTime()
+{
+    using namespace std::chrono;
+    const int64_t ms  = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+    const int64_t day = 86400000;
+    const int64_t days = ms / day - 5113; // 1970-01-01 to 1984-01-01
+    if (days < 0)
+        return;
+    const uint32_t tod = static_cast<uint32_t>(ms % day);
+    can_msg msg        = CAN_MSG_INIT;
+    msg.id             = cfg_.time_cob_id;
+    msg.len            = 6;
+    for (int i = 0; i < 4; ++i)
+        msg.data[i] = static_cast<uint8_t>(tod >> (8 * i));
+    msg.data[4] = static_cast<uint8_t>(days);
+    msg.data[5] = static_cast<uint8_t>(days >> 8);
+    std::lock_guard<lely::util::BasicLockable> lock(*this);
+    can_net_send(net(), &msg);
 }
 
 void Network::Exchange()

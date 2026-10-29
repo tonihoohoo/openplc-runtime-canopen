@@ -17,36 +17,60 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 ## What the master does
 
 - **Boot.** For every node, the NMT master checks the identity (0x1000, 0x1018 against the
-  configured values; 0 skips a value), writes the configuration SDOs in order, and starts the node.
-  A node that fails is booted again in the background with a growing delay (1 s up to 16 s); the
-  other nodes are not held back.
+  configured values; 0 skips a value), restores the node's defaults when `restore_defaults` is set,
+  writes the configuration SDOs in order, and starts the node. A node that fails is booted again in
+  the background with a growing delay (1 s up to 16 s); the other nodes are not held back.
+- **Restore defaults.** With `restore_defaults` n (1 all parameters, 2 communication, 3
+  application, 4-127 manufacturer specific), the master writes `load` to 0x1011 sub n after the
+  identity check, resets the node (reset communication for 2, reset node otherwise) so the
+  defaults take effect, waits for its boot-up, checks the identity again and then writes the
+  configuration SDOs. This happens once each time the node is brought up (PLC start, or a reboot
+  after the node was lost). Nothing is stored in the node: 0x1010 is never written.
+- **No initialization.** A node with `configure: false` is not checked and gets no SDO at all; the
+  master only starts it with NMT and supervises it. It must already use the PDO layout and timings
+  of the configuration.
+- **Missing nodes.** A node that has not booted is looked for again about every second, which also
+  finds a node that was connected later or whose boot-up message the master missed. A node not
+  booted `boot_timeout_ms` after the start is reported once: as not answering (a warning) when it is
+  mandatory, as absent (information) when it is `optional`. Mandatory and optional differ only in
+  that report: no node, mandatory or not, holds back the others.
 - **Exchange.** Each TPDO of a node is received into its `%I` locations; each RPDO of a node is
   sent from its `%Q` locations right after the PLC cycle that changed a value, and in full when the
   node comes up.
 - **SYNC.** `none`, `period` (Lely produces SYNC every `period_us`), or `plc_cycle` (the master
   sends the newest outputs and then one SYNC after each PLC cycle).
-- **Supervision.** With `heartbeat`, the master consumes the node's heartbeat. A timeout, or a
-  boot-up message from a running node, means the node is lost: its state reads 0, its inputs hold
-  their last values (`on_loss: hold`) or go to 0 (`on_loss: zero`), its outputs are no longer sent,
-  and it is booted again.
+- **Supervision.** With `heartbeat`, the master consumes the node's heartbeat; with `guarding`, the
+  master guards the node with remote frames on 0x700 + node ID every `guard_time_ms` and expects an
+  answer within `guard_time_ms` times `life_time_factor` (the node's own 0x100C and 0x100D are set
+  by SDOs in `sdo`). Node guarding needs a CAN controller and driver that handle remote frames; use
+  heartbeat when the node has it. A timeout, or a boot-up message from a running node, means the
+  node is lost: its state reads 0, its inputs hold their last values (`on_loss: hold`) or go to 0
+  (`on_loss: zero`), its outputs are no longer sent, and it is booted again
+  (`on_node_error: restart`), or sent NMT stop and left alone until the next PLC start
+  (`on_node_error: stop`); a new bus session in the same PLC run (after a lost link) stops it again
+  when it boots.
 - **Node state.** `state_location` (a `%IB`) reads the node's NMT state (CiA 301: 5 operational,
   127 pre-operational, 4 stopped) while it is up, and 0 while it is not.
 - **Receive timeout.** A TPDO with `receive_timeout_ms` is late when no frame of it arrives for that
   long while the node is operational. The master logs it once, holds or zeroes its inputs as
   `on_loss` says, and keeps the node running; the inputs follow again with the next frame.
-- **Emergencies.** The master consumes each node's EMCY messages (COB-ID 0x80 + node ID), logs them
-  (at most one line per node and second) and keeps the last ones in the status.
+- **Emergencies.** The master consumes each node's EMCY messages on its `emcy.cob_id` (default
+  0x80 + node ID), logs them (at most one line per node and second) and keeps the last ones in the
+  status. With `emcy.enabled: false` the node's emergencies are ignored.
+- **TIME.** With `time`, the master sends the TIME object (CiA 301 TIME_OF_DAY: milliseconds after
+  midnight and days since 1 January 1984, UTC, from the PLC's clock) on `time.cob_id` every
+  `time.period_ms` while the PLC runs.
 - **PLC stop.** The runtime zeroes `%Q` and runs one more cycle, so the nodes get zero outputs;
   then the master sends `on_plc_stop` to all nodes (`pre_operational`, the default, or `stopped`,
   or `none`) and closes the interface.
-- The master never writes 0x1010 (store parameters) or 0x1011 (restore defaults); the parser
-  refuses such SDOs.
+- The master never writes 0x1010 (store parameters), and writes 0x1011 (restore defaults) only
+  through `restore_defaults`; the parser refuses configuration SDOs to either.
 
 ## conf/canopen.json
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "networks": [
     {
       "name": "CANopen 1",
@@ -58,10 +82,17 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
       "priority": 90,
       "sync": { "mode": "plc_cycle" },
       "on_plc_stop": "pre_operational",
+      "boot_timeout_ms": 2000,
+      "on_node_error": "restart",
+      "time": { "cob_id": 256, "period_ms": 1000 },
       "nodes": [
         {
           "node_id": 2,
           "name": "io1",
+          "optional": false,
+          "configure": true,
+          "restore_defaults": 0,
+          "emcy": { "enabled": true, "cob_id": 130 },
           "identity": { "device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 0 },
           "supervision": { "type": "heartbeat", "consumer_ms": 300 },
           "on_loss": "hold",
@@ -96,7 +127,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 2. Version 1 files are refused; build the project again with a matching editor. |
+| `version` | Format version, 3. Older files are refused; build the project again with a matching editor. |
 | `interface` | SocketCAN interface, unique per network. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
 | `master_node_id` | 1-127, default 127. |
@@ -105,8 +136,15 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 | `sdo_timeout_ms` | Timeout of each configuration SDO, default 1000. |
 | `sync.mode`, `sync.period_us` | `none`, `period` (with `period_us`), `plc_cycle`. SYNC uses COB-ID 0x080. |
 | `on_plc_stop` | NMT command for all nodes on a PLC stop. |
+| `boot_timeout_ms` | 100-60000, default 2000: a node not booted this long after the start is reported as not answering (mandatory) or absent (optional). |
+| `on_node_error` | `restart` (default): boot a lost node again; `stop`: send it NMT stop and leave it until the next PLC start. |
+| `time` | Absent or `null` for no TIME; else `cob_id` (default 256, 0x100) and `period_ms` (10-65535, default 1000). |
+| `optional` | `true`: an absent node is not an error. Default `false`. |
+| `configure` | `false`: no identity check, restore or configuration SDOs (`sdo` must be empty); the node is only started. Default `true`. |
+| `restore_defaults` | 0x1011 sub-index to restore before the configuration, 1-127; 0 or absent for none. Not with `configure: false`. |
+| `emcy` | `enabled` (default `true`) and `cob_id` (11-bit, default 0x80 + node ID) of the node's emergency messages. |
 | `identity` | Expected 0x1000 and 0x1018 sub 1-3 values; a missing or 0 value is not checked. |
-| `supervision` | `{"type": "none"}` or `{"type": "heartbeat", "consumer_ms": n}`. The node's own heartbeat producer (0x1017) is set by an SDO in `sdo`. |
+| `supervision` | `{"type": "none"}`, `{"type": "heartbeat", "consumer_ms": n}` or `{"type": "guarding", "guard_time_ms": n, "life_time_factor": n}` (1-65535 and 1-255). The node's own heartbeat producer (0x1017) or guard time and life time factor (0x100C, 0x100D) are set by SDOs in `sdo`. |
 | `sdo` | Configuration SDO downloads, in order: `data` is the value's bytes in hexadecimal, least significant byte first, 1 to 1024 bytes. Typically the node's PDO communication and mapping parameters and its heartbeat producer time. |
 | `tpdos` / `rpdos` | The node's TPDOs (received by the master, `%I` locations) and RPDOs (sent by the master, `%Q` locations): PDO number on the node, its 11-bit COB-ID, and the mapped entries in mapping order. |
 | `receive_timeout_ms` | TPDOs only: report the PDO late after this many milliseconds without a frame, 1-65535; absent or 0 for no timeout. It is the master RPDO's event timer (0x1400 + n sub 5). |
@@ -114,7 +152,9 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 
 The plugin refuses the whole file, with one log line per problem, when anything is wrong: an
 unknown version, a duplicate interface or node ID, a node ID equal to the master's, a non-standard
-bit rate, a reserved or duplicate COB-ID, a PDO over 64 bits, a type that does not fit its
+bit rate, a reserved or duplicate COB-ID (PDOs, emergencies and TIME), a configuration SDO to
+0x1010 or 0x1011, restore defaults or configuration SDOs on a node with `configure: false`, a PDO
+over 64 bits, a type that does not fit its
 location, a `%Q` location in a TPDO or a `%I` location in an RPDO, two entries on the same `%I`
 location, or a location outside the runtime's I/O image. Two entries on the same `%Q` location are
 a warning.
@@ -140,9 +180,9 @@ only when that feature is listed.
     "bus": {"state": "error_active", "tx_errors": 0, "rx_errors": 0, "bus_off_count": 0,
             "rx_frames": 1520, "tx_frames": 1488, "rx_dropped": 0, "load_percent": 3.1,
             "link_resets": 0},
-    "all_nodes_up": false,
+    "all_mandatory_up": false, "all_optional_up": true,
     "nodes": [{
-      "node_id": 3, "name": "io2", "state": "failed", "nmt": "pre_operational",
+      "node_id": 3, "name": "io2", "optional": false, "state": "failed", "nmt": "pre_operational",
       "since": 1793299990000, "boot_attempts": 2, "losses": 0, "warning": false,
       "problem": {"kind": "identity", "field": "product_code", "expected": 66, "found": 67,
                   "boot_status": "M"},
@@ -160,13 +200,15 @@ only when that feature is listed.
 | `now`, `since`, `time` | Wall-clock milliseconds since the epoch. |
 | `bus.state` | `error_active`, `error_warning`, `error_passive`, `bus_off`, `stopped`, `down` (interface down), `missing` (no such interface), `unknown`. A vcan link is `error_active`. |
 | `bus.*` | Error counters, bus-off count, frame counts since the PLC started and an estimated bus load in percent (standard frames, without bit stuffing). Each is left out when the driver does not report it. `link_resets` counts the times the master reset a CAN link after a bus-off. |
-| `nodes[].state` | `waiting` (master started, not heard yet), `silent` (not heard 5 s after the start), `booting`, `failed` (the last boot failed; retried in the background), `operational`, `lost` (retried in the background), `stopped` (PLC stop). |
+| `all_mandatory_up`, `all_optional_up` | Every mandatory (optional) node is operational; `true` when there is none. |
+| `nodes[].state` | `waiting` (master started, not heard yet), `silent` (mandatory, not booted `boot_timeout_ms` after the start), `absent` (optional, not booted by then), `booting` (also while it restores its defaults), `failed` (the last boot failed; retried in the background), `operational`, `lost` (retried in the background unless `held`), `stopped` (PLC stop). |
+| `nodes[].held` | Present and `true` when the node was lost with `on_node_error: stop` and stays stopped until the next PLC start. |
 | `nodes[].nmt` | Last NMT state seen: `pre_operational`, `operational`, `stopped`, `unknown`. |
-| `nodes[].problem` | Why the node is not running, or `null`: `no_response`, `identity` (with `field`, `expected` and the `found` value read from the node), `sdo_abort` (a configuration SDO refused, with `index`, `subindex` and `abort_code`), `heartbeat`, `reset`, `boot_error` (with the stack's `text`). `boot_status` is the CiA 302-2 boot error letter. |
+| `nodes[].problem` | Why the node is not running, or `null`: `no_response`, `identity` (with `field`, `expected` and the `found` value read from the node), `sdo_abort` (a configuration SDO or the restore write refused, with `index`, `subindex` and `abort_code`), `heartbeat`, `guarding`, `reset`, `boot_error` (with the stack's `text`). `boot_status` is the CiA 302-2 boot error letter. |
 | `nodes[].warning` | An operational node with an active emergency or a late PDO. |
 | `nodes[].emcy` | The last 8 emergencies, newest first; an emergency with code 0 (error reset) marks them inactive. |
 | `nodes[].late_pdos` | TPDOs with a receive timeout whose frames are late. |
-| `events` | The last 64 events of the network, newest first: `boot_ok`, `boot_failed`, `silent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort`, `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link after a bus-off, with `outcome` `done`, `not_permitted` or `failed`). |
+| `events` | The last 64 events of the network, newest first: `boot_ok`, `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort`, `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link after a bus-off, with `outcome` `done`, `not_permitted` or `failed`). |
 
 Counters and lists start again when the PLC starts. The status thread never blocks the PLC scan
 or the bus: each answer is built from a copy taken under a short lock.

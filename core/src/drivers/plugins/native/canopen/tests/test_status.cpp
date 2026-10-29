@@ -54,7 +54,7 @@ void test_states_and_reasons()
     NetworkConfig net = two_nodes();
     NetworkStatus st(net);
     NetworkSnapshot s = st.snapshot();
-    CHECK(node(s, 2).state == NodeRun::Waiting && !s.all_nodes_up());
+    CHECK(node(s, 2).state == NodeRun::Waiting && !s.all_up(false) && s.all_up(true));
 
     st.boot_ok(2);
     Problem p;
@@ -157,7 +157,8 @@ void test_json()
     CHECK(cJSON_GetObjectItem(prob, "abort_code")->valuedouble == 0x06090030);
     CHECK(cJSON_IsNull(
         cJSON_GetObjectItem(cJSON_GetArrayItem(cJSON_GetObjectItem(n0, "nodes"), 0), "problem")));
-    CHECK(cJSON_IsFalse(cJSON_GetObjectItem(n0, "all_nodes_up")));
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItem(n0, "all_mandatory_up")));
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItem(n0, "all_optional_up")));
     const cJSON *ev = cJSON_GetArrayItem(cJSON_GetObjectItem(n0, "events"), 0);
     CHECK(std::string(cJSON_GetObjectItem(ev, "kind")->valuestring) == "bus_state");
     CHECK(cJSON_GetObjectItem(bus, "link_resets") == nullptr);
@@ -187,6 +188,35 @@ void test_json()
     ev = cJSON_GetArrayItem(events, 2);
     CHECK(std::string(cJSON_GetObjectItem(ev, "outcome")->valuestring) == "done");
     cJSON_Delete(root);
+}
+
+void test_optional_and_held()
+{
+    NetworkConfig net     = two_nodes();
+    net.nodes[1].optional = true;
+    NetworkStatus st(net);
+    st.silent(2);
+    st.silent(3);
+    NetworkSnapshot s = st.snapshot();
+    CHECK(node(s, 2).state == NodeRun::Silent && node(s, 3).state == NodeRun::Absent);
+    CHECK(s.events.front().kind == EventKind::Absent);
+    st.boot_ok(2);
+    s = st.snapshot();
+    CHECK(s.all_up(false) && !s.all_up(true));
+
+    Problem g;
+    g.kind = ProblemKind::Guarding;
+    st.lost(2, g);
+    st.held(2);
+    std::string text = status_json({st.snapshot()}, 1);
+    CHECK(text.find("\"kind\":\"guarding\"") != std::string::npos);
+    CHECK(text.find("\"held\":true") != std::string::npos);
+    CHECK(text.find("\"state\":\"absent\"") != std::string::npos);
+    CHECK(text.find("\"optional\":true") != std::string::npos);
+    // A new session of the same PLC run keeps the hold and the lost state.
+    st.begin_session();
+    CHECK(node(st.snapshot(), 2).held && st.is_held(2));
+    CHECK(node(st.snapshot(), 2).state == NodeRun::Lost);
 }
 
 void test_requests()
@@ -289,6 +319,7 @@ void test_link_parsing_and_monitor()
 int main()
 {
     test_states_and_reasons();
+    test_optional_and_held();
     test_emcy_and_late();
     test_event_ring();
     test_json();

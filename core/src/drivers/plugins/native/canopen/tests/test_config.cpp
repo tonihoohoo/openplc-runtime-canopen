@@ -14,7 +14,7 @@ namespace
 {
 
 const char *kValid = R"({
-  "version": 2,
+  "version": 3,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 500000,
     "heartbeat_producer_ms": 100,
@@ -103,6 +103,59 @@ void test_valid()
     CHECK(n.tpdos[0].entries[1].type == CoType::INTEGER16);
     CHECK(n.rpdos.size() == 1 && n.rpdos[0].entries[0].location.str() == "%QB0");
     CHECK(n.tpdos[0].receive_timeout_ms == 0);
+    // Defaults of the node startup and supervision options.
+    CHECK(!n.optional && n.configure && n.restore_defaults == 0);
+    CHECK(n.emcy_enabled && n.emcy_cob_id == 0x82);
+    CHECK(net.boot_timeout_ms == 2000 && net.on_node_error == OnNodeError::Restart);
+    CHECK(!net.time_producer);
+}
+
+void test_node_options()
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    std::string text =
+        with(with(kValid, "\"node_id\": 2, \"name\": \"io1\",",
+                  "\"node_id\": 2, \"name\": \"io1\", \"optional\": true, "
+                  "\"restore_defaults\": 2, \"emcy\": {\"enabled\": true, \"cob_id\": 242},"),
+             "\"supervision\": {\"type\": \"heartbeat\", \"consumer_ms\": 300}",
+             "\"supervision\": {\"type\": \"guarding\", \"guard_time_ms\": 100, "
+             "\"life_time_factor\": 3}");
+    text = with(text, "\"bitrate\": 500000,",
+                "\"bitrate\": 500000, \"boot_timeout_ms\": 5000, \"on_node_error\": \"stop\", "
+                "\"time\": {\"cob_id\": 256, \"period_ms\": 500},");
+    CHECK(parse_config(text, cfg, errors));
+    CHECK(errors.empty());
+    const NetworkConfig &net = cfg.networks[0];
+    const NodeConfig &n      = net.nodes[0];
+    CHECK(n.optional && n.restore_defaults == 2 && n.emcy_cob_id == 0xF2);
+    CHECK(n.supervision == Supervision::Guarding && n.guard_time_ms == 100 &&
+          n.life_time_factor == 3);
+    CHECK(net.boot_timeout_ms == 5000 && net.on_node_error == OnNodeError::Stop);
+    CHECK(net.time_producer && net.time_cob_id == 0x100 && net.time_period_ms == 500);
+
+    // Not initialized: no restore and no configuration SDOs.
+    std::string no_init = with(kValid, "\"node_id\": 2, \"name\": \"io1\",",
+                               "\"node_id\": 2, \"name\": \"io1\", \"configure\": false, "
+                               "\"restore_defaults\": 1,");
+    CHECK(refused_with(no_init, "restore defaults needs"));
+    CHECK(refused_with(no_init, "has configuration SDOs but is not initialized"));
+    CHECK(refused_with(with(kValid, "\"type\": \"heartbeat\", \"consumer_ms\": 300",
+                            "\"type\": \"guarding\", \"guard_time_ms\": 0, "
+                            "\"life_time_factor\": 3"),
+                       "guard_time_ms"));
+    CHECK(refused_with(with(kValid, "\"node_id\": 2, \"name\": \"io1\",",
+                            "\"node_id\": 2, \"name\": \"io1\", \"emcy\": {\"cob_id\": 386},"),
+                       "same COB-ID"));
+    CHECK(refused_with(
+        with(kValid, "\"bitrate\": 500000,", "\"bitrate\": 500000, \"on_node_error\": \"reboot\","),
+        "on_node_error"));
+    CHECK(refused_with(
+        with(kValid, "\"bitrate\": 500000,", "\"bitrate\": 500000, \"time\": {\"cob_id\": 1793},"),
+        "reserved"));
+    CHECK(refused_with(with(kValid, "\"node_id\": 2, \"name\": \"io1\",",
+                            "\"node_id\": 2, \"name\": \"io1\", \"optional\": 1,"),
+                       "true or false"));
 }
 
 void test_receive_timeout()
@@ -119,7 +172,7 @@ void test_receive_timeout()
 void test_refusals()
 {
     CHECK(refused_with("{", "not valid JSON"));
-    CHECK(refused_with(with(kValid, "\"version\": 2", "\"version\": 1"), "version 1"));
+    CHECK(refused_with(with(kValid, "\"version\": 3", "\"version\": 2"), "version 2"));
     CHECK(refused_with(with(kValid, "\"tpdos\": [{\"number\": 1,",
                             "\"tpdos\": [{\"number\": 1, \"receive_timeout_ms\": 70000,"),
                        "receive_timeout_ms"));
@@ -188,6 +241,7 @@ int main()
 {
     test_valid();
     test_refusals();
+    test_node_options();
     test_receive_timeout();
     test_output_overlap_warns();
     test_priority();
