@@ -13,6 +13,8 @@
 // once per PLC cycle, the outputs go first and then SYNC.
 // Node loss (heartbeat timeout or a boot-up message): the node's inputs hold or go to zero, its
 // PDOs stop, its state reads 0, and it is booted again.
+// A received PDO with a receive timeout that is late has its inputs held or zeroed in the same
+// way; the node keeps running. Everything seen is also recorded in the network's status.
 //
 // Derived in design from canworks ec7fd59d, plugin/src/canopen/network.h.
 
@@ -33,6 +35,7 @@
 #include "config.h"
 #include "master_dcf.h"
 #include "process_image.h"
+#include "status.h"
 
 namespace canopen_plugin
 {
@@ -46,7 +49,8 @@ class Network : public lely::canopen::BasicMaster
   public:
     Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &timer,
             lely::io::TimerBase &tick, lely::io::CanChannelBase &chan, const std::string &dcf_path,
-            const NetworkConfig &cfg, const MasterLayout &layout, ProcessImage &image);
+            const NetworkConfig &cfg, const MasterLayout &layout, ProcessImage &image,
+            NetworkStatus &status);
     ~Network() override;
 
     // Resets the master, which boots every node, and starts the periodic work.
@@ -90,10 +94,12 @@ class Network : public lely::canopen::BasicMaster
         size_t slot           = 0;
         bool up               = false;
         bool stopped          = false; // StopNodes ran
-        bool heard            = false; // a boot attempt has reported back
+        bool heard            = false; // the node or a boot attempt has reported back
         bool silent_logged    = false;
-        uint8_t state         = 0;
-        bool retry_pending    = false;
+        bool has_abort        = false; // a configuration SDO was refused in this boot
+        Problem abort;
+        uint8_t state      = 0;
+        bool retry_pending = false;
         clock::time_point retry_at{};
         std::chrono::milliseconds backoff{kRetryMin};
         std::string last_problem;
@@ -107,10 +113,13 @@ class Network : public lely::canopen::BasicMaster
 
     void HandleBoot(uint8_t id, lely::canopen::NmtState st, char es, const std::string &what);
     void HandleConfig(uint8_t id);
-    void HandleLoss(uint8_t id, const char *why);
+    void HandleLoss(uint8_t id, ProblemKind why);
     void HandleState(uint8_t id, lely::canopen::NmtState st);
     void HandleRpdo(int num, const uint8_t *data, std::size_t n);
-    void HandleEmcy(uint8_t id, uint16_t eec, uint8_t er);
+    void HandleEmcy(uint8_t id, uint16_t eec, uint8_t er, const uint8_t msef[5]);
+    void ReadFoundIdentity(uint8_t id, IdentityField field);
+    Problem BootProblem(NodeState &node, char es, const std::string &what);
+    void ZeroPdoInputs(const MasterPdo &m);
     void HandleRpdoError(int num, uint16_t eec);
     void SetUp(NodeState &node, bool up);
     void SetState(NodeState &node, uint8_t state);
@@ -143,6 +152,7 @@ class Network : public lely::canopen::BasicMaster
     const NetworkConfig &cfg_;
     const MasterLayout &layout_;
     ProcessImage &image_;
+    NetworkStatus &status_;
     std::map<unsigned, NodeState> nodes_;
     std::vector<uint64_t> last_out_;
     std::vector<bool> out_valid_;

@@ -501,6 +501,17 @@ bool Parser::parse_pdo(const cJSON *j, const std::string &where, IecArea area, P
         if (const char *what = reserved_cob_id(pdo.cob_id))
             error(w, "COB-ID " + hex(pdo.cob_id, 3) + " is reserved for " + what);
     }
+    if (area == IecArea::Input)
+    {
+        static const uint64_t kNoTimeout = 0;
+        uint64_t timeout                 = 0;
+        if (get_uint(j, "receive_timeout_ms", w, 0, 65535, timeout, &kNoTimeout))
+            pdo.receive_timeout_ms = static_cast<unsigned>(timeout);
+    }
+    else if (cJSON_GetObjectItemCaseSensitive(j, "receive_timeout_ms"))
+    {
+        error(w, "\"receive_timeout_ms\" is only for a node's TPDOs");
+    }
     const cJSON *entries = get_array(j, "entries", w, true);
     if (entries)
     {

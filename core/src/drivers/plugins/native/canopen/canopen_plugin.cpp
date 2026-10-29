@@ -5,10 +5,11 @@
 //   init:        copies the runtime arguments and routes the log; nothing else, since it runs at
 //                power-on even when the plugin is disabled
 //   start_loop:  loads conf/canopen.json, builds each network's master DCF and process image,
-//                and starts one bus thread per network
+//                starts one bus thread per network and the status socket
 //   cycle_start: writes the newest inputs to %I through the journal
 //   cycle_end:   reads %Q under the image lock and hands it to the bus threads
-//   stop_loop:   sends each network's NMT command for a PLC stop and joins the bus threads
+//   stop_loop:   closes the status socket, sends each network's NMT command for a PLC stop and
+//                joins the bus threads
 // No exception leaves an entry point: the runtime calls them as C functions.
 
 #include <atomic>
@@ -24,6 +25,8 @@
 #include "master_dcf.h"
 #include "plugin_types.h"
 #include "process_image.h"
+#include "status.h"
+#include "status_server.h"
 
 using namespace canopen_plugin;
 
@@ -37,8 +40,19 @@ struct Running
     Config cfg;
     std::vector<MasterLayout> layouts;
     std::vector<std::unique_ptr<ProcessImage>> images;
+    std::vector<std::unique_ptr<NetworkStatus>> statuses;
     std::vector<std::unique_ptr<Bus>> buses;
+    std::unique_ptr<StatusServer> server;
 };
+
+std::string status_answer(const Running &run)
+{
+    std::vector<NetworkSnapshot> nets;
+    nets.reserve(run.statuses.size());
+    for (const auto &s : run.statuses)
+        nets.push_back(s->snapshot());
+    return status_json(nets, wall_ms());
+}
 
 plugin_runtime_args_t g_args;
 bool g_have_args = false;
@@ -144,11 +158,23 @@ int do_start_loop()
                       dcf.c_str());
             return -1;
         }
-        run->buses.emplace_back(new Bus(net, run->layouts[i], *run->images[i], dcf));
+        run->statuses.emplace_back(new NetworkStatus(net));
+        run->buses.emplace_back(
+            new Bus(net, run->layouts[i], *run->images[i], *run->statuses.back(), dcf));
     }
     prepare_wake_signal();
     for (auto &bus : run->buses)
         bus->start();
+    const Running *r = run.get();
+    run->server.reset(new StatusServer(
+        kStatusSocketPath, [r](const std::string &request)
+        { return handle_status_request(request, [r] { return status_answer(*r); }); }));
+    std::string problem;
+    if (!run->server->start(problem))
+    {
+        log_warn("no status socket (%s); the network runs without it", problem.c_str());
+        run->server.reset();
+    }
     g_run = std::move(run);
     g_active.store(true, std::memory_order_release);
     log_info("CANopen master running, %zu network(s)", count);
@@ -160,6 +186,8 @@ void do_stop_loop()
     if (!g_run)
         return;
     g_active.store(false, std::memory_order_release);
+    if (g_run->server)
+        g_run->server->stop();
     for (auto &bus : g_run->buses)
         bus->stop();
     g_run.reset();

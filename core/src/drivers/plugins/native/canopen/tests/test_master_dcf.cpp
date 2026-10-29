@@ -20,7 +20,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 1,
+  "version": 2,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 250000, "master_node_id": 1,
     "heartbeat_producer_ms": 200,
@@ -36,7 +36,7 @@ const char *kConfig = R"({
        "rpdos": [{"number": 1, "cob_id": 514, "entries": [
          {"index": 25088, "subindex": 1, "type": "UNSIGNED8", "location": "%QB0"}]}]},
       {"node_id": 5,
-       "tpdos": [{"number": 2, "cob_id": 645, "entries": [
+       "tpdos": [{"number": 2, "cob_id": 645, "receive_timeout_ms": 250, "entries": [
          {"index": 24832, "subindex": 1, "type": "BOOLEAN", "location": "%IX4.0"},
          {"index": 24832, "subindex": 2, "type": "REAL32", "location": "%ID2"}]}],
        "rpdos": [{"number": 1, "cob_id": 517, "entries": [
@@ -80,8 +80,12 @@ void test_layout_and_dcf()
     CHECK(co_dev_get_val_u16(dev, 0x1017, 0) == 200);
     CHECK(co_dev_get_val_u8(dev, 0x1016, 0) == 1);
     CHECK(u32(dev, 0x1016, 1) == (2u << 16 | 500));
+    CHECK(u32(dev, 0x1028, 2) == 0x82 && u32(dev, 0x1028, 5) == 0x85);
     // Node TPDOs are the master's RPDOs; node RPDOs its TPDOs.
     CHECK(u32(dev, 0x1400, 1) == 0x182 && u32(dev, 0x1401, 1) == 0x285);
+    // A receive timeout is the master RPDO's event timer; without one there is no sub 5.
+    CHECK(co_dev_get_val_u8(dev, 0x1400, 0) == 2 && co_dev_get_val_u8(dev, 0x1401, 0) == 5);
+    CHECK(co_dev_get_val_u16(dev, 0x1401, 5) == 250);
     CHECK(co_dev_get_val_u8(dev, 0x1600, 0) == 2);
     CHECK(u32(dev, 0x1600, 1) == 0x20000008 && u32(dev, 0x1600, 2) == 0x20010010);
     CHECK(u32(dev, 0x1601, 1) == 0x20020001 && u32(dev, 0x1601, 2) == 0x20030020);

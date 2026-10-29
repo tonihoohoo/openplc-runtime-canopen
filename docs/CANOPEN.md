@@ -31,6 +31,11 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
   and it is booted again.
 - **Node state.** `state_location` (a `%IB`) reads the node's NMT state (CiA 301: 5 operational,
   127 pre-operational, 4 stopped) while it is up, and 0 while it is not.
+- **Receive timeout.** A TPDO with `receive_timeout_ms` is late when no frame of it arrives for that
+  long while the node is operational. The master logs it once, holds or zeroes its inputs as
+  `on_loss` says, and keeps the node running; the inputs follow again with the next frame.
+- **Emergencies.** The master consumes each node's EMCY messages (COB-ID 0x80 + node ID), logs them
+  (at most one line per node and second) and keeps the last ones in the status.
 - **PLC stop.** The runtime zeroes `%Q` and runs one more cycle, so the nodes get zero outputs;
   then the master sends `on_plc_stop` to all nodes (`pre_operational`, the default, or `stopped`,
   or `none`) and closes the interface.
@@ -41,7 +46,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "networks": [
     {
       "name": "CANopen 1",
@@ -66,6 +71,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
             {
               "number": 1,
               "cob_id": 386,
+              "receive_timeout_ms": 250,
               "entries": [
                 { "index": 24576, "subindex": 1, "type": "UNSIGNED8", "location": "%IB0" },
                 { "index": 25601, "subindex": 1, "type": "INTEGER16", "location": "%IW0" }
@@ -90,7 +96,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 1. |
+| `version` | Format version, 2. Version 1 files are refused; build the project again with a matching editor. |
 | `interface` | SocketCAN interface, unique per network. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
 | `master_node_id` | 1-127, default 127. |
@@ -103,6 +109,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 | `supervision` | `{"type": "none"}` or `{"type": "heartbeat", "consumer_ms": n}`. The node's own heartbeat producer (0x1017) is set by an SDO in `sdo`. |
 | `sdo` | Configuration SDO downloads, in order: `data` is the value's bytes in hexadecimal, least significant byte first, 1 to 1024 bytes. Typically the node's PDO communication and mapping parameters and its heartbeat producer time. |
 | `tpdos` / `rpdos` | The node's TPDOs (received by the master, `%I` locations) and RPDOs (sent by the master, `%Q` locations): PDO number on the node, its 11-bit COB-ID, and the mapped entries in mapping order. |
+| `receive_timeout_ms` | TPDOs only: report the PDO late after this many milliseconds without a frame, 1-65535; absent or 0 for no timeout. It is the master RPDO's event timer (0x1400 + n sub 5). |
 | `type` | `BOOLEAN`, `INTEGER8/16/32/64`, `UNSIGNED8/16/32/64`, `REAL32`, `REAL64`. Its size must equal the location's (`BOOLEAN` `%IX/%QX`, 8 bits `B`, 16 `W`, 32 `D`, 64 `L`). |
 
 The plugin refuses the whole file, with one log line per problem, when anything is wrong: an
@@ -111,6 +118,57 @@ bit rate, a reserved or duplicate COB-ID, a PDO over 64 bits, a type that does n
 location, a `%Q` location in a TPDO or a `%I` location in an RPDO, two entries on the same `%I`
 location, or a location outside the runtime's I/O image. Two entries on the same `%Q` location are
 a warning.
+
+## Status
+
+While a CANopen program runs, the plugin keeps a live status of every network and serves it on
+the Unix socket `/run/runtime/canopen.socket` (mode 0600). A client sends one JSON request per line
+and gets one JSON answer per line; `{"op": "status"}` returns the status, any other op
+`{"error": "unknown op"}`. The socket is there only while the PLC runs CANopen. The plugin needs
+nothing else for it, so the socket works the same in a runtime without the web route below.
+
+The web server returns the same answer at `GET /api/canopen/status` (login required), or
+`{"active": false}` when CANopen is not running, and lists `"features": ["status"]` in the
+`canopen` entry of `/api/capabilities`. The OpenPLC Editor shows the status on the CANopen device
+only when that feature is listed.
+
+```json
+{
+  "version": 1, "active": true, "now": 1793300000000,
+  "networks": [{
+    "name": "CANopen 1", "interface": "can0",
+    "bus": {"state": "error_active", "tx_errors": 0, "rx_errors": 0, "bus_off_count": 0,
+            "rx_frames": 1520, "tx_frames": 1488, "rx_dropped": 0, "load_percent": 3.1},
+    "all_nodes_up": false,
+    "nodes": [{
+      "node_id": 3, "name": "io2", "state": "failed", "nmt": "pre_operational",
+      "since": 1793299990000, "boot_attempts": 2, "losses": 0, "warning": false,
+      "problem": {"kind": "identity", "field": "product_code", "expected": 66, "found": 67,
+                  "boot_status": "M"},
+      "emcy": [{"time": 1793299995000, "code": 8960, "register": 3, "data": "0000000000",
+                "active": true}],
+      "late_pdos": []
+    }],
+    "events": [{"time": 1793299990000, "node": 3, "kind": "boot_failed", "problem": {"kind": "identity"}}]
+  }]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `now`, `since`, `time` | Wall-clock milliseconds since the epoch. |
+| `bus.state` | `error_active`, `error_warning`, `error_passive`, `bus_off`, `stopped`, `down` (interface down), `missing` (no such interface), `unknown`. A vcan link is `error_active`. |
+| `bus.*` | Error counters, bus-off count, frame counts since the PLC started and an estimated bus load in percent (standard frames, without bit stuffing). Each is left out when the driver does not report it. |
+| `nodes[].state` | `waiting` (master started, not heard yet), `silent` (not heard 5 s after the start), `booting`, `failed` (the last boot failed; retried in the background), `operational`, `lost` (retried in the background), `stopped` (PLC stop). |
+| `nodes[].nmt` | Last NMT state seen: `pre_operational`, `operational`, `stopped`, `unknown`. |
+| `nodes[].problem` | Why the node is not running, or `null`: `no_response`, `identity` (with `field`, `expected` and the `found` value read from the node), `sdo_abort` (a configuration SDO refused, with `index`, `subindex` and `abort_code`), `heartbeat`, `reset`, `boot_error` (with the stack's `text`). `boot_status` is the CiA 302-2 boot error letter. |
+| `nodes[].warning` | An operational node with an active emergency or a late PDO. |
+| `nodes[].emcy` | The last 8 emergencies, newest first; an emergency with code 0 (error reset) marks them inactive. |
+| `nodes[].late_pdos` | TPDOs with a receive timeout whose frames are late. |
+| `events` | The last 64 events of the network, newest first: `boot_ok`, `boot_failed`, `silent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort`, `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`. |
+
+Counters and lists start again when the PLC starts. The status thread never blocks the PLC scan
+or the bus: each answer is built from a copy taken under a short lock.
 
 ## Installing a release
 
@@ -129,8 +187,8 @@ The installer records the image repository on the device, so the OpenPLC Editor'
 earlier tag rolls back. The runtime container runs privileged on the host network, so it sees
 `can0`. Leave out `--runtime-version` to install `latest`.
 
-`/api/capabilities` reports `"canopen": {"configVersions": [1]}` when the plugin is built, and the
-editor warns before uploading a CANopen project to a runtime without it.
+`/api/capabilities` reports `"canopen": {"configVersions": [2], "features": ["status"]}` when the
+plugin is built, and the editor warns before uploading a CANopen project to a runtime without it.
 
 Each release image keeps the plugin's licence and Lely's `LICENSE` and `NOTICE` in
 `/workdir/core/src/drivers/plugins/native/canopen/build/licenses/`. How releases are made is in
@@ -198,7 +256,8 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 | `test_config` | Parser and validator of `conf/canopen.json`. |
 | `test_entry_points` | The plugin's C entry points with an allocation failure injected at each point of `start_loop`: no exception leaves them and a failed start leaves nothing running. |
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
-| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, and the NMT command on stop. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
+| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, emergencies, late PDOs, the status and its socket, and the NMT command on stop. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
+| `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
 module: it sets its digital inputs to 1, 2, ... and waits each time until its digital outputs

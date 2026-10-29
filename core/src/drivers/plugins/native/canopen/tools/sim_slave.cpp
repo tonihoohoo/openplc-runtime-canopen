@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 
 #include <lely/coapp/slave.hpp>
@@ -16,6 +17,11 @@
 #include <lely/io2/sys/io.hpp>
 #include <lely/io2/sys/timer.hpp>
 #include <lely/io2/vcan.hpp>
+
+// <lely/co/nmt.h> clashes with the C++ headers; only these are needed.
+struct __co_emcy;
+extern "C" __co_emcy *co_nmt_get_emcy(const __co_nmt *nmt);
+extern "C" int co_emcy_clear(__co_emcy *emcy);
 
 namespace canopen_sim
 {
@@ -89,6 +95,7 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     Dcf d;
     d.var("1000", "Device type", 0x7, "ro", s.device_type);
     d.var("1001", "Error register", 0x5, "ro", 0);
+    d.var("1014", "COB-ID EMCY", 0x7, "rw", 0x80 + s.node_id);
     d.rec("1016", "Consumer heartbeat time", 2, 1);
     d.sub("1016", 1, "Consumer heartbeat time", 0x7, "rw", 0);
     d.var("1017", "Producer heartbeat time", 0x6, "rw", s.heartbeat_ms);
@@ -112,7 +119,7 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     d.rec("1A00", "TPDO mapping parameter", 3, 2, "rw");
     d.sub("1A00", 1, "Mapped object", 0x7, "rw", 0x60000108);
     d.sub("1A00", 2, "Mapped object", 0x7, "rw", 0x64010110);
-    d.var("2100", "Parameter", 0x7, "rw", 0);
+    d.var("2100", "Parameter", 0x7, s.parameter_read_only ? "ro" : "rw", 0);
     d.rec("6000", "Digital inputs", 2, 1);
     d.sub("6000", 1, "Inputs 1-8", 0x5, "rw", 0, true);
     d.rec("6200", "Digital outputs", 2, 1);
@@ -132,6 +139,17 @@ class Slave : public lely::canopen::BasicSlave
           const std::string &dcf, std::atomic<uint8_t> &nmt)
         : BasicSlave(exec, timer, chan, dcf, ""), nmt_(nmt)
     {
+    }
+
+    void SendEmcy(uint16_t code, uint8_t reg)
+    {
+        std::lock_guard<lely::util::BasicLockable> lock(*this);
+        Error(code, reg);
+    }
+    void ClearEmcy()
+    {
+        std::lock_guard<lely::util::BasicLockable> lock(*this);
+        co_emcy_clear(co_nmt_get_emcy(nmt()));
     }
 
   protected:
@@ -184,6 +202,22 @@ void SimSlave::set_inputs(uint8_t digital, int16_t analogue)
     inputs_dirty_ = true;
 }
 
+void SimSlave::send_emcy(uint16_t code, uint8_t reg)
+{
+    emcy_reg_     = reg;
+    emcy_request_ = 0x10000u | code;
+}
+
+void SimSlave::clear_emcy()
+{
+    emcy_clear_ = true;
+}
+
+void SimSlave::set_tpdo_enabled(bool on)
+{
+    tpdo_request_ = on ? 1 : 0;
+}
+
 void SimSlave::thread_main()
 {
     try
@@ -221,6 +255,18 @@ void SimSlave::thread_main()
             {
                 slave.Write<uint8_t>(0x6000, 1, digital_.load());
                 slave.Write<int16_t>(0x6401, 1, analogue_.load());
+            }
+            uint32_t emcy = emcy_request_.exchange(0);
+            if (emcy)
+                slave.SendEmcy(static_cast<uint16_t>(emcy & 0xFFFF), emcy_reg_.load());
+            if (emcy_clear_.exchange(false))
+                slave.ClearEmcy();
+            int tpdo = tpdo_request_.exchange(-1);
+            if (tpdo >= 0)
+            {
+                // Bit 31 of the COB-ID: PDO not valid.
+                uint32_t cob = slave.Read<uint32_t>(0x1800, 1);
+                slave.Write<uint32_t>(0x1800, 1, tpdo ? cob & ~0x80000000u : cob | 0x80000000u);
             }
             outputs_   = slave.Read<uint8_t>(0x6200, 1);
             parameter_ = slave.Read<uint32_t>(0x2100, 0);

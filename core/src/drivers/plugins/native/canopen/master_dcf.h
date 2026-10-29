@@ -2,8 +2,8 @@
 //
 // master_dcf.h - the master's own device configuration (a CiA 306 DCF that Lely loads) built from
 // a network of conf/canopen.json: NMT master and slave assignment, expected identities, heartbeat
-// producer and consumers, SYNC, and one master PDO per node PDO. Each mapped entry gets a
-// manufacturer object of its type: inputs from 0x2000, outputs from 0x3000.
+// producer and consumers, emergency consumers, SYNC, and one master PDO per node PDO. Each mapped
+// entry gets a manufacturer object of its type: inputs from 0x2000, outputs from 0x3000.
 
 #ifndef CANOPEN_MASTER_DCF_H
 #define CANOPEN_MASTER_DCF_H

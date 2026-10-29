@@ -19,9 +19,11 @@
 #include <string>
 #include <thread>
 
+#include "bus_monitor.h"
 #include "config.h"
 #include "master_dcf.h"
 #include "process_image.h"
+#include "status.h"
 
 namespace lely
 {
@@ -47,7 +49,8 @@ class Bus
 {
   public:
     Bus(const NetworkConfig &net, const MasterLayout &layout, ProcessImage &image,
-        std::string dcf_path, std::shared_ptr<lely::io::VirtualCanController> vbus = nullptr);
+        NetworkStatus &status, std::string dcf_path,
+        std::shared_ptr<lely::io::VirtualCanController> vbus = nullptr);
     ~Bus();
 
     void start();
@@ -64,17 +67,21 @@ class Bus
     static constexpr std::chrono::milliseconds kRetry{1000};
     static constexpr std::chrono::milliseconds kStopDrain{50};
     static constexpr int kShutdownSlices = 20;
+    static constexpr int kMonitorSlices  = 10; // bus status once a second
 
     void thread_main();
     void enter_realtime();
     void leave_realtime();
     void run_session();
-    bool link_lost() const;
+    // Reads the link; true if it is missing or down. Updates the bus status when `monitor`.
+    bool link_lost(bool monitor);
     bool wait_for(std::chrono::milliseconds d); // false if stop was requested
 
     const NetworkConfig &net_;
     const MasterLayout &layout_;
     ProcessImage &image_;
+    NetworkStatus &status_;
+    BusMonitor monitor_;
     std::string dcf_path_;
     std::shared_ptr<lely::io::VirtualCanController> vbus_;
     std::thread thread_;

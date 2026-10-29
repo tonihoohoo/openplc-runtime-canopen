@@ -16,7 +16,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 1;
+constexpr int kConfigVersion = 2;
 
 // One object mapped into a PDO, bound to one IEC location.
 struct PdoEntry
@@ -33,6 +33,8 @@ struct PdoConfig
 {
     unsigned number = 0; // PDO number on the node, 1-512
     uint32_t cob_id = 0; // 11-bit COB-ID
+    // A node TPDO only: report the PDO late when no frame arrives for this long; 0 for never.
+    unsigned receive_timeout_ms = 0;
     std::vector<PdoEntry> entries;
     unsigned bits() const;
 };
