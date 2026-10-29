@@ -306,13 +306,26 @@ void NetworkStatus::clear_late(unsigned node)
 void NetworkStatus::set_bus(const BusStatus &bus)
 {
     std::lock_guard<PiMutex> lock(mutex_);
-    bool changed = bus.state != data_.bus.state;
-    data_.bus    = bus;
+    bool changed     = bus.state != data_.bus.state;
+    uint32_t resets  = data_.bus.resets;
+    data_.bus        = bus;
+    data_.bus.resets = resets;
     if (!changed)
         return;
     Event e;
     e.kind = EventKind::BusChange;
     e.bus  = bus.state;
+    push(e);
+}
+
+void NetworkStatus::link_reset(ResetOutcome outcome)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    if (outcome == ResetOutcome::Done)
+        ++data_.bus.resets;
+    Event e;
+    e.kind  = EventKind::BusReset;
+    e.reset = outcome;
     push(e);
 }
 
@@ -437,6 +450,20 @@ const char *problem_name(ProblemKind k)
     return "none";
 }
 
+const char *reset_outcome_name(ResetOutcome r)
+{
+    switch (r)
+    {
+    case ResetOutcome::Done:
+        return "done";
+    case ResetOutcome::NotPermitted:
+        return "not_permitted";
+    case ResetOutcome::Failed:
+        return "failed";
+    }
+    return "failed";
+}
+
 const char *event_name(EventKind k)
 {
     switch (k)
@@ -463,6 +490,8 @@ const char *event_name(EventKind k)
         return "pdo_length";
     case EventKind::BusChange:
         return "bus_state";
+    case EventKind::BusReset:
+        return "bus_reset";
     }
     return "boot_ok";
 }
@@ -525,6 +554,8 @@ cJSON *bus_json(const BusStatus &b)
     }
     if (b.has_load)
         cJSON_AddNumberToObject(o, "load_percent", static_cast<int>(b.load_percent * 10) / 10.0);
+    if (b.has_resets || b.resets)
+        add_uint(o, "link_resets", b.resets);
     return o;
 }
 
@@ -596,6 +627,9 @@ cJSON *event_json(const Event &ev)
         break;
     case EventKind::BusChange:
         cJSON_AddStringToObject(o, "bus_state", bus_state_name(ev.bus));
+        break;
+    case EventKind::BusReset:
+        cJSON_AddStringToObject(o, "outcome", reset_outcome_name(ev.reset));
         break;
     default:
         break;

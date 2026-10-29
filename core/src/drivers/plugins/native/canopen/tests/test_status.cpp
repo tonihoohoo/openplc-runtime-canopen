@@ -160,6 +160,32 @@ void test_json()
     CHECK(cJSON_IsFalse(cJSON_GetObjectItem(n0, "all_nodes_up")));
     const cJSON *ev = cJSON_GetArrayItem(cJSON_GetObjectItem(n0, "events"), 0);
     CHECK(std::string(cJSON_GetObjectItem(ev, "kind")->valuestring) == "bus_state");
+    CHECK(cJSON_GetObjectItem(bus, "link_resets") == nullptr);
+    cJSON_Delete(root);
+
+    // Link resets: counted when done, kept across bus readings, each recorded with its outcome.
+    b.state      = BusState::BusOff;
+    b.has_resets = true;
+    st.set_bus(b);
+    st.link_reset(ResetOutcome::Done);
+    st.link_reset(ResetOutcome::NotPermitted);
+    b.state = BusState::ErrorActive;
+    st.set_bus(b);
+    CHECK(st.snapshot().bus.resets == 1);
+    text = status_json({st.snapshot()}, 1234);
+    root = cJSON_Parse(text.c_str());
+    CHECK(root != nullptr);
+    if (!root)
+        return;
+    n0  = cJSON_GetArrayItem(cJSON_GetObjectItem(root, "networks"), 0);
+    bus = cJSON_GetObjectItem(n0, "bus");
+    CHECK(cJSON_GetObjectItem(bus, "link_resets")->valueint == 1);
+    const cJSON *events = cJSON_GetObjectItem(n0, "events");
+    ev                  = cJSON_GetArrayItem(events, 1);
+    CHECK(std::string(cJSON_GetObjectItem(ev, "kind")->valuestring) == "bus_reset");
+    CHECK(std::string(cJSON_GetObjectItem(ev, "outcome")->valuestring) == "not_permitted");
+    ev = cJSON_GetArrayItem(events, 2);
+    CHECK(std::string(cJSON_GetObjectItem(ev, "outcome")->valuestring) == "done");
     cJSON_Delete(root);
 }
 

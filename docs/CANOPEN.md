@@ -138,7 +138,8 @@ only when that feature is listed.
   "networks": [{
     "name": "CANopen 1", "interface": "can0",
     "bus": {"state": "error_active", "tx_errors": 0, "rx_errors": 0, "bus_off_count": 0,
-            "rx_frames": 1520, "tx_frames": 1488, "rx_dropped": 0, "load_percent": 3.1},
+            "rx_frames": 1520, "tx_frames": 1488, "rx_dropped": 0, "load_percent": 3.1,
+            "link_resets": 0},
     "all_nodes_up": false,
     "nodes": [{
       "node_id": 3, "name": "io2", "state": "failed", "nmt": "pre_operational",
@@ -158,14 +159,14 @@ only when that feature is listed.
 |---|---|
 | `now`, `since`, `time` | Wall-clock milliseconds since the epoch. |
 | `bus.state` | `error_active`, `error_warning`, `error_passive`, `bus_off`, `stopped`, `down` (interface down), `missing` (no such interface), `unknown`. A vcan link is `error_active`. |
-| `bus.*` | Error counters, bus-off count, frame counts since the PLC started and an estimated bus load in percent (standard frames, without bit stuffing). Each is left out when the driver does not report it. |
+| `bus.*` | Error counters, bus-off count, frame counts since the PLC started and an estimated bus load in percent (standard frames, without bit stuffing). Each is left out when the driver does not report it. `link_resets` counts the times the master reset a CAN link after a bus-off. |
 | `nodes[].state` | `waiting` (master started, not heard yet), `silent` (not heard 5 s after the start), `booting`, `failed` (the last boot failed; retried in the background), `operational`, `lost` (retried in the background), `stopped` (PLC stop). |
 | `nodes[].nmt` | Last NMT state seen: `pre_operational`, `operational`, `stopped`, `unknown`. |
 | `nodes[].problem` | Why the node is not running, or `null`: `no_response`, `identity` (with `field`, `expected` and the `found` value read from the node), `sdo_abort` (a configuration SDO refused, with `index`, `subindex` and `abort_code`), `heartbeat`, `reset`, `boot_error` (with the stack's `text`). `boot_status` is the CiA 302-2 boot error letter. |
 | `nodes[].warning` | An operational node with an active emergency or a late PDO. |
 | `nodes[].emcy` | The last 8 emergencies, newest first; an emergency with code 0 (error reset) marks them inactive. |
 | `nodes[].late_pdos` | TPDOs with a receive timeout whose frames are late. |
-| `events` | The last 64 events of the network, newest first: `boot_ok`, `boot_failed`, `silent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort`, `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`. |
+| `events` | The last 64 events of the network, newest first: `boot_ok`, `boot_failed`, `silent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort`, `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link after a bus-off, with `outcome` `done`, `not_permitted` or `failed`). |
 
 Counters and lists start again when the PLC starts. The status thread never blocks the PLC scan
 or the bus: each answer is built from a copy taken under a short lock.
@@ -212,9 +213,22 @@ If the runtime stops or dies, the master's heartbeat stops. A node that consumes
 the state its 0x1029 sets, pre-operational by default; what it then does with its outputs is set in
 the device's own objects.
 
+### Bus-off
+
 When the master configures a CAN link (bit rate, or bringing it up), it turns on the controller's
-bus-off restart (`restart-ms` 100). A link already up with the restart off is left alone and
-logged once at start, because it would stay bus-off until it is reset by hand.
+bus-off restart (`restart-ms` 100). Some drivers, such as `gs_usb` for USB adapters, have no such
+restart and refuse the setting; the master then configures the link without it and logs that once.
+
+When a link is bus-off and the kernel does not restart it (the restart is off, the driver has
+none, or the link is still bus-off 2 s after the restart delay), the master resets the link
+itself: it takes the link down and up, and brings the nodes up again, without a PLC restart. The
+bus state is read once a second, so a reset follows the bus-off within about a second. If the bus
+goes bus-off again within 10 s of a reset, the next reset waits 1 s, then 2, 4, 8 and at most 10 s;
+after 60 s without bus-off the next reset is immediate again. Each reset is logged, counted in the
+status (`link_resets`) and recorded as a `bus_reset` event.
+
+Resetting the link needs `CAP_NET_ADMIN`. Without it the master logs once the commands to reset it
+by hand (`ip link set can0 down`, then `up`) and picks up the link again when someone does.
 
 A real-time (PREEMPT_RT) kernel and CPU isolation are deployment choices, as for the runtime
 itself; they lower the worst-case delays, not the typical ones.
@@ -252,11 +266,12 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 
 | Test | What it covers |
 |---|---|
-| `test_can_link` | What the master does to the CAN link before opening it: bit rate, bus-off auto-restart, bringing it up. |
+| `test_bus_off_recovery` | When the master resets a bus-off link: with and without a kernel restart, and the back-off. |
+| `test_can_link` | What the master does to the CAN link before opening it: bit rate, bus-off auto-restart (also on a driver that refuses it), bringing it up. |
 | `test_config` | Parser and validator of `conf/canopen.json`. |
 | `test_entry_points` | The plugin's C entry points with an allocation failure injected at each point of `start_loop`: no exception leaves them and a failed start leaves nothing running. |
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
-| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, emergencies, late PDOs, the status and its socket, and the NMT command on stop. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
+| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, emergencies, late PDOs, the status and its socket, the NMT command on stop, and the reset of a bus-off link (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O

@@ -106,6 +106,8 @@ struct BusStatus
     uint64_t rx_dropped = 0;
     bool has_load       = false;
     double load_percent = 0;
+    bool has_resets     = false; // a CAN link the master may reset
+    uint32_t resets     = 0;     // link resets after bus-off since the PLC started
 };
 
 struct Emcy
@@ -136,7 +138,15 @@ enum class EventKind : uint8_t
     PdoLate,
     PdoBack,
     PdoLength,
-    BusChange
+    BusChange,
+    BusReset
+};
+
+enum class ResetOutcome : uint8_t
+{
+    Done,
+    NotPermitted,
+    Failed
 };
 
 struct Event
@@ -144,12 +154,13 @@ struct Event
     int64_t time   = 0;
     unsigned node  = 0; // 0: the network
     EventKind kind = EventKind::BootOk;
-    Problem problem;     // BootFailed, Lost, SdoAbort
-    uint16_t code   = 0; // Emcy: error code; PdoLength: 0x8210 or 0x8220
-    uint8_t reg     = 0; // Emcy
-    unsigned pdo    = 0; // Pdo*
-    uint32_t cob_id = 0; // Pdo*
-    BusState bus    = BusState::Unknown;
+    Problem problem;        // BootFailed, Lost, SdoAbort
+    uint16_t code      = 0; // Emcy: error code; PdoLength: 0x8210 or 0x8220
+    uint8_t reg        = 0; // Emcy
+    unsigned pdo       = 0; // Pdo*
+    uint32_t cob_id    = 0; // Pdo*
+    BusState bus       = BusState::Unknown;
+    ResetOutcome reset = ResetOutcome::Done; // BusReset
 };
 
 struct NodeStatus
@@ -207,7 +218,10 @@ class NetworkStatus
     void pdo_back(unsigned node, unsigned pdo);
     void pdo_length(unsigned node, unsigned pdo, uint32_t cob_id, uint16_t code);
     void clear_late(unsigned node);
+    // Keeps the count of link resets.
     void set_bus(const BusStatus &bus);
+    // The master reset the link after a bus-off, or tried to.
+    void link_reset(ResetOutcome outcome);
     // Every node stopped (the PLC stopped).
     void stop_all();
 

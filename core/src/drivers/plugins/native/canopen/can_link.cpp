@@ -291,7 +291,35 @@ int link_set_bitrate(const std::string &name, unsigned bitrate, long restart_ms)
     return transact(req, nullptr);
 }
 
-LinkPlan plan_link(const LinkInfo &li, unsigned bitrate)
+namespace
+{
+
+class SystemLinkOps : public LinkOps
+{
+  public:
+    int get(const std::string &name, LinkInfo &out) override
+    {
+        return link_get(name, out);
+    }
+    int set_up(const std::string &name, bool up) override
+    {
+        return link_set_up(name, up);
+    }
+    int set_bitrate(const std::string &name, unsigned bitrate, long restart_ms) override
+    {
+        return link_set_bitrate(name, bitrate, restart_ms);
+    }
+};
+
+} // namespace
+
+LinkOps &system_link_ops()
+{
+    static SystemLinkOps ops;
+    return ops;
+}
+
+LinkPlan plan_link(const LinkInfo &li, unsigned bitrate, bool restart_refused)
 {
     LinkPlan plan;
     const bool can   = li.kind == "can";
@@ -301,18 +329,17 @@ LinkPlan plan_link(const LinkInfo &li, unsigned bitrate)
         plan.no_restart = can && li.restart_ms == 0;
         return plan;
     }
-    plan.set_restart = !plan.set_bitrate && can && li.restart_ms == 0;
+    plan.set_restart = !plan.set_bitrate && can && li.restart_ms == 0 && !restart_refused;
     plan.bring_up    = true;
     return plan;
 }
 
-LinkResult prepare_link(const std::string &name, unsigned bitrate, std::string &problem,
-                        bool *no_restart)
+LinkResult prepare_link(LinkOps &ops, const std::string &name, unsigned bitrate,
+                        std::string &problem, LinkSetup &setup)
 {
-    if (no_restart)
-        *no_restart = false;
+    setup.no_restart = false;
     LinkInfo li;
-    int rc = link_get(name, li);
+    int rc = ops.get(name, li);
     if (rc == -ENODEV)
     {
         problem = "CAN interface " + name + " does not exist";
@@ -323,28 +350,43 @@ LinkResult prepare_link(const std::string &name, unsigned bitrate, std::string &
         problem = "cannot read CAN interface " + name + ": " + std::strerror(-rc);
         return LinkResult::Failed;
     }
-    const LinkPlan plan = plan_link(li, bitrate);
+    const LinkPlan plan = plan_link(li, bitrate, setup.restart_refused);
     if (!plan.bring_up)
     {
-        if (no_restart)
-            *no_restart = plan.no_restart;
+        setup.no_restart = plan.no_restart;
         return LinkResult::Ready;
     }
+    // Drivers without auto-restart refuse a request carrying restart-ms as a whole.
+    auto refused = [&](int r)
+    {
+        if (r != -EOPNOTSUPP || setup.restart_refused)
+            return false;
+        setup.restart_refused = true;
+        log_info("CAN interface %s cannot restart by itself after a bus-off; the master resets "
+                 "the link instead",
+                 name.c_str());
+        return true;
+    };
     if (plan.set_bitrate)
     {
-        if (li.up && (rc = link_set_up(name, false)) < 0)
+        if (li.up && (rc = ops.set_up(name, false)) < 0)
             goto fail;
-        if ((rc = link_set_bitrate(name, bitrate, kRestartMs)) < 0)
+        rc = ops.set_bitrate(name, bitrate, setup.restart_refused ? -1 : kRestartMs);
+        if (rc < 0 && refused(rc))
+            rc = ops.set_bitrate(name, bitrate, -1);
+        if (rc < 0)
             goto fail;
         log_info("set CAN interface %s to %u bit/s", name.c_str(), bitrate);
     }
     else if (plan.set_restart)
     {
-        if ((rc = link_set_bitrate(name, 0, kRestartMs)) < 0)
+        rc = ops.set_bitrate(name, 0, kRestartMs);
+        if (rc < 0 && !refused(rc))
             goto fail;
-        log_info("turned on bus-off restart on CAN interface %s", name.c_str());
+        if (rc == 0)
+            log_info("turned on bus-off restart on CAN interface %s", name.c_str());
     }
-    if ((rc = link_set_up(name, true)) < 0)
+    if ((rc = ops.set_up(name, true)) < 0)
         goto fail;
     log_info("brought CAN interface %s up", name.c_str());
     return LinkResult::Ready;
