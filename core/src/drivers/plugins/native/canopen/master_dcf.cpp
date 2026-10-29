@@ -116,12 +116,17 @@ void mirror_pdos(DcfWriter &w, const std::vector<MasterPdo> &pdos, bool receive)
     for (const MasterPdo &m : pdos)
     {
         uint16_t n = static_cast<uint16_t>(m.master_number - 1);
+        // A receive timeout is the RPDO's event timer (sub 5, deadline monitoring).
+        bool timed    = receive && m.pdo->receive_timeout_ms > 0;
+        unsigned subs = receive ? (timed ? 3 : 2) : 3;
         w.begin(comm + n, receive ? "RPDO communication parameter" : "TPDO communication parameter",
-                0x9, receive ? 2 : 3, receive ? 2 : 3);
+                0x9, subs, receive ? (timed ? 5 : 2) : 3);
         w.sub(comm + n, 1, "COB-ID", CoType::UNSIGNED32, "rw", m.pdo->cob_id);
         w.sub(comm + n, 2, "Transmission type", CoType::UNSIGNED8, "rw", 0xFF);
         if (!receive)
             w.sub(comm + n, 3, "Inhibit time", CoType::UNSIGNED16, "rw", 0);
+        if (timed)
+            w.sub(comm + n, 5, "Event timer", CoType::UNSIGNED16, "rw", m.pdo->receive_timeout_ms);
         const auto &entries = m.pdo->entries;
         w.begin(map + n, receive ? "RPDO mapping parameter" : "TPDO mapping parameter", 0x9,
                 static_cast<unsigned>(entries.size()), static_cast<unsigned>(entries.size()));
@@ -188,6 +193,11 @@ std::string master_dcf(const NetworkConfig &net, const MasterLayout &layout)
     w.sub(0x1018, 2, "Product code", CoType::UNSIGNED32, "ro", 0);
     w.sub(0x1018, 3, "Revision number", CoType::UNSIGNED32, "ro", 0);
     w.sub(0x1018, 4, "Serial number", CoType::UNSIGNED32, "ro", 0);
+
+    // Emergency consumer: the predefined EMCY COB-ID of each node (sub-index = node ID).
+    w.begin(0x1028, "Emergency consumer object", 0x8, static_cast<unsigned>(net.nodes.size()), 127);
+    for (const auto &n : net.nodes)
+        w.sub(0x1028, n.node_id, "Emergency consumer", CoType::UNSIGNED32, "rw", 0x80 + n.node_id);
 
     mirror_pdos(w, layout.rpdos, true);
     mirror_pdos(w, layout.tpdos, false);

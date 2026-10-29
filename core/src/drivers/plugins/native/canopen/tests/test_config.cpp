@@ -14,7 +14,7 @@ namespace
 {
 
 const char *kValid = R"({
-  "version": 1,
+  "version": 2,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 500000,
     "heartbeat_producer_ms": 100,
@@ -102,12 +102,30 @@ void test_valid()
     CHECK(n.tpdos[0].entries.size() == 2 && n.tpdos[0].bits() == 24);
     CHECK(n.tpdos[0].entries[1].type == CoType::INTEGER16);
     CHECK(n.rpdos.size() == 1 && n.rpdos[0].entries[0].location.str() == "%QB0");
+    CHECK(n.tpdos[0].receive_timeout_ms == 0);
+}
+
+void test_receive_timeout()
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    std::string text = with(kValid, "\"tpdos\": [{\"number\": 1,",
+                            "\"tpdos\": [{\"number\": 1, \"receive_timeout_ms\": 250,");
+    CHECK(parse_config(text, cfg, errors));
+    CHECK(errors.empty());
+    CHECK(cfg.networks[0].nodes[0].tpdos[0].receive_timeout_ms == 250);
 }
 
 void test_refusals()
 {
     CHECK(refused_with("{", "not valid JSON"));
-    CHECK(refused_with(with(kValid, "\"version\": 1", "\"version\": 2"), "version 2"));
+    CHECK(refused_with(with(kValid, "\"version\": 2", "\"version\": 1"), "version 1"));
+    CHECK(refused_with(with(kValid, "\"tpdos\": [{\"number\": 1,",
+                            "\"tpdos\": [{\"number\": 1, \"receive_timeout_ms\": 70000,"),
+                       "receive_timeout_ms"));
+    CHECK(refused_with(with(kValid, "\"rpdos\": [{\"number\": 1,",
+                            "\"rpdos\": [{\"number\": 1, \"receive_timeout_ms\": 100,"),
+                       "only for a node's TPDOs"));
     CHECK(refused_with(with(kValid, "\"bitrate\": 500000", "\"bitrate\": 400000"), "bit rate"));
     CHECK(refused_with(with(kValid, "\"bitrate\": 500000", "\"bitrate\": 500000, \"priority\": 98"),
                        "\"priority\" must be an integer from 1 to 97"));
@@ -170,6 +188,7 @@ int main()
 {
     test_valid();
     test_refusals();
+    test_receive_timeout();
     test_output_overlap_warns();
     test_priority();
     CHECK(is_standard_bitrate(125000) && is_standard_bitrate(1000000));

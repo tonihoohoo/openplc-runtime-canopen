@@ -53,11 +53,13 @@ constexpr std::chrono::milliseconds Bus::kLoopSlice;
 constexpr std::chrono::milliseconds Bus::kRetry;
 constexpr std::chrono::milliseconds Bus::kStopDrain;
 constexpr int Bus::kShutdownSlices;
+constexpr int Bus::kMonitorSlices;
 
 Bus::Bus(const NetworkConfig &net, const MasterLayout &layout, ProcessImage &image,
-         std::string dcf_path, std::shared_ptr<lely::io::VirtualCanController> vbus)
-    : net_(net), layout_(layout), image_(image), dcf_path_(std::move(dcf_path)),
-      vbus_(std::move(vbus))
+         NetworkStatus &status, std::string dcf_path,
+         std::shared_ptr<lely::io::VirtualCanController> vbus)
+    : net_(net), layout_(layout), image_(image), status_(status), monitor_(net.interface),
+      dcf_path_(std::move(dcf_path)), vbus_(std::move(vbus))
 {
 }
 
@@ -92,12 +94,18 @@ bool Bus::wait_for(std::chrono::milliseconds d)
     return !stop_;
 }
 
-bool Bus::link_lost() const
+bool Bus::link_lost(bool monitor)
 {
     if (vbus_)
         return false;
     LinkInfo info;
-    return link_get(net_.interface, info) != 0 || !info.up;
+    int rc    = link_get(net_.interface, info);
+    bool lost = rc != 0 || !info.up;
+    if (lost)
+        status_.set_bus(monitor_.unusable(rc == -ENODEV ? BusState::Missing : BusState::Down));
+    else if (monitor)
+        status_.set_bus(monitor_.update(info, BusMonitor::clock::now()));
+    return lost;
 }
 
 namespace
@@ -165,6 +173,9 @@ void Bus::thread_main()
             {
                 if (problem != last_problem)
                     log_error("%s; the nodes are not operational, retrying", problem.c_str());
+                status_.begin_session();
+                status_.set_bus(monitor_.unusable(r == LinkResult::Missing ? BusState::Missing
+                                                                           : BusState::Down));
                 last_problem = problem;
                 if (!wait_for(kRetry))
                     break;
@@ -212,17 +223,23 @@ void Bus::run_session()
             base = chan.get();
         }
 
-        Network net(exec, poll, timer, tick, *base, dcf_path_, net_, layout_, image_);
+        Network net(exec, poll, timer, tick, *base, dcf_path_, net_, layout_, image_, status_);
+        if (vbus_)
+            status_.set_bus(monitor_.simulated());
+        else
+            link_lost(true);
         net.Start();
         bool shut_down = false;
         bool lost      = false;
         int slices     = 0;
+        int polls      = 0;
         while (true)
         {
             loop.run_for(kLoopSlice);
             if (loop.stopped())
                 break;
-            if (!shut_down && (stop_ || link_lost()))
+            bool monitor = ++polls % kMonitorSlices == 0;
+            if (!shut_down && (stop_ || link_lost(monitor)))
             {
                 if (stop_)
                 {

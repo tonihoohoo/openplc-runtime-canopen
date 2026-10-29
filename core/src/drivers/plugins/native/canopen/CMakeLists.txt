@@ -67,6 +67,7 @@ endif()
 # The plugin's code without the entry points, shared with the tests.
 add_library(canopen_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/bus.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/bus_monitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/can_link.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/config.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/iec_location.cpp
@@ -75,6 +76,8 @@ add_library(canopen_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/master_dcf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/network.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/process_image.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/status.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/status_server.cpp
     ${OPENPLC_ROOT}/core/src/drivers/plugins/native/cjson/cJSON.c
 )
 target_include_directories(canopen_core PUBLIC

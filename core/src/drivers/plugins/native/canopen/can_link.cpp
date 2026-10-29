@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Derived from canworks ec7fd59d, plugin/src/can/can_adapter.cpp (SocketCAN over rtnetlink).
+// Derived from canworks ec7fd59d, plugin/src/can/can_adapter.cpp (SocketCAN over rtnetlink),
+// including its parsing of the controller state, error counters and device statistics.
 
 #include "can_link.h"
 
@@ -124,9 +125,48 @@ void parse_linkinfo(const rtattr *linkinfo, LinkInfo &out)
                     std::memcpy(&ms, RTA_DATA(d), sizeof(ms));
                     out.restart_ms = static_cast<long>(ms);
                 }
+                else if (d->rta_type == IFLA_CAN_STATE && RTA_PAYLOAD(d) >= sizeof(uint32_t))
+                {
+                    uint32_t st;
+                    std::memcpy(&st, RTA_DATA(d), sizeof(st));
+                    out.has_can_state = true;
+                    out.can_state     = st;
+                }
+                else if (d->rta_type == IFLA_CAN_BERR_COUNTER &&
+                         RTA_PAYLOAD(d) >= sizeof(can_berr_counter))
+                {
+                    can_berr_counter bc;
+                    std::memcpy(&bc, RTA_DATA(d), sizeof(bc));
+                    out.has_berr  = true;
+                    out.tx_errors = bc.txerr;
+                    out.rx_errors = bc.rxerr;
+                }
             }
         }
+        else if (a->rta_type == IFLA_INFO_XSTATS && out.kind == "can" &&
+                 RTA_PAYLOAD(a) >= sizeof(can_device_stats))
+        {
+            // The kernel puts IFLA_INFO_KIND first; other kinds have other xstats.
+            can_device_stats cs;
+            std::memcpy(&cs, RTA_DATA(a), sizeof(cs));
+            out.has_xstats = true;
+            out.bus_off    = cs.bus_off;
+        }
     }
+}
+
+void parse_stats(const rtattr *a, LinkInfo &out)
+{
+    if (RTA_PAYLOAD(a) < sizeof(rtnl_link_stats64))
+        return;
+    rtnl_link_stats64 st;
+    std::memcpy(&st, RTA_DATA(a), sizeof(st));
+    out.has_stats  = true;
+    out.rx_frames  = st.rx_packets;
+    out.tx_frames  = st.tx_packets;
+    out.rx_bytes   = st.rx_bytes;
+    out.tx_bytes   = st.tx_bytes;
+    out.rx_dropped = st.rx_dropped + st.rx_over_errors;
 }
 
 void parse_ifinfo(const nlmsghdr *nh, LinkInfo &out)
@@ -135,8 +175,12 @@ void parse_ifinfo(const nlmsghdr *nh, LinkInfo &out)
     out.up               = (ifi->ifi_flags & IFF_UP) != 0;
     int alen             = IFLA_PAYLOAD(nh);
     for (const rtattr *a = IFLA_RTA(ifi); RTA_OK(a, alen); a = RTA_NEXT(a, alen))
+    {
         if (a->rta_type == IFLA_LINKINFO)
             parse_linkinfo(a, out);
+        else if (a->rta_type == IFLA_STATS64)
+            parse_stats(a, out);
+    }
 }
 
 // Sends `req` and reads the reply. With `info`, expects an RTM_NEWLINK and
@@ -186,6 +230,17 @@ int transact(NlRequest &req, LinkInfo *info)
 }
 
 } // namespace
+
+bool parse_newlink(const void *msg, size_t len, LinkInfo &out)
+{
+    const nlmsghdr *nh = static_cast<const nlmsghdr *>(msg);
+    if (len < sizeof(nlmsghdr) || nh->nlmsg_len > len || nh->nlmsg_type != RTM_NEWLINK ||
+        nh->nlmsg_len < NLMSG_LENGTH(sizeof(ifinfomsg)))
+        return false;
+    out = LinkInfo();
+    parse_ifinfo(nh, out);
+    return true;
+}
 
 int link_get(const std::string &name, LinkInfo &out)
 {

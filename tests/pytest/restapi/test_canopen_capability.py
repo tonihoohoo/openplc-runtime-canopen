@@ -2,7 +2,8 @@
 """The CANopen entry of GET /api/capabilities.
 
 Present only when the plugin library is built, listing the canopen.json format
-versions the plugin accepts, read from the plugin's own config.h.
+versions the plugin accepts, read from the plugin's own config.h, and the
+optional CANopen routes this web server serves.
 """
 
 from pathlib import Path
@@ -27,7 +28,10 @@ def test_reports_the_version_from_the_plugin_header(tmp_path: Path) -> None:
     header.write_text(
         "namespace canopen {\nconstexpr int kConfigVersion = 7;\n}\n", encoding="utf-8"
     )
-    assert canopen_capability(library=_library(tmp_path), header=header) == {"configVersions": [7]}
+    assert canopen_capability(library=_library(tmp_path), header=header) == {
+        "configVersions": [7],
+        "features": ["status"],
+    }
 
 
 def test_matches_the_real_plugin_header(tmp_path: Path) -> None:

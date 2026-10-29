@@ -5,10 +5,12 @@
 //   0x6000:01 UNSIGNED8  digital inputs   TPDO1 (0x180 + id), with 0x6401:01
 //   0x6401:01 INTEGER16  analogue input   TPDO1, sent every 20 ms
 //   0x6200:01 UNSIGNED8  digital outputs  RPDO1 (0x200 + id)
-//   0x2100:00 UNSIGNED32 a parameter the master can write during configuration
-// It produces heartbeats at 0x1017 (default 50 ms), can watch the master's heartbeat (0x1016:01,
-// written by the master; 0x1029:01 sets the reaction, pre-operational by default) and runs on its
-// own thread, on Lely's virtual bus or on a SocketCAN interface.
+//   0x2100:00 UNSIGNED32 a parameter the master can write during configuration (read-only, so the
+//                        write is refused, with parameter_read_only)
+// It produces heartbeats at 0x1017 (default 50 ms) and emergencies on request (0x80 + id), can
+// watch the master's heartbeat (0x1016:01, written by the master; 0x1029:01 sets the reaction,
+// pre-operational by default) and runs on its own thread, on Lely's virtual bus or on a SocketCAN
+// interface.
 
 #ifndef CANOPEN_SIM_SLAVE_H
 #define CANOPEN_SIM_SLAVE_H
@@ -32,12 +34,13 @@ namespace canopen_sim
 
 struct SimSlaveSpec
 {
-    unsigned node_id      = 2;
-    uint32_t device_type  = 0x00000191;
-    uint32_t vendor_id    = 0x00000001;
-    uint32_t product_code = 0x00000002;
-    uint32_t revision     = 0x00000003;
-    unsigned heartbeat_ms = 50;
+    unsigned node_id         = 2;
+    uint32_t device_type     = 0x00000191;
+    uint32_t vendor_id       = 0x00000001;
+    uint32_t product_code    = 0x00000002;
+    uint32_t revision        = 0x00000003;
+    unsigned heartbeat_ms    = 50;
+    bool parameter_read_only = false;
 };
 
 // The slave's DCF text.
@@ -56,6 +59,11 @@ class SimSlave
     void stop();
 
     void set_inputs(uint8_t digital, int16_t analogue);
+    // Sends an emergency; clear_emcy() sends the error reset (code 0).
+    void send_emcy(uint16_t code, uint8_t reg);
+    void clear_emcy();
+    // Stops or resumes TPDO 1 while the heartbeat goes on.
+    void set_tpdo_enabled(bool on);
     uint8_t outputs() const
     {
         return outputs_.load();
@@ -85,6 +93,10 @@ class SimSlave
     std::atomic<uint8_t> digital_{0};
     std::atomic<int16_t> analogue_{0};
     std::atomic<bool> inputs_dirty_{false};
+    std::atomic<uint32_t> emcy_request_{0}; // bit 16: pending, bits 0-15 code
+    std::atomic<uint8_t> emcy_reg_{0};
+    std::atomic<bool> emcy_clear_{false};
+    std::atomic<int> tpdo_request_{-1}; // -1 none, 0 off, 1 on
     std::atomic<uint8_t> outputs_{0};
     std::atomic<uint32_t> parameter_{0};
     std::atomic<uint8_t> nmt_state_{0};

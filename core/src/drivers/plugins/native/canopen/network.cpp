@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <lely/can/msg.h>
+#include <lely/coapp/sdo_error.hpp>
 #include <lely/ev/exec.h>
 #include <lely/ev/exec.hpp>
 #include <lely/util/util.h>
@@ -59,7 +60,7 @@ void pdo_set_bits(uint8_t *data, unsigned offset, unsigned bits, uint64_t value)
 Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &timer,
                  lely::io::TimerBase &tick, lely::io::CanChannelBase &chan,
                  const std::string &dcf_path, const NetworkConfig &cfg, const MasterLayout &layout,
-                 ProcessImage &image)
+                 ProcessImage &image, NetworkStatus &status)
     : BasicMaster(exec, timer, chan, dcf_path, "", static_cast<uint8_t>(cfg.master_node_id)),
       exec_(exec), poll_(poll), tick_(tick), tick_wait_(exec,
                                                         [this](int, std::error_code ec)
@@ -67,7 +68,7 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
                                                             if (!ec)
                                                                 OnTick();
                                                         }),
-      cfg_(cfg), layout_(layout), image_(image)
+      cfg_(cfg), layout_(layout), image_(image), status_(status)
 {
     for (size_t slot = 0; slot < cfg_.nodes.size(); ++slot)
     {
@@ -106,6 +107,7 @@ void Network::Start()
     running_      = true;
     synced_scans_ = image_.scans();
     started_      = clock::now();
+    status_.begin_session();
     log_info("%s: starting, %zu node(s), %zu input and %zu output PDO(s)", cfg_.label().c_str(),
              nodes_.size(), layout_.rpdos.size(), layout_.tpdos.size());
     Reset();
@@ -160,6 +162,7 @@ void Network::StopNodes()
     }
     for (auto &it : nodes_)
         it.second.stopped = true;
+    status_.stop_all();
     if (cfg_.on_stop == OnStop::None)
         return;
     const NmtCommand cmd =
@@ -234,7 +237,7 @@ void Network::OnConfig(uint8_t id) noexcept
 void Network::OnHeartbeat(uint8_t id, bool occurred) noexcept
 {
     if (occurred)
-        HandleLoss(id, "heartbeat timeout");
+        HandleLoss(id, ProblemKind::Heartbeat);
 }
 
 void Network::OnState(uint8_t id, NmtState st) noexcept
@@ -250,8 +253,9 @@ void Network::OnRpdo(int num, std::error_code ec, const void *p, std::size_t n) 
 
 void Network::OnEmcy(uint8_t id, uint16_t eec, uint8_t er, uint8_t msef[5]) noexcept
 {
-    (void)msef;
-    Defer([this, id, eec, er] { HandleEmcy(id, eec, er); });
+    uint8_t m[5];
+    std::memcpy(m, msef, sizeof(m));
+    Defer([this, id, eec, er, m] { HandleEmcy(id, eec, er, m); });
 }
 
 void Network::OnRpdoError(int num, uint16_t eec, uint8_t er) noexcept
@@ -276,8 +280,18 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
         n->last_problem.clear();
         n->backoff       = kRetryMin;
         n->retry_pending = false;
+        n->has_abort     = false;
+        status_.boot_ok(id);
         SetUp(*n, true);
         return;
+    }
+    Problem p    = BootProblem(*n, es, what);
+    n->has_abort = false;
+    status_.boot_failed(id, p);
+    if (p.kind == ProblemKind::Identity)
+    {
+        IdentityField field = p.field;
+        Defer([this, id, field] { ReadFoundIdentity(id, field); });
     }
     std::string problem = std::string(1, es) + ": " + what;
     if (problem != n->last_problem)
@@ -304,6 +318,20 @@ void Network::HandleConfig(uint8_t id)
             NodeState *n = Find(id);
             log_error("%s: configuration SDO to 0x%04X:%u failed: %s",
                       n ? n->cfg->label().c_str() : "node", idx, subidx, ec.message().c_str());
+            // Not an abort from the node (a local error): CiA 301 "general error".
+            uint32_t code = ec.category() == lely::canopen::SdoCategory()
+                                ? static_cast<uint32_t>(ec.value())
+                                : 0x08000000u;
+            if (n)
+            {
+                n->has_abort        = true;
+                n->abort            = Problem();
+                n->abort.kind       = ProblemKind::SdoAbort;
+                n->abort.index      = idx;
+                n->abort.subindex   = subidx;
+                n->abort.abort_code = code;
+            }
+            status_.sdo_abort(id, idx, subidx, code);
         }
         std::lock_guard<lely::util::BasicLockable> lock(*this);
         ConfigResult(id, ec);
@@ -326,14 +354,18 @@ void Network::HandleConfig(uint8_t id)
     }
 }
 
-void Network::HandleLoss(uint8_t id, const char *why)
+void Network::HandleLoss(uint8_t id, ProblemKind kind)
 {
     NodeState *n = Find(id);
     if (!n || !n->up || n->stopped)
         return;
+    const char *why = kind == ProblemKind::Heartbeat ? "heartbeat timeout" : "node reset";
     log_warn("%s lost (%s); %s its inputs and booting it again", n->cfg->label().c_str(), why,
              n->cfg->on_loss == OnLoss::Zero ? "zeroing" : "holding");
     n->last_problem = why;
+    Problem p;
+    p.kind = kind;
+    status_.lost(id, p);
     SetUp(*n, false);
     ScheduleRetry(*n);
 }
@@ -341,11 +373,34 @@ void Network::HandleLoss(uint8_t id, const char *why)
 void Network::HandleState(uint8_t id, NmtState st)
 {
     NodeState *n = Find(id);
-    if (!n || !n->up)
+    if (!n)
         return;
+    n->heard = true;
+    switch (st)
+    {
+    case NmtState::PREOP:
+        status_.set_nmt(id, NmtSeen::PreOperational);
+        break;
+    case NmtState::START:
+        status_.set_nmt(id, NmtSeen::Operational);
+        break;
+    case NmtState::STOP:
+        status_.set_nmt(id, NmtSeen::Stopped);
+        break;
+    default:
+        status_.set_nmt(id, NmtSeen::Unknown);
+        break;
+    }
+    if (!n->up)
+    {
+        // A boot-up message starts Lely's boot of the node.
+        if (st == NmtState::BOOTUP && !n->stopped)
+            status_.set_state(id, NodeRun::Booting);
+        return;
+    }
     if (st == NmtState::BOOTUP)
     {
-        HandleLoss(id, "node reset");
+        HandleLoss(id, ProblemKind::Reset);
         return;
     }
     SetState(*n, static_cast<uint8_t>(st) & 0x7F);
@@ -361,6 +416,14 @@ void Network::HandleRpdo(int num, const uint8_t *data, std::size_t n)
     NodeState *node = Find(static_cast<uint8_t>(m.node_id));
     if (!node || !node->up)
         return;
+    uint16_t &error = rpdo_error_[static_cast<size_t>(num - 1)];
+    if (error == 0x8250)
+    {
+        error = 0;
+        log_info("%s: TPDO %u (COB-ID 0x%03X) is received again", node->cfg->label().c_str(),
+                 m.pdo->number, m.pdo->cob_id);
+        status_.pdo_back(m.node_id, m.pdo->number);
+    }
     unsigned offset = 0;
     for (size_t k = 0; k < m.pdo->entries.size(); ++k)
     {
@@ -377,22 +440,39 @@ void Network::HandleRpdoError(int num, uint16_t eec)
         return;
     const MasterPdo &m = layout_.rpdos[static_cast<size_t>(num - 1)];
     uint16_t &last     = rpdo_error_[static_cast<size_t>(num - 1)];
+    NodeState *node    = Find(static_cast<uint8_t>(m.node_id));
+    // A deadline missed while the node is not running says nothing about the PDO.
+    if (eec == 0x8250 && (!node || !node->up))
+        return;
     if (last == eec)
         return;
-    last             = eec;
+    last = eec;
+    if (eec == 0x8250)
+    {
+        status_.pdo_late(m.node_id, m.pdo->number, m.pdo->cob_id);
+        if (node->cfg->on_loss == OnLoss::Zero)
+        {
+            ZeroPdoInputs(m);
+            image_.commit();
+        }
+    }
+    else
+    {
+        status_.pdo_length(m.node_id, m.pdo->number, m.pdo->cob_id, eec);
+    }
     const char *what = eec == 0x8210   ? "shorter than its mapping; it is ignored"
                        : eec == 0x8220 ? "longer than its mapping"
                                        : "not received in time";
-    NodeState *n     = Find(static_cast<uint8_t>(m.node_id));
-    log_warn("%s: TPDO %u (COB-ID 0x%03X) is %s", n ? n->cfg->label().c_str() : "node",
+    log_warn("%s: TPDO %u (COB-ID 0x%03X) is %s", node ? node->cfg->label().c_str() : "node",
              m.pdo->number, m.pdo->cob_id, what);
 }
 
-void Network::HandleEmcy(uint8_t id, uint16_t eec, uint8_t er)
+void Network::HandleEmcy(uint8_t id, uint16_t eec, uint8_t er, const uint8_t msef[5])
 {
     NodeState *n = Find(id);
     if (!n)
         return;
+    status_.emcy(id, eec, er, msef);
     auto now = clock::now();
     if (eec == 0)
     {
@@ -420,6 +500,10 @@ void Network::SetUp(NodeState &node, bool up)
         SetState(node, 0);
         if (node.cfg->on_loss == OnLoss::Zero)
             ZeroInputs(node);
+        // A PDO late before the loss is judged again once the node is back.
+        for (const MasterPdo *m : node.in_pdos)
+            if (rpdo_error_[m->master_number - 1] == 0x8250)
+                rpdo_error_[m->master_number - 1] = 0;
     }
     image_.commit();
 }
@@ -440,8 +524,86 @@ void Network::ScheduleRetry(NodeState &node)
 void Network::ZeroInputs(const NodeState &node)
 {
     for (const MasterPdo *m : node.in_pdos)
-        for (size_t k = 0; k < m->pdo->entries.size(); ++k)
-            image_.set_input(m->first_entry + k, 0);
+        ZeroPdoInputs(*m);
+}
+
+void Network::ZeroPdoInputs(const MasterPdo &m)
+{
+    for (size_t k = 0; k < m.pdo->entries.size(); ++k)
+        image_.set_input(m.first_entry + k, 0);
+}
+
+Problem Network::BootProblem(NodeState &node, char es, const std::string &what)
+{
+    Problem p;
+    p.boot_status = es;
+    // CiA 302-2 boot error status.
+    switch (es)
+    {
+    case 'B':
+        p.kind = ProblemKind::NoResponse;
+        return p;
+    case 'C':
+    case 'D':
+    case 'M':
+    case 'N':
+    case 'O':
+    {
+        p.kind  = ProblemKind::Identity;
+        p.field = es == 'C'   ? IdentityField::DeviceType
+                  : es == 'D' ? IdentityField::VendorId
+                  : es == 'M' ? IdentityField::ProductCode
+                  : es == 'N' ? IdentityField::Revision
+                              : IdentityField::SerialNumber;
+        // The values the master checks (0x1F84-0x1F87) come from the configuration.
+        const NodeConfig &c = *node.cfg;
+        p.expected          = es == 'C'   ? c.device_type
+                              : es == 'D' ? c.vendor_id
+                              : es == 'M' ? c.product_code
+                              : es == 'N' ? c.revision
+                                          : 0;
+        return p;
+    }
+    case 'J':
+        if (node.has_abort)
+        {
+            Problem a     = node.abort;
+            a.boot_status = es;
+            return a;
+        }
+        break;
+    default:
+        break;
+    }
+    p.kind = ProblemKind::BootError;
+    p.text = what;
+    return p;
+}
+
+// Derived from canworks ec7fd59d, plugin/src/canopen/network.cpp (Network::ReportIdentity): the
+// boot reports only that a value differs, so the value found is read once afterwards.
+void Network::ReadFoundIdentity(uint8_t id, IdentityField field)
+{
+    NodeState *n = Find(id);
+    if (!n || n->stopped)
+        return;
+    uint16_t index = field == IdentityField::DeviceType ? 0x1000 : 0x1018;
+    uint8_t sub =
+        static_cast<uint8_t>(field == IdentityField::DeviceType ? 0 : static_cast<unsigned>(field));
+    try
+    {
+        SubmitRead<uint32_t>(
+            exec_, id, index, sub,
+            [this, field](uint8_t id, uint16_t, uint8_t, std::error_code ec, uint32_t value)
+            {
+                if (!ec)
+                    status_.identity_found(id, field, value);
+            });
+    }
+    catch (const std::exception &e)
+    {
+        log_debug("node %u: cannot read the identity found: %s", id, e.what());
+    }
 }
 
 void Network::OnTick()
@@ -457,6 +619,7 @@ void Network::OnTick()
         {
             // Lely waits for an optional node that never answers without reporting it.
             n.silent_logged = true;
+            status_.silent(it.first);
             log_warn("%s has not answered since the master started; check that it is powered, "
                      "connected, set to node ID %u and to the bus bit rate",
                      n.cfg->label().c_str(), it.first);
@@ -464,7 +627,10 @@ void Network::OnTick()
         if (!n.retry_pending || n.up || n.stopped || now < n.retry_at)
             continue;
         if (Boot(static_cast<uint8_t>(it.first)))
+        {
             n.retry_pending = false;
+            status_.set_state(it.first, NodeRun::Booting);
+        }
         else
             n.retry_at = now + kRetryMin; // a boot is already running
     }

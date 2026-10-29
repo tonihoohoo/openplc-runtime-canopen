@@ -3,7 +3,8 @@
 
 A runtime has CANopen when the plugin library was built. The config format
 version it accepts is read from the plugin's ``config.h`` (``kConfigVersion``),
-so the advertised value cannot drift from what the plugin checks.
+so the advertised value cannot drift from what the plugin checks. ``features``
+lists the optional CANopen routes this web server serves.
 """
 
 import re
@@ -23,8 +24,13 @@ CONFIG_HEADER = (
 _CONFIG_VERSION_RE = re.compile(r"constexpr\s+int\s+kConfigVersion\s*=\s*(\d+)\s*;")
 
 
+# GET /api/canopen/status
+FEATURES = ["status"]
+
+
 class CanopenCapability(TypedDict):
     configVersions: List[int]
+    features: List[str]
 
 
 def canopen_capability(
@@ -42,4 +48,4 @@ def canopen_capability(
     if match is None:
         logger.warning("CANopen plugin present but %s names no config version", header)
         return None
-    return {"configVersions": [int(match.group(1))]}
+    return {"configVersions": [int(match.group(1))], "features": list(FEATURES)}

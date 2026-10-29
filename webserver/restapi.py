@@ -25,6 +25,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import webserver.config
 from webserver import project_snapshot
 from webserver.canopen_capability import canopen_capability
+from webserver.canopen_status import canopen_status_response
 from webserver.logger import get_logger
 from webserver.version import MIN_EDITOR_VERSION, RUNTIME_VERSION
 
@@ -120,7 +121,8 @@ def restapi_capabilities():
             canopen:
               type: object
               description: Present when the CANopen plugin is built; configVersions lists the
-                canopen.json format versions it accepts
+                canopen.json format versions it accepts, features the optional CANopen routes
+                (status for /api/canopen/status)
     """
     capabilities = {
         "runtimeVersion": RUNTIME_VERSION,
@@ -134,6 +136,29 @@ def restapi_capabilities():
     if canopen is not None:
         capabilities["canopen"] = canopen
     return jsonify(capabilities), 200
+
+
+@restapi_bp.route("/canopen/status", methods=["GET"])
+@jwt_required()
+def restapi_canopen_status():
+    """Return the live status of the CANopen networks.
+
+    Read from the CANopen plugin's local socket and returned unchanged.
+    ``active`` is false when no CANopen network runs (PLC stopped, or a
+    program without CANopen).
+    ---
+    tags:
+      - CANopen
+    security:
+      - BearerAuth: []
+    responses:
+      200:
+        description: Status of each network (bus, nodes, recent events), or active false
+      502:
+        description: The CANopen plugin did not give a usable answer
+    """
+    body, status = canopen_status_response()
+    return jsonify(body), status
 
 
 jwt = JWTManager(app_restapi)
