@@ -3,7 +3,9 @@
 # CANopen master plugin: a CANopen master on SocketCAN, built on Lely CANopen (Apache-2.0), which
 # is fetched at a pinned commit and linked statically into the plugin.
 #
-# -DLELY_PREFIX=<dir>      use a Lely already installed there instead of building it
+# -DLELY_PREFIX=<dir>      use a Lely already installed there instead of building it; a prefix in
+#                          lely-prefix/ next to this file is used by default (the release workflow
+#                          puts a cached build there)
 # -DCANOPEN_BUILD_TESTS=ON also build the unit and host tests (ctest)
 
 cmake_minimum_required(VERSION 3.10)
@@ -24,6 +26,10 @@ endif()
 
 option(CANOPEN_BUILD_TESTS "Build the CANopen plugin tests" OFF)
 set(LELY_PREFIX "" CACHE PATH "Installed Lely CANopen to use instead of building it")
+if(NOT LELY_PREFIX AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/lely-prefix/lib/liblely-co.a)
+    set(LELY_PREFIX ${CMAKE_CURRENT_SOURCE_DIR}/lely-prefix)
+    message(STATUS "CANopen plugin: using the Lely build in ${LELY_PREFIX}")
+endif()
 
 set(LELY_LIBS coapp co io2 ev can util libc)
 
@@ -99,6 +105,21 @@ set_target_properties(canopen_plugin PROPERTIES
     PREFIX "lib"
     OUTPUT_NAME "canopen_plugin"
     SUFFIX ".so"
+)
+
+# Licence texts of the plugin and of the statically linked Lely, kept with the build.
+set(CANOPEN_LICENSE_DIR ${CMAKE_BINARY_DIR}/licenses)
+if(LELY_PREFIX)
+    set(LELY_LICENSE_DIR ${LELY_PREFIX}/share/licenses/lely-core)
+else()
+    ExternalProject_Get_Property(lely SOURCE_DIR)
+    set(LELY_LICENSE_DIR ${SOURCE_DIR})
+endif()
+add_custom_command(TARGET canopen_plugin POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CANOPEN_LICENSE_DIR}/lely-core
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE ${CANOPEN_LICENSE_DIR}/LICENSE
+    COMMAND ${CMAKE_COMMAND} -E copy ${LELY_LICENSE_DIR}/LICENSE ${LELY_LICENSE_DIR}/NOTICE
+        ${CANOPEN_LICENSE_DIR}/lely-core/
 )
 
 install(TARGETS canopen_plugin

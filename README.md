@@ -149,6 +149,7 @@ The processes communicate via Unix domain sockets (`/run/runtime/plc_runtime.soc
 - [Security](docs/SECURITY.md) - Authentication, TLS, and file validation
 - [Plugin System](docs/PLUGIN_VENV_GUIDE.md) - Hardware I/O plugins
 - [CANopen](docs/CANOPEN.md) - CANopen master plugin on SocketCAN
+- [CANopen releases](docs/CANOPEN_RELEASES.md) - Publishing and installing this fork's releases
 - [Development Guide](docs/DEVELOPMENT.md) - Contributing and development setup
 
 ### Additional Resources
