@@ -1,0 +1,37 @@
+name: Banned words
+
+# Words from a private list (the BANNED_WORDS secret) must not reach this
+# fork. Every commit not in main (upstream's release) is checked, plus the
+# branch name and the pull request text. Without the secret (pull requests
+# from other forks) the check says so and passes; otherwise it fails.
+
+on:
+  push:
+    branches: [canopen, 'feature/**', 'bugfix/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  banned-words:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Commits, branch name and pull request text
+        env:
+          BANNED_WORDS: ${{ secrets.BANNED_WORDS }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          FOREIGN: ${{ github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          require=--require-list
+          if [ "$FOREIGN" = "true" ]; then require=; fi
+          python3 .github/scripts/check-banned-words.py $require --commits "origin/main..$HEAD" \
+            --env-text BRANCH --env-text PR_TITLE --env-text PR_BODY
