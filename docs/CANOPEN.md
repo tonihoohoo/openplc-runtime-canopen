@@ -116,6 +116,9 @@ a warning.
   (`ip link set can0 up type can bitrate 500000`) and give `bitrate: 0` or the same rate.
 - In Docker the container needs the host's network namespace (`--network host`) to see `can0`, and
   `--cap-add NET_ADMIN` for the plugin to configure it.
+- An image built from this fork needs a semantic version in `RUNTIME_VERSION`
+  (`docker build --build-arg RUNTIME_VERSION=v4.3.1-canopen.<commit> ...`): the editor refuses to
+  upload to a runtime whose version it cannot compare.
 - While the interface is missing or down the master logs it once and retries every second.
 - Messages go to the runtime log with the `[CANOPEN]` prefix and the interface name.
 - Existing installs keep their `plugins.conf`; add the `canopen` line from `plugins_default.conf`

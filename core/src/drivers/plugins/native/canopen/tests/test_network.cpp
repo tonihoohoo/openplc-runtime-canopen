@@ -4,7 +4,7 @@
 // by CANOPEN_TEST_INTERFACE, such as a vcan link), against simulated generic I/O modules: boot with
 // identity check and configuration SDOs (PDO remapping as the editor writes it), inputs into %I,
 // outputs from %Q, node state, loss and recovery, a node with the wrong identity, and the NMT
-// command on stop.
+// command on stop, sent only to the configured nodes.
 
 #include <chrono>
 #include <cstdlib>
@@ -198,8 +198,13 @@ int main()
     spec3.node_id = 3;
     std::unique_ptr<SimSlave> io1(new SimSlave(spec2, dir + "/node2.dcf", vbus, wire));
     SimSlave wrong(spec3, dir + "/node3.dcf", vbus, wire);
+    // On the bus but not in the configuration.
+    SimSlaveSpec spec4;
+    spec4.node_id = 4;
+    SimSlave foreign(spec4, dir + "/node4.dcf", vbus, wire);
     io1->start();
     wrong.start();
+    foreign.start();
     io1->set_inputs(0xA5, -1234);
     wrong.set_inputs(0x77, 0);
 
@@ -249,12 +254,16 @@ int main()
     CHECK(
         scan_until(image, rt, [node] { return node->outputs() == 0x5A; }, std::chrono::seconds(2)));
 
-    // PLC stop: the nodes go to PRE-OPERATIONAL.
+    // PLC stop: the configured nodes go to PRE-OPERATIONAL, a node the master does not manage is
+    // left alone.
     bus.stop();
     CHECK(io1->last_command() == 0x80);
+    CHECK(wrong.last_command() == 0x80);
+    CHECK(foreign.last_command() != 0x80);
 
     io1.reset();
     wrong.stop();
+    foreign.stop();
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }
