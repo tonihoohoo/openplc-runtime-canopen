@@ -24,6 +24,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 import webserver.config
 from webserver import project_snapshot
+from webserver.canopen_capability import canopen_capability
 from webserver.logger import get_logger
 from webserver.version import MIN_EDITOR_VERSION, RUNTIME_VERSION
 
@@ -116,20 +117,23 @@ def restapi_capabilities():
             minEditorVersion:
               type: string
               description: Oldest OpenPLC Editor version this runtime accepts programs from
+            canopen:
+              type: object
+              description: Present when the CANopen plugin is built; configVersions lists the
+                canopen.json format versions it accepts
     """
-    return (
-        jsonify(
-            {
-                "runtimeVersion": RUNTIME_VERSION,
-                "minEditorVersion": MIN_EDITOR_VERSION,
-                # Tells a client it may send a source-project snapshot with an
-                # upload and retrieve it later. Unauthenticated like the rest of
-                # this endpoint, so a client can decide before logging in.
-                "projectSnapshot": True,
-            }
-        ),
-        200,
-    )
+    capabilities = {
+        "runtimeVersion": RUNTIME_VERSION,
+        "minEditorVersion": MIN_EDITOR_VERSION,
+        # Tells a client it may send a source-project snapshot with an
+        # upload and retrieve it later. Unauthenticated like the rest of
+        # this endpoint, so a client can decide before logging in.
+        "projectSnapshot": True,
+    }
+    canopen = canopen_capability()
+    if canopen is not None:
+        capabilities["canopen"] = canopen
+    return jsonify(capabilities), 200
 
 
 jwt = JWTManager(app_restapi)

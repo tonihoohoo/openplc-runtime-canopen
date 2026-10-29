@@ -109,6 +109,30 @@ location, a `%Q` location in a TPDO or a `%I` location in an RPDO, two entries o
 location, or a location outside the runtime's I/O image. Two entries on the same `%Q` location are
 a warning.
 
+## Installing a release
+
+Releases of this fork are tagged `v<upstream version>-canopen.<N>` (for example `v4.3.1-canopen.1`)
+and published as the image `ghcr.io/tonihoohoo/openplc-runtime` for `linux/arm64` and
+`linux/amd64`, with `latest` on the newest release. Install with the Docker installer, pointed at
+that image:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tonihoohoo/openplc-runtime-canopen/canopen/scripts/install-docker.sh \
+  | sudo RUNTIME_REPOSITORY=ghcr.io/tonihoohoo/openplc-runtime bash -s -- --runtime-version v4.3.1-canopen.1
+```
+
+The installer records the image repository on the device, so the OpenPLC Editor's
+**Change version** dialog then lists this fork's releases and switches between them; picking an
+earlier tag rolls back. The runtime container runs privileged on the host network, so it sees
+`can0`. Leave out `--runtime-version` to install `latest`.
+
+`/api/capabilities` reports `"canopen": {"configVersions": [1]}` when the plugin is built, and the
+editor warns before uploading a CANopen project to a runtime without it.
+
+Each release image keeps the plugin's licence and Lely's `LICENSE` and `NOTICE` in
+`/workdir/core/src/drivers/plugins/native/canopen/build/licenses/`. How releases are made is in
+[CANOPEN_RELEASES.md](CANOPEN_RELEASES.md).
+
 ## Running
 
 - The interface must exist. Setting the bit rate and bringing the link up needs `CAP_NET_ADMIN`
@@ -116,9 +140,10 @@ a warning.
   (`ip link set can0 up type can bitrate 500000`) and give `bitrate: 0` or the same rate.
 - In Docker the container needs the host's network namespace (`--network host`) to see `can0`, and
   `--cap-add NET_ADMIN` for the plugin to configure it.
-- An image built from this fork needs a semantic version in `RUNTIME_VERSION`
+- An image built by hand from this fork needs a semantic version in `RUNTIME_VERSION`
   (`docker build --build-arg RUNTIME_VERSION=v4.3.1-canopen.<commit> ...`): the editor refuses to
-  upload to a runtime whose version it cannot compare.
+  upload to a runtime whose version it cannot compare. Keep such tags off the repository: a commit
+  hash sorts above every numbered release of the same base.
 - While the interface is missing or down the master logs it once and retries every second.
 - Messages go to the runtime log with the `[CANOPEN]` prefix and the interface name.
 - Existing installs keep their `plugins.conf`; add the `canopen` line from `plugins_default.conf`
@@ -136,7 +161,8 @@ cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
 ```
 
-`-DLELY_PREFIX=<dir>` uses a Lely already installed there instead of fetching it.
+`-DLELY_PREFIX=<dir>` uses a Lely already installed there instead of fetching it; a Lely installed
+in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workflow caches one there).
 
 | Test | What it covers |
 |---|---|
