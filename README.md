@@ -148,6 +148,7 @@ The processes communicate via Unix domain sockets (`/run/runtime/plc_runtime.soc
 - [Debug Protocol](docs/DEBUG_PROTOCOL.md) - WebSocket debug interface
 - [Security](docs/SECURITY.md) - Authentication, TLS, and file validation
 - [Plugin System](docs/PLUGIN_VENV_GUIDE.md) - Hardware I/O plugins
+- [CANopen](docs/CANOPEN.md) - CANopen master plugin on SocketCAN
 - [Development Guide](docs/DEVELOPMENT.md) - Contributing and development setup
 
 ### Additional Resources
@@ -287,7 +288,7 @@ The installation script will:
 3. Create Python virtual environment at `venvs/runtime/`
 4. Install Python dependencies
 5. Compile the PLC runtime core with CMake
-6. Build native plugins (e.g., EtherCAT client, S7comm) and EtherDOG, the EtherCAT master service
+6. Build native plugins (e.g., EtherCAT client, S7comm, CANopen master) and EtherDOG, the EtherCAT master service
 7. Install and start a systemd service (`openplc-runtime`) when systemd is available
 
 ### Manual Build

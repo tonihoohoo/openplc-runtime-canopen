@@ -1,0 +1,54 @@
+name: CANopen
+
+# The CANopen master plugin (core/src/drivers/plugins/native/canopen, docs/CANOPEN.md): its unit
+# tests and the host test on Lely's in-process bus, the same host test on a vcan link, and an
+# end-to-end run of plc_main with a program compiled by the OpenPLC Editor's command line.
+
+on:
+  pull_request:
+  push:
+    branches: [canopen]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canopen-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin:
+    name: Plugin build and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends autoconf automake libtool linux-modules-extra-$(uname -r)
+
+      - name: Build
+        working-directory: core/src/drivers/plugins/native/canopen
+        run: |
+          cmake -B build -DCANOPEN_BUILD_TESTS=ON
+          cmake --build build -j"$(nproc)"
+
+      - name: Unit and virtual bus tests
+        working-directory: core/src/drivers/plugins/native/canopen
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Host test on a vcan link
+        working-directory: core/src/drivers/plugins/native/canopen
+        run: |
+          sudo modprobe vcan
+          sudo ip link add dev vcan0 type vcan
+          sudo ip link set vcan0 up
+          CANOPEN_TEST_INTERFACE=vcan0 ./build/tests/test_network
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canopen-plugin
+          path: |
+            core/src/drivers/plugins/native/canopen/build/plugins/libcanopen_plugin.so
+            core/src/drivers/plugins/native/canopen/build/tests/canopen_sim_slave
