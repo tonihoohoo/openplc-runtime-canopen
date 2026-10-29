@@ -58,6 +58,8 @@ class Network : public lely::canopen::BasicMaster
     static constexpr std::chrono::milliseconds kTick{1};
     static constexpr std::chrono::milliseconds kRetryMin{1000};
     static constexpr std::chrono::milliseconds kRetryMax{16000};
+    // A node not heard from this long after Start() is reported once as silent.
+    static constexpr std::chrono::milliseconds kSilentAfter{5000};
 
   protected:
     void OnBoot(uint8_t id, lely::canopen::NmtState st, char es,
@@ -79,6 +81,8 @@ class Network : public lely::canopen::BasicMaster
         size_t slot           = 0;
         bool up               = false;
         bool stopped          = false; // StopNodes ran
+        bool heard            = false; // a boot attempt has reported back
+        bool silent_logged    = false;
         uint8_t state         = 0;
         bool retry_pending    = false;
         clock::time_point retry_at{};
@@ -122,6 +126,7 @@ class Network : public lely::canopen::BasicMaster
     std::vector<uint16_t> rpdo_error_; // per master RPDO: the last error logged
     uint64_t synced_scans_ = 0;
     bool running_          = false;
+    clock::time_point started_{};
 };
 
 } // namespace canopen_plugin

@@ -23,6 +23,7 @@ using lely::canopen::NmtState;
 constexpr std::chrono::milliseconds Network::kTick;
 constexpr std::chrono::milliseconds Network::kRetryMin;
 constexpr std::chrono::milliseconds Network::kRetryMax;
+constexpr std::chrono::milliseconds Network::kSilentAfter;
 
 uint64_t pdo_get_bits(const uint8_t *data, size_t len, unsigned offset, unsigned bits)
 {
@@ -90,6 +91,7 @@ void Network::Start()
 {
     running_      = true;
     synced_scans_ = image_.scans();
+    started_      = clock::now();
     log_info("%s: starting, %zu node(s), %zu input and %zu output PDO(s)", cfg_.label().c_str(),
              nodes_.size(), layout_.rpdos.size(), layout_.tpdos.size());
     Reset();
@@ -214,6 +216,7 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
     NodeState *n = Find(id);
     if (!n || n->stopped)
         return;
+    n->heard = true;
     if (es == 0 || es == 'L')
     {
         if (!n->last_problem.empty())
@@ -400,6 +403,14 @@ void Network::OnTick()
     for (auto &it : nodes_)
     {
         NodeState &n = it.second;
+        if (!n.heard && !n.silent_logged && now - started_ >= kSilentAfter)
+        {
+            // Lely waits for an optional node that never answers without reporting it.
+            n.silent_logged = true;
+            log_warn("%s has not answered since the master started; check that it is powered, "
+                     "connected, set to node ID %u and to the bus bit rate",
+                     n.cfg->label().c_str(), it.first);
+        }
         if (!n.retry_pending || n.up || n.stopped || now < n.retry_at)
             continue;
         if (Boot(static_cast<uint8_t>(it.first)))
