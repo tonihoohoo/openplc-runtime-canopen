@@ -34,12 +34,13 @@ class Dcf
               << std::hex << type << "\nAccessType=" << access << "\nDefaultValue=0x" << value
               << std::dec << "\nPDOMapping=" << (map ? 1 : 0) << "\n\n";
     }
-    void rec(const char *idx, const char *name, unsigned subs, unsigned highest)
+    void rec(const char *idx, const char *name, unsigned subs, unsigned highest,
+             const char *sub0_access = "ro")
     {
         list_.push_back(idx);
         body_ << "[" << idx << "]\nParameterName=" << name << "\nObjectType=0x9\nSubNumber=" << subs
               << "\n\n";
-        sub(idx, 0, "Highest sub-index supported", 0x5, "ro", highest);
+        sub(idx, 0, "Highest sub-index supported", 0x5, sub0_access, highest);
     }
     void sub(const char *idx, unsigned s, const char *name, unsigned type, const char *access,
              uint32_t value, bool map = false)
@@ -97,14 +98,14 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     d.rec("1400", "RPDO communication parameter", 3, 2);
     d.sub("1400", 1, "COB-ID", 0x7, "rw", 0x200 + s.node_id);
     d.sub("1400", 2, "Transmission type", 0x5, "rw", 0xFF);
-    d.rec("1600", "RPDO mapping parameter", 2, 1);
+    d.rec("1600", "RPDO mapping parameter", 2, 1, "rw");
     d.sub("1600", 1, "Mapped object", 0x7, "rw", 0x62000108);
     d.rec("1800", "TPDO communication parameter", 5, 5);
     d.sub("1800", 1, "COB-ID", 0x7, "rw", 0x180 + s.node_id);
     d.sub("1800", 2, "Transmission type", 0x5, "rw", 0xFF);
     d.sub("1800", 3, "Inhibit time", 0x6, "rw", 0);
     d.sub("1800", 5, "Event timer", 0x6, "rw", 20);
-    d.rec("1A00", "TPDO mapping parameter", 3, 2);
+    d.rec("1A00", "TPDO mapping parameter", 3, 2, "rw");
     d.sub("1A00", 1, "Mapped object", 0x7, "rw", 0x60000108);
     d.sub("1A00", 2, "Mapped object", 0x7, "rw", 0x64010110);
     d.var("2100", "Parameter", 0x7, "rw", 0);

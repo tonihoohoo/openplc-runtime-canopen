@@ -2,8 +2,9 @@
 //
 // The master end to end on Lely's in-process virtual CAN bus (or on the SocketCAN interface named
 // by CANOPEN_TEST_INTERFACE, such as a vcan link), against simulated generic I/O modules: boot with
-// identity check and configuration SDOs, inputs into %I, outputs from %Q, node state, loss and
-// recovery, a node with the wrong identity, and the NMT command on stop.
+// identity check and configuration SDOs (PDO remapping as the editor writes it), inputs into %I,
+// outputs from %Q, node state, loss and recovery, a node with the wrong identity, and the NMT
+// command on stop.
 
 #include <chrono>
 #include <cstdlib>
@@ -46,7 +47,18 @@ const char *kConfig = R"({
        "supervision": {"type": "heartbeat", "consumer_ms": 300},
        "on_loss": "hold",
        "state_location": "%IB10",
-       "sdo": [{"index": 8448, "subindex": 0, "data": "78563412"}],
+       "sdo": [{"index": 8448, "subindex": 0, "data": "78563412"},
+               {"index": 6144, "subindex": 1, "data": "82010080"},
+               {"index": 6656, "subindex": 0, "data": "00"},
+               {"index": 6656, "subindex": 1, "data": "08010060"},
+               {"index": 6656, "subindex": 2, "data": "10010164"},
+               {"index": 6656, "subindex": 0, "data": "02"},
+               {"index": 6144, "subindex": 1, "data": "82010000"},
+               {"index": 5120, "subindex": 1, "data": "02020080"},
+               {"index": 5632, "subindex": 0, "data": "00"},
+               {"index": 5632, "subindex": 1, "data": "08010062"},
+               {"index": 5632, "subindex": 0, "data": "01"},
+               {"index": 5120, "subindex": 1, "data": "02020000"}],
        "tpdos": [{"number": 1, "cob_id": 386, "entries": [
          {"index": 24576, "subindex": 1, "type": "UNSIGNED8", "location": "%IB0"},
          {"index": 25601, "subindex": 1, "type": "INTEGER16", "location": "%IW0"}]}],
