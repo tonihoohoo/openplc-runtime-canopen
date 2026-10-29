@@ -152,6 +152,20 @@ jobs:
         run: |
           "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 5 --timeout 180
 
+      - name: The node goes pre-operational when the runtime dies
+        run: |
+          # The project's node watches the master's heartbeat (0x1016); no NMT command is sent.
+          "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 1 \
+            --timeout 180 --expect-master-loss 5 > "$RUNNER_TEMP/sim.log" 2>&1 &
+          sim=$!
+          timeout 180 bash -c "until grep -q 'watching the master' '$RUNNER_TEMP/sim.log'; do sleep 0.5; done" \
+            || { cat "$RUNNER_TEMP/sim.log"; exit 1; }
+          sudo pkill -KILL -x plc_main
+          status=0
+          wait "$sim" || status=$?
+          cat "$RUNNER_TEMP/sim.log"
+          exit "$status"
+
       - name: Runtime log
         if: always()
         run: |

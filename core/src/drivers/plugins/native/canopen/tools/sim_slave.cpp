@@ -89,12 +89,16 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     Dcf d;
     d.var("1000", "Device type", 0x7, "ro", s.device_type);
     d.var("1001", "Error register", 0x5, "ro", 0);
+    d.rec("1016", "Consumer heartbeat time", 2, 1);
+    d.sub("1016", 1, "Consumer heartbeat time", 0x7, "rw", 0);
     d.var("1017", "Producer heartbeat time", 0x6, "rw", s.heartbeat_ms);
     d.rec("1018", "Identity object", 5, 4);
     d.sub("1018", 1, "Vendor-ID", 0x7, "ro", s.vendor_id);
     d.sub("1018", 2, "Product code", 0x7, "ro", s.product_code);
     d.sub("1018", 3, "Revision number", 0x7, "ro", s.revision);
     d.sub("1018", 4, "Serial number", 0x7, "ro", 0);
+    d.rec("1029", "Error behaviour", 2, 1);
+    d.sub("1029", 1, "Communication error", 0x5, "rw", 0);
     d.rec("1400", "RPDO communication parameter", 3, 2);
     d.sub("1400", 1, "COB-ID", 0x7, "rw", 0x200 + s.node_id);
     d.sub("1400", 2, "Transmission type", 0x5, "rw", 0xFF);

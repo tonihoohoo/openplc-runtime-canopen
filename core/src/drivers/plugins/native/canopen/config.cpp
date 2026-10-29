@@ -254,6 +254,9 @@ bool Parser::parse_network(const cJSON *j, size_t pos, NetworkConfig &net)
         net.master_node_id = static_cast<unsigned>(v);
     if (get_uint(j, "heartbeat_producer_ms", where, 0, 65535, v, &zero))
         net.heartbeat_producer_ms = static_cast<unsigned>(v);
+    const uint64_t def_priority = kDefaultPriority;
+    if (get_uint(j, "priority", where, 1, kMaxPriority, v, &def_priority))
+        net.priority = static_cast<int>(v);
     const uint64_t def_sdo_timeout = 1000;
     if (get_uint(j, "sdo_timeout_ms", where, 10, 60000, v, &def_sdo_timeout))
         net.sdo_timeout_ms = static_cast<unsigned>(v);
