@@ -118,6 +118,12 @@ void parse_linkinfo(const rtattr *linkinfo, LinkInfo &out)
                     std::memcpy(&bt, RTA_DATA(d), sizeof(bt));
                     out.bitrate = bt.bitrate;
                 }
+                else if (d->rta_type == IFLA_CAN_RESTART_MS && RTA_PAYLOAD(d) >= sizeof(uint32_t))
+                {
+                    uint32_t ms;
+                    std::memcpy(&ms, RTA_DATA(d), sizeof(ms));
+                    out.restart_ms = static_cast<long>(ms);
+                }
             }
         }
     }
@@ -214,9 +220,12 @@ int link_set_bitrate(const std::string &name, unsigned bitrate, long restart_ms)
     rtattr *linkinfo     = req.begin_nest(IFLA_LINKINFO);
     req.add(IFLA_INFO_KIND, "can", 3);
     rtattr *data = req.begin_nest(IFLA_INFO_DATA);
-    can_bittiming bt{};
-    bt.bitrate = bitrate;
-    req.add(IFLA_CAN_BITTIMING, &bt, sizeof(bt));
+    if (bitrate)
+    {
+        can_bittiming bt{};
+        bt.bitrate = bitrate;
+        req.add(IFLA_CAN_BITTIMING, &bt, sizeof(bt));
+    }
     if (restart_ms >= 0)
     {
         uint32_t ms = static_cast<uint32_t>(restart_ms);
@@ -227,8 +236,26 @@ int link_set_bitrate(const std::string &name, unsigned bitrate, long restart_ms)
     return transact(req, nullptr);
 }
 
-LinkResult prepare_link(const std::string &name, unsigned bitrate, std::string &problem)
+LinkPlan plan_link(const LinkInfo &li, unsigned bitrate)
 {
+    LinkPlan plan;
+    const bool can   = li.kind == "can";
+    plan.set_bitrate = can && bitrate && li.bitrate != bitrate;
+    if (!plan.set_bitrate && li.up)
+    {
+        plan.no_restart = can && li.restart_ms == 0;
+        return plan;
+    }
+    plan.set_restart = !plan.set_bitrate && can && li.restart_ms == 0;
+    plan.bring_up    = true;
+    return plan;
+}
+
+LinkResult prepare_link(const std::string &name, unsigned bitrate, std::string &problem,
+                        bool *no_restart)
+{
+    if (no_restart)
+        *no_restart = false;
     LinkInfo li;
     int rc = link_get(name, li);
     if (rc == -ENODEV)
@@ -241,16 +268,26 @@ LinkResult prepare_link(const std::string &name, unsigned bitrate, std::string &
         problem = "cannot read CAN interface " + name + ": " + std::strerror(-rc);
         return LinkResult::Failed;
     }
-    bool change_rate = li.kind == "can" && bitrate && li.bitrate != bitrate;
-    if (!change_rate && li.up)
+    const LinkPlan plan = plan_link(li, bitrate);
+    if (!plan.bring_up)
+    {
+        if (no_restart)
+            *no_restart = plan.no_restart;
         return LinkResult::Ready;
-    if (change_rate)
+    }
+    if (plan.set_bitrate)
     {
         if (li.up && (rc = link_set_up(name, false)) < 0)
             goto fail;
         if ((rc = link_set_bitrate(name, bitrate, kRestartMs)) < 0)
             goto fail;
         log_info("set CAN interface %s to %u bit/s", name.c_str(), bitrate);
+    }
+    else if (plan.set_restart)
+    {
+        if ((rc = link_set_bitrate(name, 0, kRestartMs)) < 0)
+            goto fail;
+        log_info("turned on bus-off restart on CAN interface %s", name.c_str());
     }
     if ((rc = link_set_up(name, true)) < 0)
         goto fail;

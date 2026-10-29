@@ -17,11 +17,14 @@ struct LinkInfo
     bool up = false;
     std::string kind; // IFLA_INFO_KIND: "can", "vcan", ...
     unsigned bitrate = 0;
+    long restart_ms  = -1; // bus-off auto-restart delay; 0: off, -1: not reported (vcan)
 };
 
 // Each returns 0 or a negative errno (-ENODEV: no such interface, -EPERM: not permitted).
 int link_get(const std::string &name, LinkInfo &out);
 int link_set_up(const std::string &name, bool up);
+// `bitrate` 0 keeps the link's bit rate; `restart_ms` -1 keeps its restart delay. The link must
+// be down.
 int link_set_bitrate(const std::string &name, unsigned bitrate, long restart_ms);
 
 enum class LinkResult
@@ -32,12 +35,25 @@ enum class LinkResult
     Failed
 };
 
-// Bus-off auto-restart delay set with the bit rate.
+// Bus-off auto-restart delay set whenever the master configures the link.
 constexpr long kRestartMs = 100;
 
-// Makes the link usable: sets `bitrate` (0 keeps the link's own) when it differs, and brings
-// the link up. Logs what it changes; `problem` says why it is not Ready.
-LinkResult prepare_link(const std::string &name, unsigned bitrate, std::string &problem);
+// What prepare_link does to a link in state `li` for the configured `bitrate` (0: keep).
+struct LinkPlan
+{
+    bool set_bitrate = false; // take the link down and set the bit rate with kRestartMs
+    bool set_restart = false; // set kRestartMs only (the link is down)
+    bool bring_up    = false;
+    bool no_restart  = false; // left up as it is, with auto-restart off
+};
+LinkPlan plan_link(const LinkInfo &li, unsigned bitrate);
+
+// Makes the link usable: sets `bitrate` (0 keeps the link's own) when it differs, turns on the
+// bus-off auto-restart when it brings a CAN link up with it off, and brings the link up. Logs what
+// it changes; `problem` says why it is not Ready. A link found already up is left as it is;
+// `no_restart` is then set when its auto-restart is off.
+LinkResult prepare_link(const std::string &name, unsigned bitrate, std::string &problem,
+                        bool *no_restart = nullptr);
 
 } // namespace canopen_plugin
 

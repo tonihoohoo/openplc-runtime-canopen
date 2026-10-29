@@ -6,18 +6,23 @@
 // outputs from %Q, node state, loss and recovery, a node with the wrong identity, a configured node
 // that never answers, and the NMT command on stop, sent only to the configured nodes.
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <unistd.h>
 
+#include <lely/ev/loop.hpp>
+#include <lely/io2/ctx.hpp>
 #include <lely/io2/sys/clock.hpp>
 #include <lely/io2/vcan.hpp>
 
@@ -28,6 +33,25 @@
 #include "master_dcf.h"
 #include "process_image.h"
 #include "sim_slave.h"
+
+// Counts this thread's allocations, to show the scan hooks make none.
+thread_local long t_allocs = 0;
+
+void *operator new(std::size_t n)
+{
+    ++t_allocs;
+    if (void *p = std::malloc(n ? n : 1))
+        return p;
+    throw std::bad_alloc();
+}
+void operator delete(void *p) noexcept
+{
+    std::free(p);
+}
+void operator delete(void *p, std::size_t) noexcept
+{
+    std::free(p);
+}
 
 using namespace canopen_plugin;
 using canopen_sim::SimSlave;
@@ -172,6 +196,157 @@ size_t warnings_with(const std::string &text)
     return n;
 }
 
+struct Frame
+{
+    uint32_t id;
+    uint8_t first;
+    std::chrono::steady_clock::time_point at;
+};
+
+// Records the frames on the virtual bus while `run` is set.
+void listen(std::shared_ptr<lely::io::VirtualCanController> vbus, std::atomic<bool> &run,
+            std::vector<Frame> &frames)
+{
+    lely::io::Context ctx;
+    lely::ev::Loop loop;
+    lely::io::VirtualCanChannel chan(ctx, loop.get_executor());
+    chan.open(*vbus);
+    while (run)
+    {
+        can_msg msg = CAN_MSG_INIT;
+        std::error_code ec;
+        if (chan.read(&msg, nullptr, nullptr, 50, ec) == 1)
+            frames.push_back(
+                {msg.id, msg.len ? msg.data[0] : uint8_t{0}, std::chrono::steady_clock::now()});
+    }
+}
+
+// One SYNC per scan, right after the scan's outputs, which leave without waiting for a tick.
+void check_scan_exchange(std::shared_ptr<lely::io::VirtualCanController> vbus, ProcessImage &image,
+                         const plugin_runtime_args_t &rt)
+{
+    constexpr int kScans = 100;
+    std::atomic<bool> run{true};
+    std::vector<Frame> frames;
+    std::thread listener([&] { listen(vbus, run, frames); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::vector<std::chrono::steady_clock::time_point> ends;
+    ends.reserve(kScans);
+    long scan_allocs = 0;
+    auto next        = std::chrono::steady_clock::now();
+    for (int i = 0; i < kScans; ++i)
+    {
+        next += std::chrono::milliseconds(20);
+        std::this_thread::sleep_until(next);
+        long before = t_allocs;
+        image.copy_to_plc(rt);
+        g_byte_out[0] = static_cast<IEC_BYTE>(0x80 + i);
+        image.copy_from_plc(rt);
+        scan_allocs += t_allocs - before;
+        ends.push_back(std::chrono::steady_clock::now());
+    }
+    CHECK(scan_allocs == 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    run = false;
+    listener.join();
+
+    int syncs   = 0;
+    int ordered = 0;
+    std::vector<double> latency_ms;
+    int rpdo_value = -1;
+    for (const Frame &f : frames)
+    {
+        if (f.at < ends.front())
+            continue;
+        if (f.id == 0x202)
+        {
+            rpdo_value = f.first;
+            int scan   = f.first - 0x80;
+            if (scan >= 0 && scan < kScans)
+                latency_ms.push_back(
+                    std::chrono::duration<double, std::milli>(f.at - ends[scan]).count());
+        }
+        else if (f.id == 0x80)
+        {
+            // The outputs of the scan this SYNC belongs to went first.
+            if (rpdo_value == 0x80 + syncs)
+                ++ordered;
+            ++syncs;
+        }
+    }
+    std::printf("scan exchange: %d SYNC, %d after their scan's outputs, %zu output frames\n", syncs,
+                ordered, latency_ms.size());
+    CHECK(syncs == kScans);
+    CHECK(ordered == kScans);
+    CHECK(latency_ms.size() == kScans);
+    if (!latency_ms.empty())
+    {
+        std::sort(latency_ms.begin(), latency_ms.end());
+        double median = latency_ms[latency_ms.size() / 2];
+        std::printf("scan exchange: median output latency %.3f ms\n", median);
+        // The housekeeping tick is 10 ms: a woken exchange is far below it.
+        CHECK(median < 3.0);
+    }
+    g_byte_out[0] = 0x5A;
+}
+
+const char *kWatchConfig = R"({
+  "version": 1,
+  "networks": [{
+    "name": "watch", "interface": "vcan-test", "bitrate": 0,
+    "heartbeat_producer_ms": 50,
+    "on_plc_stop": "none",
+    "nodes": [
+      {"node_id": 2, "name": "io1",
+       "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
+       "supervision": {"type": "heartbeat", "consumer_ms": 300},
+       "state_location": "%IB10",
+       "sdo": [{"index": 4118, "subindex": 1, "data": "C8007F00"}]}
+    ]
+  }]
+})";
+
+// A node watching the master's heartbeat goes pre-operational once the master is gone, even when
+// the master sends no NMT command on stop.
+void check_master_watch(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                        const std::string &wire, const std::string &dir,
+                        const plugin_runtime_args_t &rt)
+{
+    std::string text = kWatchConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(text, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/watch.dcf";
+    {
+        FILE *f       = std::fopen(dcf.c_str(), "w");
+        std::string t = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+    }
+    SimSlaveSpec spec;
+    spec.node_id = 2;
+    SimSlave io(spec, dir + "/watch_node2.dcf", vbus, wire);
+    io.start();
+    Bus bus(net, layout, image, dcf, vbus);
+    bus.start();
+    CHECK(scan_until(image, rt, [] { return g_byte_in[10] == 5; }, std::chrono::seconds(10)));
+    CHECK(io.last_command() == 1);
+    bus.stop();
+    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (io.last_command() != 0x80 && std::chrono::steady_clock::now() < end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(io.last_command() == 0x80);
+    io.stop();
+}
+
 } // namespace
 
 int main()
@@ -251,6 +426,12 @@ int main()
     CHECK(
         scan_until(image, rt, [node] { return node->outputs() == 0x5A; }, std::chrono::seconds(2)));
 
+    // A session runs at the real-time priority, or says once that it cannot.
+    CHECK(bus.realtime() || warnings_with("cannot use real-time priority") == 1);
+
+    if (vbus)
+        check_scan_exchange(vbus, image, rt);
+
     // The node with the wrong identity never comes up; the other one is not held back.
     CHECK(g_byte_in[11] == 0);
     CHECK(g_byte_in[1] == 0);
@@ -290,6 +471,8 @@ int main()
     io1.reset();
     wrong.stop();
     foreign.stop();
+
+    check_master_watch(vbus, wire, dir, rt);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }

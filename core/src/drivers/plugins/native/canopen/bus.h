@@ -2,8 +2,9 @@
 //
 // bus.h - the bus thread of one network: prepares the CAN link (bit rate, up), opens the SocketCAN
 // interface, runs the network's master on a Lely event loop, and keeps retrying while the
-// interface is missing, down or cannot be configured. With a virtual controller (tests) the master
-// runs on Lely's in-process bus instead.
+// interface is missing, down or cannot be configured. A session runs at the network's SCHED_FIFO
+// priority with 1 ns timer slack; preparing the link and waiting to retry run at SCHED_OTHER. With
+// a virtual controller (tests) the master runs on Lely's in-process bus instead.
 //
 // Derived in design from canworks ec7fd59d, plugin/src/canopen/bus.h.
 
@@ -52,6 +53,11 @@ class Bus
     void start();
     // Sends the network's NMT command for a PLC stop, ends the session and joins. Idempotent.
     void stop();
+    // True while a session runs at the real-time priority.
+    bool realtime() const
+    {
+        return realtime_.load();
+    }
 
   private:
     static constexpr std::chrono::milliseconds kLoopSlice{100};
@@ -60,6 +66,8 @@ class Bus
     static constexpr int kShutdownSlices = 20;
 
     void thread_main();
+    void enter_realtime();
+    void leave_realtime();
     void run_session();
     bool link_lost() const;
     bool wait_for(std::chrono::milliseconds d); // false if stop was requested
@@ -71,6 +79,9 @@ class Bus
     std::shared_ptr<lely::io::VirtualCanController> vbus_;
     std::thread thread_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> realtime_{false};
+    bool realtime_warned_ = false;
+    bool restart_warned_  = false;
     std::mutex mutex_;
     std::condition_variable cv_;
 };

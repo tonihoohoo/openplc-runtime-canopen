@@ -9,6 +9,7 @@
 //   cycle_start: writes the newest inputs to %I through the journal
 //   cycle_end:   reads %Q under the image lock and hands it to the bus threads
 //   stop_loop:   sends each network's NMT command for a PLC stop and joins the bus threads
+// No exception leaves an entry point: the runtime calls them as C functions.
 
 #include <atomic>
 #include <cstdio>
@@ -81,9 +82,7 @@ bool write_file(const std::string &path, const std::string &text)
     return static_cast<bool>(out);
 }
 
-} // namespace
-
-CANOPEN_EXPORT int init(void *args)
+int do_init(void *args)
 {
     if (!args)
         return -1;
@@ -95,7 +94,7 @@ CANOPEN_EXPORT int init(void *args)
     return 0;
 }
 
-CANOPEN_EXPORT int start_loop(void)
+int do_start_loop()
 {
     if (g_run)
         return 0;
@@ -156,7 +155,7 @@ CANOPEN_EXPORT int start_loop(void)
     return 0;
 }
 
-CANOPEN_EXPORT void stop_loop(void)
+void do_stop_loop()
 {
     if (!g_run)
         return;
@@ -168,20 +167,100 @@ CANOPEN_EXPORT void stop_loop(void)
     log_info("CANopen master stopped");
 }
 
+void report(const char *where, const char *what)
+{
+    log_error("%s failed: %s", where, what);
+}
+
+} // namespace
+
+CANOPEN_EXPORT int init(void *args)
+{
+    try
+    {
+        return do_init(args);
+    }
+    catch (const std::exception &e)
+    {
+        report("init", e.what());
+    }
+    catch (...)
+    {
+        report("init", "unknown error");
+    }
+    return -1;
+}
+
+CANOPEN_EXPORT int start_loop(void)
+{
+    try
+    {
+        return do_start_loop();
+    }
+    catch (const std::exception &e)
+    {
+        report("start", e.what());
+    }
+    catch (...)
+    {
+        report("start", "unknown error");
+    }
+    try
+    {
+        // Bus threads that started were joined as the partial setup unwound; this clears a
+        // run left from before.
+        do_stop_loop();
+    }
+    catch (...)
+    {
+    }
+    log_error("the CANopen master does not run");
+    return -1;
+}
+
+CANOPEN_EXPORT void stop_loop(void)
+{
+    try
+    {
+        do_stop_loop();
+    }
+    catch (const std::exception &e)
+    {
+        report("stop", e.what());
+    }
+    catch (...)
+    {
+        report("stop", "unknown error");
+    }
+}
+
+// The scan hooks cannot throw; the handlers only keep an exception out of the runtime.
 CANOPEN_EXPORT void cycle_start(void)
 {
     if (!g_active.load(std::memory_order_acquire))
         return;
-    for (auto &image : g_run->images)
-        image->copy_to_plc(g_args);
+    try
+    {
+        for (auto &image : g_run->images)
+            image->copy_to_plc(g_args);
+    }
+    catch (...)
+    {
+    }
 }
 
 CANOPEN_EXPORT void cycle_end(void)
 {
     if (!g_active.load(std::memory_order_acquire))
         return;
-    for (auto &image : g_run->images)
-        image->copy_from_plc(g_args);
+    try
+    {
+        for (auto &image : g_run->images)
+            image->copy_from_plc(g_args);
+    }
+    catch (...)
+    {
+    }
 }
 
 CANOPEN_EXPORT void cleanup(void)

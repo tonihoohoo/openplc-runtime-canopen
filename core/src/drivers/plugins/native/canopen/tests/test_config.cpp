@@ -84,6 +84,7 @@ void test_valid()
     CHECK(net.master_node_id == 127);
     CHECK(net.sdo_timeout_ms == 1000);
     CHECK(net.heartbeat_producer_ms == 100);
+    CHECK(net.priority == kDefaultPriority);
     CHECK(net.sync == SyncMode::PlcCycle);
     CHECK(net.on_stop == OnStop::PreOperational);
     CHECK(net.nodes.size() == 1);
@@ -108,6 +109,8 @@ void test_refusals()
     CHECK(refused_with("{", "not valid JSON"));
     CHECK(refused_with(with(kValid, "\"version\": 1", "\"version\": 2"), "version 2"));
     CHECK(refused_with(with(kValid, "\"bitrate\": 500000", "\"bitrate\": 400000"), "bit rate"));
+    CHECK(refused_with(with(kValid, "\"bitrate\": 500000", "\"bitrate\": 500000, \"priority\": 98"),
+                       "\"priority\" must be an integer from 1 to 97"));
     CHECK(refused_with(with(kValid, "\"node_id\": 2", "\"node_id\": 127"), "master's node ID"));
     CHECK(refused_with(with(kValid, "\"index\": 8448", "\"index\": 4112"), "0x1010"));
     CHECK(refused_with(with(kValid, "\"index\": 8448", "\"index\": 4113"), "0x1011"));
@@ -152,6 +155,15 @@ void test_output_overlap_warns()
     CHECK(!cfg.warnings.empty() && contains(cfg.warnings, "%QB0"));
 }
 
+void test_priority()
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(with(kValid, "\"bitrate\": 500000", "\"bitrate\": 500000, \"priority\": 80"),
+                       cfg, errors));
+    CHECK(cfg.networks.size() == 1 && cfg.networks[0].priority == 80);
+}
+
 } // namespace
 
 int main()
@@ -159,6 +171,7 @@ int main()
     test_valid();
     test_refusals();
     test_output_overlap_warns();
+    test_priority();
     CHECK(is_standard_bitrate(125000) && is_standard_bitrate(1000000));
     CHECK(!is_standard_bitrate(100000) && !is_standard_bitrate(0));
     return TEST_RESULT();

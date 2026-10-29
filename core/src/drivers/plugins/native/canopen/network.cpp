@@ -6,8 +6,12 @@
 #include <cstring>
 #include <mutex>
 
+#include <unistd.h>
+
 #include <lely/can/msg.h>
+#include <lely/ev/exec.h>
 #include <lely/ev/exec.hpp>
+#include <lely/util/util.h>
 
 #include "log.h"
 
@@ -52,16 +56,17 @@ void pdo_set_bits(uint8_t *data, unsigned offset, unsigned bits, uint64_t value)
     }
 }
 
-Network::Network(ev_exec_t *exec, lely::io::TimerBase &timer, lely::io::TimerBase &tick,
-                 lely::io::CanChannelBase &chan, const std::string &dcf_path,
-                 const NetworkConfig &cfg, const MasterLayout &layout, ProcessImage &image)
+Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &timer,
+                 lely::io::TimerBase &tick, lely::io::CanChannelBase &chan,
+                 const std::string &dcf_path, const NetworkConfig &cfg, const MasterLayout &layout,
+                 ProcessImage &image)
     : BasicMaster(exec, timer, chan, dcf_path, "", static_cast<uint8_t>(cfg.master_node_id)),
-      exec_(exec), tick_(tick), tick_wait_(exec,
-                                           [this](int, std::error_code ec)
-                                           {
-                                               if (!ec)
-                                                   OnTick();
-                                           }),
+      exec_(exec), poll_(poll), tick_(tick), tick_wait_(exec,
+                                                        [this](int, std::error_code ec)
+                                                        {
+                                                            if (!ec)
+                                                                OnTick();
+                                                        }),
       cfg_(cfg), layout_(layout), image_(image)
 {
     for (size_t slot = 0; slot < cfg_.nodes.size(); ++slot)
@@ -80,11 +85,20 @@ Network::Network(ev_exec_t *exec, lely::io::TimerBase &timer, lely::io::TimerBas
     out_valid_.assign(layout_.output_entries, false);
     resend_.assign(layout_.tpdos.size(), false);
     rpdo_error_.assign(layout_.rpdos.size(), 0);
+    scan_.watch   = IO_POLL_WATCH_INIT(&Network::OnScanEvent);
+    scan_.task    = EV_TASK_INIT(exec, &Network::OnScanTask);
+    scan_.net     = this;
+    scan_.watched = false;
+    scan_.posted  = false;
 }
 
 Network::~Network()
 {
     tick_.cancel_wait(tick_wait_);
+    if (scan_.watched)
+        io_poll_watch(poll_, image_.wake_fd(), 0, &scan_.watch);
+    if (scan_.posted)
+        ev_exec_abort(exec_, &scan_.task);
 }
 
 void Network::Start()
@@ -97,6 +111,42 @@ void Network::Start()
     Reset();
     tick_.settime(kTick, kTick);
     tick_.submit_wait(tick_wait_);
+    image_.drain_wake();
+    WatchScans();
+}
+
+void Network::WatchScans()
+{
+    std::error_code ec;
+    poll_.watch(image_.wake_fd(), lely::io::Event::IN, scan_.watch, ec);
+    if (!ec)
+        scan_.watched = true;
+    else
+        log_error("%s: cannot watch the PLC scans (%s); outputs follow the %lld ms tick",
+                  cfg_.label().c_str(), ec.message().c_str(),
+                  static_cast<long long>(kTick.count()));
+}
+
+// Called from the poll on the bus thread: hand the work to the loop without allocating.
+void Network::OnScanEvent(struct io_poll_watch *watch, int events)
+{
+    (void)events;
+    ScanHook *hook = structof(watch, ScanHook, watch);
+    if (!hook->posted)
+    {
+        hook->posted = true;
+        ev_exec_post(hook->task.exec, &hook->task);
+    }
+}
+
+void Network::OnScanTask(ev_task *task)
+{
+    ScanHook *hook = structof(task, ScanHook, task);
+    hook->posted   = false;
+    Network *self  = hook->net;
+    self->image_.drain_wake();
+    self->WatchScans();
+    self->Exchange();
 }
 
 void Network::StopNodes()
@@ -418,11 +468,20 @@ void Network::OnTick()
         else
             n.retry_at = now + kRetryMin; // a boot is already running
     }
+    // A fallback only: each scan wakes the exchange itself.
+    Exchange();
+}
+
+void Network::Exchange()
+{
+    if (!running_)
+        return;
     if (cfg_.sync == SyncMode::PlcCycle)
     {
         uint64_t scans = image_.scans();
         if (scans == synced_scans_)
             return;
+        merged_scans_ += scans - synced_scans_ - 1;
         synced_scans_ = scans;
         WriteOutputs(false);
         SendSync();

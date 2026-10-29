@@ -7,9 +7,10 @@
 // then the 'update configuration' step, where this class writes the node's configuration SDOs
 // (one concise DCF), then NMT start. A node that fails is booted again in the background with a
 // growing delay; the other nodes are not held back.
-// Exchange: received PDOs are decoded into the process image; outputs from the newest scan are
-// written into the master's TPDO objects and sent when they change (and in full when a node
-// comes up). With SYNC once per PLC cycle, the outputs go first and then SYNC.
+// Exchange: received PDOs are decoded into the process image. Each finished scan wakes the bus
+// thread through the image's eventfd; the outputs of the newest scan are then written into the
+// master's TPDO objects and sent when they change (and in full when a node comes up). With SYNC
+// once per PLC cycle, the outputs go first and then SYNC.
 // Node loss (heartbeat timeout or a boot-up message): the node's inputs hold or go to zero, its
 // PDOs stop, its state reads 0, and it is booted again.
 //
@@ -25,6 +26,8 @@
 #include <vector>
 
 #include <lely/coapp/master.hpp>
+#include <lely/ev/task.h>
+#include <lely/io2/posix/poll.hpp>
 #include <lely/io2/timer.hpp>
 
 #include "config.h"
@@ -41,9 +44,9 @@ void pdo_set_bits(uint8_t *data, unsigned offset, unsigned bits, uint64_t value)
 class Network : public lely::canopen::BasicMaster
 {
   public:
-    Network(ev_exec_t *exec, lely::io::TimerBase &timer, lely::io::TimerBase &tick,
-            lely::io::CanChannelBase &chan, const std::string &dcf_path, const NetworkConfig &cfg,
-            const MasterLayout &layout, ProcessImage &image);
+    Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &timer,
+            lely::io::TimerBase &tick, lely::io::CanChannelBase &chan, const std::string &dcf_path,
+            const NetworkConfig &cfg, const MasterLayout &layout, ProcessImage &image);
     ~Network() override;
 
     // Resets the master, which boots every node, and starts the periodic work.
@@ -54,8 +57,14 @@ class Network : public lely::canopen::BasicMaster
     void MarkAllDown();
 
     bool IsUp(unsigned node_id) const;
+    // With SYNC once per PLC cycle: scans that shared a SYNC with a later scan.
+    uint64_t MergedScans() const
+    {
+        return merged_scans_;
+    }
 
-    static constexpr std::chrono::milliseconds kTick{1};
+    // Housekeeping (boot retries, the silent-node warning); the exchange runs on each scan's wake.
+    static constexpr std::chrono::milliseconds kTick{10};
     static constexpr std::chrono::milliseconds kRetryMin{1000};
     static constexpr std::chrono::milliseconds kRetryMax{16000};
     // A node not heard from this long after Start() is reported once as silent.
@@ -109,11 +118,26 @@ class Network : public lely::canopen::BasicMaster
     void ScheduleRetry(NodeState &node);
     void ZeroInputs(const NodeState &node);
     void OnTick();
+    void Exchange();
+    void WatchScans();
+    static void OnScanEvent(struct io_poll_watch *watch, int events);
+    static void OnScanTask(ev_task *task);
     void WriteOutputs(bool all);
     void WriteObject(uint16_t index, CoType type, uint64_t value);
     void SendSync();
 
     ev_exec_t *exec_;
+    lely::io::Poll &poll_;
+    // The scan wake: a watch on the image's eventfd that posts a task to the bus thread's loop.
+    struct ScanHook
+    {
+        struct io_poll_watch watch;
+        ev_task task;
+        Network *net;
+        bool watched; // registered with the poll (each event needs a new watch() call)
+        bool posted;
+    };
+    ScanHook scan_;
     lely::io::TimerBase &tick_;
     lely::io::TimerWait tick_wait_;
     const NetworkConfig &cfg_;
@@ -125,6 +149,7 @@ class Network : public lely::canopen::BasicMaster
     std::vector<bool> resend_;         // per master TPDO: send in full at the next tick
     std::vector<uint16_t> rpdo_error_; // per master RPDO: the last error logged
     uint64_t synced_scans_ = 0;
+    uint64_t merged_scans_ = 0;
     bool running_          = false;
     clock::time_point started_{};
 };

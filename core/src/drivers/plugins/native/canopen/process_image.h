@@ -5,8 +5,9 @@
 //
 // Inputs:  the bus thread sets values and node states, then commit() publishes a snapshot;
 //          cycle_start writes the newest snapshot to %I through the runtime's journal.
-// Outputs: cycle_end reads %Q under the image lock into a snapshot and publishes it; the bus
-//          thread takes the newest one.
+// Outputs: cycle_end reads %Q under the image lock into a snapshot, publishes it and wakes the
+//          bus thread through an eventfd (one non-blocking write); the bus thread takes the
+//          newest one.
 // Nothing here allocates, blocks or logs after build().
 
 #ifndef CANOPEN_PROCESS_IMAGE_H
@@ -28,6 +29,11 @@ namespace canopen_plugin
 class ProcessImage
 {
   public:
+    ProcessImage() = default;
+    ~ProcessImage();
+    ProcessImage(const ProcessImage &)            = delete;
+    ProcessImage &operator=(const ProcessImage &) = delete;
+
     // Builds the tables in master layout order. False, with a message per location, when a
     // location lies outside an image of `image_size` entries per table (0: no limit).
     bool build(const NetworkConfig &net, const MasterLayout &layout, int image_size,
@@ -60,6 +66,12 @@ class ProcessImage
     {
         return out_.latest(fresh);
     }
+    // Readable after each completed scan. drain_wake() clears it.
+    int wake_fd() const
+    {
+        return wake_fd_;
+    }
+    void drain_wake();
     // Scans completed since build().
     uint64_t scans() const
     {
@@ -82,6 +94,7 @@ class ProcessImage
     TripleBuffer in_;
     TripleBuffer out_;
     std::atomic<uint64_t> scans_{0};
+    int wake_fd_ = -1;
 };
 
 } // namespace canopen_plugin

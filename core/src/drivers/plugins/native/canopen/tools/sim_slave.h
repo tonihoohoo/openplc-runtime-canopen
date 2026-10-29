@@ -6,8 +6,9 @@
 //   0x6401:01 INTEGER16  analogue input   TPDO1, sent every 20 ms
 //   0x6200:01 UNSIGNED8  digital outputs  RPDO1 (0x200 + id)
 //   0x2100:00 UNSIGNED32 a parameter the master can write during configuration
-// It produces heartbeats at 0x1017 (default 50 ms) and runs on its own thread, on Lely's virtual
-// bus or on a SocketCAN interface.
+// It produces heartbeats at 0x1017 (default 50 ms), can watch the master's heartbeat (0x1016:01,
+// written by the master; 0x1029:01 sets the reaction, pre-operational by default) and runs on its
+// own thread, on Lely's virtual bus or on a SocketCAN interface.
 
 #ifndef CANOPEN_SIM_SLAVE_H
 #define CANOPEN_SIM_SLAVE_H
@@ -63,7 +64,8 @@ class SimSlave
     {
         return parameter_.load();
     }
-    // The last NMT command code received (0 before any).
+    // The last NMT command code received or applied by the node itself (0 before any), such as
+    // 0x80 (enter pre-operational) when the master's heartbeat stops.
     uint8_t last_command() const
     {
         return nmt_state_.load();

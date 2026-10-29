@@ -91,6 +91,11 @@ enum class OnStop
     None
 };
 
+// Real-time priority of a bus thread: like the EtherCAT relay, above every IEC task (at most 49)
+// and below the runtime's dispatcher (98) and watchdog (99).
+constexpr int kDefaultPriority = 90;
+constexpr int kMaxPriority     = 97;
+
 struct NetworkConfig
 {
     std::string name;
@@ -102,6 +107,7 @@ struct NetworkConfig
     unsigned sync_period_us        = 0;
     unsigned sdo_timeout_ms        = 1000;
     OnStop on_stop                 = OnStop::PreOperational;
+    int priority                   = kDefaultPriority; // SCHED_FIFO of the bus thread in a session
     std::vector<NodeConfig> nodes;
     std::string label() const; // "network \"CANopen 1\" (can0)"
 };

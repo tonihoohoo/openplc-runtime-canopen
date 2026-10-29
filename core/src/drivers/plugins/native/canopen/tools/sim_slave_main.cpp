@@ -4,10 +4,12 @@
 // end-to-end check of a PLC program that copies the module's digital inputs to its outputs:
 //
 //   canopen_sim_slave --interface vcan0 [--node 2] [--steps 5] [--timeout 60]
-//                     [--expect-parameter 0x12345678]
+//                     [--expect-parameter 0x12345678] [--expect-master-loss 5]
 //
-// It sets its digital inputs to 1, 2, ... and waits each time until its outputs follow. Exit
-// status 0 when every step matched (and the parameter was written), 1 otherwise.
+// It sets its digital inputs to 1, 2, ... and waits each time until its outputs follow. With
+// --expect-master-loss it then prints "watching the master" and waits up to that many seconds
+// for its master watch (0x1016) to put it in pre-operational. Exit status 0 when every step
+// matched (and the parameter was written, and the master loss was seen), 1 otherwise.
 
 #include <chrono>
 #include <cstdio>
@@ -30,6 +32,7 @@ int main(int argc, char **argv)
     int timeout_s       = 60;
     bool check_param    = false;
     unsigned long param = 0;
+    int master_loss_s   = 0;
     for (int i = 1; i + 1 < argc; i += 2)
     {
         std::string opt = argv[i];
@@ -42,6 +45,8 @@ int main(int argc, char **argv)
             steps = std::atoi(val);
         else if (opt == "--timeout")
             timeout_s = std::atoi(val);
+        else if (opt == "--expect-master-loss")
+            master_loss_s = std::atoi(val);
         else if (opt == "--expect-parameter")
         {
             check_param = true;
@@ -86,6 +91,23 @@ int main(int argc, char **argv)
     {
         std::printf("FAIL: parameter 0x%08X, expected 0x%08lX\n", slave.parameter(), param);
         return 1;
+    }
+    if (master_loss_s > 0)
+    {
+        std::printf("watching the master\n");
+        std::fflush(stdout);
+        auto until = std::chrono::steady_clock::now() + std::chrono::seconds(master_loss_s);
+        while (slave.last_command() != 0x80)
+        {
+            if (std::chrono::steady_clock::now() > until)
+            {
+                std::printf("FAIL: still operational %d s after the master's heartbeat was due\n",
+                            master_loss_s);
+                return 1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        std::printf("master loss seen: pre-operational\n");
     }
     std::printf("PASS\n");
     return 0;

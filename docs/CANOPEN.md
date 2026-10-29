@@ -21,7 +21,8 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
   A node that fails is booted again in the background with a growing delay (1 s up to 16 s); the
   other nodes are not held back.
 - **Exchange.** Each TPDO of a node is received into its `%I` locations; each RPDO of a node is
-  sent from its `%Q` locations when a value changes, and in full when the node comes up.
+  sent from its `%Q` locations right after the PLC cycle that changed a value, and in full when the
+  node comes up.
 - **SYNC.** `none`, `period` (Lely produces SYNC every `period_us`), or `plc_cycle` (the master
   sends the newest outputs and then one SYNC after each PLC cycle).
 - **Supervision.** With `heartbeat`, the master consumes the node's heartbeat. A timeout, or a
@@ -47,8 +48,9 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
       "interface": "can0",
       "bitrate": 500000,
       "master_node_id": 127,
-      "heartbeat_producer_ms": 0,
+      "heartbeat_producer_ms": 100,
       "sdo_timeout_ms": 1000,
+      "priority": 90,
       "sync": { "mode": "plc_cycle" },
       "on_plc_stop": "pre_operational",
       "nodes": [
@@ -92,7 +94,8 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 | `interface` | SocketCAN interface, unique per network. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
 | `master_node_id` | 1-127, default 127. |
-| `heartbeat_producer_ms` | The master's own heartbeat, 0 for none. |
+| `heartbeat_producer_ms` | The master's own heartbeat, 0 for none. Nodes that watch it (0x1016, written as a configuration SDO) react when the runtime stops or dies. |
+| `priority` | SCHED_FIFO priority of the network's bus thread while the master runs, 1-97, default 90. |
 | `sdo_timeout_ms` | Timeout of each configuration SDO, default 1000. |
 | `sync.mode`, `sync.period_us` | `none`, `period` (with `period_us`), `plc_cycle`. SYNC uses COB-ID 0x080. |
 | `on_plc_stop` | NMT command for all nodes on a PLC stop. |
@@ -133,6 +136,31 @@ Each release image keeps the plugin's licence and Lely's `LICENSE` and `NOTICE` 
 `/workdir/core/src/drivers/plugins/native/canopen/build/licenses/`. How releases are made is in
 [CANOPEN_RELEASES.md](CANOPEN_RELEASES.md).
 
+## Timing
+
+Like the EtherCAT relay, each network's bus thread runs at real-time priority while its master
+runs: SCHED_FIFO at `priority` (default 90: above every IEC task, at most 49, and below the
+runtime's dispatcher at 98) with 1 ns timer slack. Preparing the interface and waiting to retry run
+at normal priority. Without permission for real-time scheduling (a container without `SYS_NICE`)
+the master logs one warning and runs at normal priority.
+
+The PLC side stays out of the way: `cycle_start` copies the newest inputs into `%I` through the
+runtime's journal, and `cycle_end` reads `%Q` under the image lock, publishes it and wakes the bus
+thread with one non-blocking `eventfd` write. Neither allocates, logs or waits for the bus thread.
+The bus thread then sends the changed outputs at once, followed by SYNC with `plc_cycle`, so every
+PLC cycle is followed by exactly one SYNC. A 10 ms timer remains for boot retries.
+
+If the runtime stops or dies, the master's heartbeat stops. A node that consumes it (0x1016) goes to
+the state its 0x1029 sets, pre-operational by default; what it then does with its outputs is set in
+the device's own objects.
+
+When the master configures a CAN link (bit rate, or bringing it up), it turns on the controller's
+bus-off restart (`restart-ms` 100). A link already up with the restart off is left alone and
+logged once at start, because it would stay bus-off until it is reset by hand.
+
+A real-time (PREEMPT_RT) kernel and CPU isolation are deployment choices, as for the runtime
+itself; they lower the worst-case delays, not the typical ones.
+
 ## Running
 
 - The interface must exist. Setting the bit rate and bringing the link up needs `CAP_NET_ADMIN`
@@ -166,9 +194,11 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 
 | Test | What it covers |
 |---|---|
+| `test_can_link` | What the master does to the CAN link before opening it: bit rate, bus-off auto-restart, bringing it up. |
 | `test_config` | Parser and validator of `conf/canopen.json`. |
+| `test_entry_points` | The plugin's C entry points with an allocation failure injected at each point of `start_loop`: no exception leaves them and a failed start leaves nothing running. |
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
-| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, node state, loss and recovery, a node with the wrong identity, and the NMT command on stop. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
+| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, and the NMT command on stop. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
 module: it sets its digital inputs to 1, 2, ... and waits each time until its digital outputs
