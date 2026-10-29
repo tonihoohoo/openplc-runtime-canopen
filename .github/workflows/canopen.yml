@@ -122,7 +122,10 @@ jobs:
 
       - name: Start the runtime
         run: |
-          sudo bash -c './start_openplc.sh > /tmp/runtime.log 2>&1 &'
+          # install.sh starts the openplc-runtime service where systemd runs; start it by hand otherwise.
+          if ! systemctl is-active --quiet openplc-runtime; then
+            sudo bash -c './start_openplc.sh > /tmp/runtime.log 2>&1 &'
+          fi
           for _ in $(seq 1 120); do
             if curl -ks -o /dev/null https://127.0.0.1:8443/; then exit 0; fi
             sleep 1
@@ -138,7 +141,7 @@ jobs:
           npx electron --no-sandbox ./release/app/dist/main/main.js --cli upload \
             ./e2e/fixtures/canopen-generic-io/project --host 127.0.0.1 --yes --create-user \
             --user-data "$RUNNER_TEMP/editor-data" --json
-          cat "e2e/fixtures/canopen-generic-io/project/build/OpenPLC Runtime v4/src/conf/canopen.json"
+          sudo cat ../build/plugins/canopen.json
 
       - name: Inputs reach the outputs through the program
         run: |
@@ -146,4 +149,6 @@ jobs:
 
       - name: Runtime log
         if: always()
-        run: sudo cat /tmp/runtime.log || true
+        run: |
+          sudo journalctl -u openplc-runtime --no-pager || true
+          sudo cat /tmp/runtime.log || true
