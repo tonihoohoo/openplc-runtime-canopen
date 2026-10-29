@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // canopen_sim_slave - a simulated generic I/O module on a SocketCAN interface, for the
-// end-to-end check of a PLC program that copies %IB0 to %QB0:
+// end-to-end check of a PLC program that copies the module's digital inputs to its outputs:
 //
 //   canopen_sim_slave --interface vcan0 [--node 2] [--steps 5] [--timeout 60]
 //                     [--expect-parameter 0x12345678]

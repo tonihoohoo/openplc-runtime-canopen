@@ -141,8 +141,14 @@ ctest --test-dir build --output-on-failure
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
 | `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, node state, loss and recovery, a node with the wrong identity, and the NMT command on stop. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 
-`canopen_sim_slave --interface vcan0` (built with the tests) is a simulated generic I/O module for
-an end-to-end check of a PLC program that copies `%IB0` to `%QB0`.
+`canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
+module: it sets its digital inputs to 1, 2, ... and waits each time until its digital outputs
+follow, so it checks a PLC program that copies one to the other.
 
 The CI workflow `.github/workflows/canopen.yml` runs these tests, the SocketCAN variant on a vcan
-link, and the end-to-end check with a program compiled by the OpenPLC Editor's command line.
+link, and an end-to-end check: it installs the runtime from source, builds the OpenPLC Editor fork
+(the branch with this branch's name, else `canopen`), uploads its `e2e/fixtures/canopen-generic-io`
+project with the editor's command line, and runs the simulated module against it on `vcan0`.
+
+vcan needs the kernel's `vcan` module. On a runner whose kernel has no matching
+`linux-modules-extra` package the vcan jobs fail at their first step, and the reason is in its log.
