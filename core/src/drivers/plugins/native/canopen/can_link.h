@@ -38,6 +38,16 @@ enum class LinkResult
 // Bus-off auto-restart delay set whenever the master configures the link.
 constexpr long kRestartMs = 100;
 
+// What prepare_link does to a link in state `li` for the configured `bitrate` (0: keep).
+struct LinkPlan
+{
+    bool set_bitrate = false; // take the link down and set the bit rate with kRestartMs
+    bool set_restart = false; // set kRestartMs only (the link is down)
+    bool bring_up    = false;
+    bool no_restart  = false; // left up as it is, with auto-restart off
+};
+LinkPlan plan_link(const LinkInfo &li, unsigned bitrate);
+
 // Makes the link usable: sets `bitrate` (0 keeps the link's own) when it differs, turns on the
 // bus-off auto-restart when it brings a CAN link up with it off, and brings the link up. Logs what
 // it changes; `problem` says why it is not Ready. A link found already up is left as it is;

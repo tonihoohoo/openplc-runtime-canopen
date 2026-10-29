@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
 #include <thread>
 #include <vector>
@@ -32,6 +33,25 @@
 #include "master_dcf.h"
 #include "process_image.h"
 #include "sim_slave.h"
+
+// Counts this thread's allocations, to show the scan hooks make none.
+thread_local long t_allocs = 0;
+
+void *operator new(std::size_t n)
+{
+    ++t_allocs;
+    if (void *p = std::malloc(n ? n : 1))
+        return p;
+    throw std::bad_alloc();
+}
+void operator delete(void *p) noexcept
+{
+    std::free(p);
+}
+void operator delete(void *p, std::size_t) noexcept
+{
+    std::free(p);
+}
 
 using namespace canopen_plugin;
 using canopen_sim::SimSlave;
@@ -211,16 +231,21 @@ void check_scan_exchange(std::shared_ptr<lely::io::VirtualCanController> vbus, P
     std::thread listener([&] { listen(vbus, run, frames); });
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     std::vector<std::chrono::steady_clock::time_point> ends;
-    auto next = std::chrono::steady_clock::now();
+    ends.reserve(kScans);
+    long scan_allocs = 0;
+    auto next        = std::chrono::steady_clock::now();
     for (int i = 0; i < kScans; ++i)
     {
         next += std::chrono::milliseconds(20);
         std::this_thread::sleep_until(next);
+        long before = t_allocs;
         image.copy_to_plc(rt);
         g_byte_out[0] = static_cast<IEC_BYTE>(0x80 + i);
         image.copy_from_plc(rt);
+        scan_allocs += t_allocs - before;
         ends.push_back(std::chrono::steady_clock::now());
     }
+    CHECK(scan_allocs == 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     run = false;
     listener.join();

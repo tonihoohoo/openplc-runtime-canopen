@@ -194,9 +194,11 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 
 | Test | What it covers |
 |---|---|
+| `test_can_link` | What the master does to the CAN link before opening it: bit rate, bus-off auto-restart, bringing it up. |
 | `test_config` | Parser and validator of `conf/canopen.json`. |
+| `test_entry_points` | The plugin's C entry points with an allocation failure injected at each point of `start_loop`: no exception leaves them and a failed start leaves nothing running. |
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
-| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs, node state, loss and recovery, a node with the wrong identity, and the NMT command on stop. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
+| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, and the NMT command on stop. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
 module: it sets its digital inputs to 1, 2, ... and waits each time until its digital outputs

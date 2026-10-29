@@ -207,7 +207,8 @@ CANOPEN_EXPORT int start_loop(void)
     }
     try
     {
-        // Joins the bus threads that did start.
+        // Bus threads that started were joined as the partial setup unwound; this clears a
+        // run left from before.
         do_stop_loop();
     }
     catch (...)
