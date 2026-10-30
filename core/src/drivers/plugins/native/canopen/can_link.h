@@ -36,6 +36,7 @@ struct LinkInfo
     uint64_t rx_bytes   = 0;
     uint64_t tx_bytes   = 0;
     uint64_t rx_dropped = 0; // dropped and overrun receive frames
+    uint64_t tx_dropped = 0; // transmit frames the driver dropped
 };
 
 // Parses one RTM_NEWLINK message (header included) into `out`. Returns false if it is not one.

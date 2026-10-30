@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// When the master resets a bus-off link: at once when the kernel does not restart it, after the
-// kernel's own delay plus 2 s when it should, and with a back-off from 1 s doubling to 10 s while
-// the bus goes bus-off again soon after each reset, back to no wait after 60 s without bus-off.
+// When the master resets a faulty link: a bus-off one at once when the kernel does not restart it,
+// after the kernel's own delay plus 2 s when it should; a wrong bit rate or a stall at once; with a
+// back-off from 1 s doubling to 10 s while a fault returns soon after each reset, back to no wait
+// after 60 s without one.
 
 #include "bus_off_recovery.h"
 #include "check.h"
@@ -24,7 +25,7 @@ tp at(long ms)
 long reset_at(BusOffRecovery &r, long start, long restart_ms = 0, bool refused = false)
 {
     for (long t = start; t < start + 120000; t += 1000)
-        if (r.reading(BusState::BusOff, restart_ms, refused, at(t)))
+        if (r.reading(LinkFault::BusOff, restart_ms, refused, at(t)))
         {
             r.reset_done(at(t));
             return t;
@@ -39,8 +40,8 @@ int main()
     // Healthy readings never reset.
     {
         BusOffRecovery r;
-        CHECK(!r.reading(BusState::ErrorActive, 0, false, at(0)));
-        CHECK(!r.reading(BusState::ErrorPassive, 0, false, at(1000)));
+        CHECK(!r.reading(LinkFault::None, 0, false, at(0)));
+        CHECK(!r.reading(LinkFault::None, 0, false, at(1000)));
     }
 
     // No kernel restart: the first reset is at once.
@@ -58,9 +59,9 @@ int main()
     // Kernel restart on and working: never reset.
     {
         BusOffRecovery r;
-        CHECK(!r.reading(BusState::BusOff, 100, false, at(0)));
-        CHECK(!r.reading(BusState::BusOff, 100, false, at(1000)));
-        CHECK(!r.reading(BusState::ErrorActive, 100, false, at(2000)));
+        CHECK(!r.reading(LinkFault::BusOff, 100, false, at(0)));
+        CHECK(!r.reading(LinkFault::BusOff, 100, false, at(1000)));
+        CHECK(!r.reading(LinkFault::None, 100, false, at(2000)));
     }
 
     // Kernel restart on but stuck: reset once restart-ms + 2 s have passed.
@@ -89,10 +90,10 @@ int main()
     {
         BusOffRecovery r;
         reset_at(r, 0);
-        CHECK(!r.reading(BusState::BusOff, 0, false, at(500)));
+        CHECK(!r.reading(LinkFault::BusOff, 0, false, at(500)));
         CHECK(r.held_back_news());
         CHECK(!r.held_back_news());
-        CHECK(r.reading(BusState::BusOff, 0, false, at(1500)));
+        CHECK(r.reading(LinkFault::BusOff, 0, false, at(1500)));
     }
 
     // Healthy for 60 s after a long back-off: the next reset is at once again.
@@ -102,7 +103,7 @@ int main()
         for (int i = 0; i < 5; ++i)
             t = reset_at(r, t + 1000);
         CHECK(r.wait() == milliseconds(10000));
-        CHECK(!r.reading(BusState::ErrorActive, 0, false, at(t + 30000)));
+        CHECK(!r.reading(LinkFault::None, 0, false, at(t + 30000)));
         CHECK(reset_at(r, t + 60000) == t + 60000);
         CHECK(r.wait() == milliseconds(0));
     }
@@ -116,6 +117,24 @@ int main()
         CHECK(r.wait() == milliseconds(2000));
         CHECK(reset_at(r, t + 20000) == t + 20000);
         CHECK(r.wait() == milliseconds(2000));
+    }
+    // A wrong bit rate or a stall: at once, even with the kernel's restart on.
+    {
+        BusOffRecovery r;
+        CHECK(r.reading(LinkFault::BitRate, 100, false, at(0)));
+        BusOffRecovery q;
+        CHECK(q.reading(LinkFault::TxStalled, 100, false, at(0)));
+    }
+
+    // The back-off spans causes: a wrong bit rate 500 ms after a bus-off reset waits for 1 s
+    // after that reset.
+    {
+        BusOffRecovery r;
+        CHECK(reset_at(r, 0) == 0);
+        CHECK(!r.reading(LinkFault::BitRate, 0, false, at(500)));
+        CHECK(r.held_back_news());
+        CHECK(!r.reading(LinkFault::BitRate, 0, false, at(900)));
+        CHECK(r.reading(LinkFault::BitRate, 0, false, at(1000)));
     }
     return TEST_RESULT();
 }

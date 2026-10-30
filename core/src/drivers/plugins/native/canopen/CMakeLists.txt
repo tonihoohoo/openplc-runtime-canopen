@@ -72,6 +72,7 @@ add_library(canopen_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/can_link.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/config.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/iec_location.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/link_stall.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/image_io.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/log.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/master_dcf.cpp

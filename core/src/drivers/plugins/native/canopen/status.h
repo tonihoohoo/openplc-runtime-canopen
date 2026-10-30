@@ -106,10 +106,11 @@ struct BusStatus
     uint64_t rx_frames  = 0; // since the PLC started
     uint64_t tx_frames  = 0;
     uint64_t rx_dropped = 0;
+    uint64_t tx_dropped = 0;
     bool has_load       = false;
     double load_percent = 0;
     bool has_resets     = false; // a CAN link the master may reset
-    uint32_t resets     = 0;     // link resets after bus-off since the PLC started
+    uint32_t resets     = 0;     // link resets by the master since the PLC started
 };
 
 struct Emcy
@@ -152,6 +153,13 @@ enum class ResetOutcome : uint8_t
     Failed
 };
 
+enum class ResetCause : uint8_t
+{
+    BusOff,
+    BitRate,
+    TxStalled
+};
+
 struct Event
 {
     int64_t time   = 0;
@@ -164,6 +172,7 @@ struct Event
     uint32_t cob_id    = 0; // Pdo*
     BusState bus       = BusState::Unknown;
     ResetOutcome reset = ResetOutcome::Done; // BusReset
+    ResetCause cause   = ResetCause::BusOff; // BusReset
 };
 
 struct NodeStatus
@@ -231,8 +240,8 @@ class NetworkStatus
     void clear_late(unsigned node);
     // Keeps the count of link resets.
     void set_bus(const BusStatus &bus);
-    // The master reset the link after a bus-off, or tried to.
-    void link_reset(ResetOutcome outcome);
+    // The master reset the link, or tried to.
+    void link_reset(ResetOutcome outcome, ResetCause cause = ResetCause::BusOff);
     // Every node stopped (the PLC stopped).
     void stop_all();
 

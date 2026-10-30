@@ -584,6 +584,14 @@ size_t resets_of(const NetworkStatus &status, ResetOutcome outcome)
     return n;
 }
 
+size_t resets_for(const NetworkStatus &status, ResetCause cause)
+{
+    size_t n = 0;
+    for (const Event &e : status.snapshot().events)
+        n += e.kind == EventKind::BusReset && e.reset == ResetOutcome::Done && e.cause == cause;
+    return n;
+}
+
 // A bus-off link without auto-restart is reset by the master and the node comes back; without
 // permission the master says so once and keeps the session.
 void check_bus_off_reset(std::shared_ptr<lely::io::VirtualCanController> vbus,
@@ -654,6 +662,101 @@ void check_bus_off_reset(std::shared_ptr<lely::io::VirtualCanController> vbus,
         bus.stop();
     }
     io.stop();
+}
+
+// A link found at another bit rate than configured, or one that stopped sending, is reset by the
+// master and the node comes back; with no bit rate configured the link's rate is left alone.
+void check_link_fault_reset(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                            const std::string &dir, const plugin_runtime_args_t &rt)
+{
+    using Body = std::function<void(FakeLink &, NetworkStatus &, ProcessImage &)>;
+    auto run   = [&](unsigned bitrate, const Body &body)
+    {
+        std::string text = kWatchConfig;
+        text.replace(text.find("\"bitrate\": 0"), 12, "\"bitrate\": " + std::to_string(bitrate));
+        Config cfg;
+        std::vector<std::string> errors;
+        CHECK(parse_config(text, cfg, errors));
+        if (!errors.empty())
+            return;
+        const NetworkConfig &net = cfg.networks[0];
+        MasterLayout layout      = master_layout(net);
+        ProcessImage image;
+        CHECK(image.build(net, layout, kSize, errors));
+        std::string dcf = dir + "/linkfault.dcf";
+        {
+            FILE *f       = std::fopen(dcf.c_str(), "w");
+            std::string t = master_dcf(net, layout);
+            std::fwrite(t.data(), 1, t.size(), f);
+            std::fclose(f);
+        }
+        SimSlaveSpec spec;
+        spec.node_id = 2;
+        SimSlave io(spec, dir + "/linkfault_node2.dcf", vbus, "");
+        io.start();
+        {
+            FakeLink link;
+            NetworkStatus status(net);
+            Bus bus(net, layout, image, status, dcf, vbus, &link);
+            bus.start();
+            CHECK(
+                scan_until(image, rt, [] { return g_byte_in[10] == 5; }, std::chrono::seconds(10)));
+            body(link, status, image);
+            bus.stop();
+        }
+        io.stop();
+    };
+    auto back_up = [](NetworkStatus &status, unsigned boots)
+    {
+        return [&status, boots]
+        {
+            return node_status(status, 2).state == NodeRun::Operational &&
+                   node_status(status, 2).boots > boots;
+        };
+    };
+
+    // Wrong bit rate: one reset, the link back at the configured rate, the node up again.
+    run(500000,
+        [&](FakeLink &link, NetworkStatus &status, ProcessImage &image)
+        {
+            unsigned boots = node_status(status, 2).boots;
+            link.set(true, 125000, 0);
+            CHECK(scan_until(
+                image, rt, [&link] { return link.downs() == 1 && link.ups() == 1; },
+                std::chrono::seconds(3)));
+            CHECK(link.info().bitrate == 500000);
+            CHECK(errors_with("is at 125000 bit/s, not the configured 500000") == 1);
+            CHECK(resets_for(status, ResetCause::BitRate) == 1 && link_resets(status) == 1);
+            CHECK(scan_until(image, rt, back_up(status, boots), std::chrono::seconds(10)));
+        });
+
+    // No bit rate configured: another rate is left alone.
+    run(0,
+        [&](FakeLink &link, NetworkStatus &status, ProcessImage &)
+        {
+            link.set(true, 125000, 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+            CHECK(link.downs() == 0 && link_resets(status) == 0);
+        });
+
+    // Stalled: nothing sent while drops rise; one reset after 3 s, the node up again.
+    run(0,
+        [&](FakeLink &link, NetworkStatus &status, ProcessImage &image)
+        {
+            unsigned boots   = node_status(status, 2).boots;
+            uint64_t dropped = 0;
+            auto end         = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+            while (link.downs() == 0 && std::chrono::steady_clock::now() < end)
+            {
+                link.set_tx(100, ++dropped);
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            link.set_tx(200, dropped);
+            CHECK(link.downs() == 1);
+            CHECK(errors_with("stopped sending and drops frames; resetting the link") == 1);
+            CHECK(resets_for(status, ResetCause::TxStalled) == 1 && link_resets(status) == 1);
+            CHECK(scan_until(image, rt, back_up(status, boots), std::chrono::seconds(10)));
+        });
 }
 
 } // namespace
@@ -909,7 +1012,10 @@ int main()
 
     check_master_watch(vbus, wire, dir, rt);
     if (vbus)
+    {
         check_bus_off_reset(vbus, dir, rt);
+        check_link_fault_reset(vbus, dir, rt);
+    }
     check_node_options(vbus, wire, dir, rt);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();

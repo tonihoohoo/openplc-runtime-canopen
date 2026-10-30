@@ -93,6 +93,7 @@ BusStatus BusMonitor::update(const LinkInfo &li, clock::time_point now)
         b.rx_frames  = delta(li.rx_frames, base_.rx_frames);
         b.tx_frames  = delta(li.tx_frames, base_.tx_frames);
         b.rx_dropped = delta(li.rx_dropped, base_.rx_dropped);
+        b.tx_dropped = delta(li.tx_dropped, base_.tx_dropped);
         double secs  = std::chrono::duration<double>(now - last_at_).count();
         if (is_can && li.bitrate && secs > 0)
         {
