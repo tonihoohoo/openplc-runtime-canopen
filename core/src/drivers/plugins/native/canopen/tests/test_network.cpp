@@ -486,6 +486,8 @@ void check_node_options(std::shared_ptr<lely::io::VirtualCanController> vbus,
         image, rt, [&status] { return node_status(status, 4).state == NodeRun::Absent; },
         std::chrono::seconds(3)));
     CHECK(warnings_with("node 4 (maybe)") == warnings_before);
+    // Lely's error line for each failed boot attempt is logged at debug level only.
+    CHECK(errors_with("lely: SDO abort code") == 0);
     {
         NetworkSnapshot snap = status.snapshot();
         CHECK(!snap.all_up(false) && !snap.all_up(true));

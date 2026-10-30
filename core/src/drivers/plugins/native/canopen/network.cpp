@@ -115,6 +115,8 @@ void Network::Start()
         it.second.held      = status_.is_held(it.first);
     }
     status_.begin_session();
+    // Lely's boot SDOs (identity check, configuration) otherwise wait 100 ms per attempt.
+    SetTimeout(std::chrono::milliseconds(cfg_.sdo_timeout_ms));
     log_info("%s: starting, %zu node(s), %zu input and %zu output PDO(s)", cfg_.label().c_str(),
              nodes_.size(), layout_.rpdos.size(), layout_.tpdos.size());
     Reset();
