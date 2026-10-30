@@ -335,7 +335,7 @@ void NetworkStatus::set_bus(const BusStatus &bus)
     push(e);
 }
 
-void NetworkStatus::link_reset(ResetOutcome outcome)
+void NetworkStatus::link_reset(ResetOutcome outcome, ResetCause cause)
 {
     std::lock_guard<PiMutex> lock(mutex_);
     if (outcome == ResetOutcome::Done)
@@ -343,6 +343,7 @@ void NetworkStatus::link_reset(ResetOutcome outcome)
     Event e;
     e.kind  = EventKind::BusReset;
     e.reset = outcome;
+    e.cause = cause;
     push(e);
 }
 
@@ -485,6 +486,20 @@ const char *reset_outcome_name(ResetOutcome r)
     return "failed";
 }
 
+const char *reset_cause_name(ResetCause c)
+{
+    switch (c)
+    {
+    case ResetCause::BusOff:
+        return "bus_off";
+    case ResetCause::BitRate:
+        return "bit_rate";
+    case ResetCause::TxStalled:
+        return "tx_stalled";
+    }
+    return "bus_off";
+}
+
 const char *event_name(EventKind k)
 {
     switch (k)
@@ -574,6 +589,7 @@ cJSON *bus_json(const BusStatus &b)
         add_uint(o, "rx_frames", b.rx_frames);
         add_uint(o, "tx_frames", b.tx_frames);
         add_uint(o, "rx_dropped", b.rx_dropped);
+        add_uint(o, "tx_dropped", b.tx_dropped);
     }
     if (b.has_load)
         cJSON_AddNumberToObject(o, "load_percent", static_cast<int>(b.load_percent * 10) / 10.0);
@@ -656,6 +672,7 @@ cJSON *event_json(const Event &ev)
         break;
     case EventKind::BusReset:
         cJSON_AddStringToObject(o, "outcome", reset_outcome_name(ev.reset));
+        cJSON_AddStringToObject(o, "cause", reset_cause_name(ev.cause));
         break;
     default:
         break;

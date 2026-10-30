@@ -164,15 +164,19 @@ void test_json()
     CHECK(cJSON_GetObjectItem(bus, "link_resets") == nullptr);
     cJSON_Delete(root);
 
-    // Link resets: counted when done, kept across bus readings, each recorded with its outcome.
+    // Link resets: counted when done, kept across bus readings, each recorded with its outcome and
+    // cause.
     b.state      = BusState::BusOff;
     b.has_resets = true;
     st.set_bus(b);
     st.link_reset(ResetOutcome::Done);
-    st.link_reset(ResetOutcome::NotPermitted);
-    b.state = BusState::ErrorActive;
+    st.link_reset(ResetOutcome::NotPermitted, ResetCause::BitRate);
+    st.link_reset(ResetOutcome::Done, ResetCause::TxStalled);
+    b.state      = BusState::ErrorActive;
+    b.has_frames = true;
+    b.tx_dropped = 42;
     st.set_bus(b);
-    CHECK(st.snapshot().bus.resets == 1);
+    CHECK(st.snapshot().bus.resets == 2);
     text = status_json({st.snapshot()}, 1234);
     root = cJSON_Parse(text.c_str());
     CHECK(root != nullptr);
@@ -180,13 +184,19 @@ void test_json()
         return;
     n0  = cJSON_GetArrayItem(cJSON_GetObjectItem(root, "networks"), 0);
     bus = cJSON_GetObjectItem(n0, "bus");
-    CHECK(cJSON_GetObjectItem(bus, "link_resets")->valueint == 1);
+    CHECK(cJSON_GetObjectItem(bus, "link_resets")->valueint == 2);
+    CHECK(cJSON_GetObjectItem(bus, "tx_dropped")->valueint == 42);
     const cJSON *events = cJSON_GetObjectItem(n0, "events");
     ev                  = cJSON_GetArrayItem(events, 1);
     CHECK(std::string(cJSON_GetObjectItem(ev, "kind")->valuestring) == "bus_reset");
-    CHECK(std::string(cJSON_GetObjectItem(ev, "outcome")->valuestring) == "not_permitted");
-    ev = cJSON_GetArrayItem(events, 2);
     CHECK(std::string(cJSON_GetObjectItem(ev, "outcome")->valuestring) == "done");
+    CHECK(std::string(cJSON_GetObjectItem(ev, "cause")->valuestring) == "tx_stalled");
+    ev = cJSON_GetArrayItem(events, 2);
+    CHECK(std::string(cJSON_GetObjectItem(ev, "outcome")->valuestring) == "not_permitted");
+    CHECK(std::string(cJSON_GetObjectItem(ev, "cause")->valuestring) == "bit_rate");
+    ev = cJSON_GetArrayItem(events, 3);
+    CHECK(std::string(cJSON_GetObjectItem(ev, "outcome")->valuestring) == "done");
+    CHECK(std::string(cJSON_GetObjectItem(ev, "cause")->valuestring) == "bus_off");
     cJSON_Delete(root);
 }
 

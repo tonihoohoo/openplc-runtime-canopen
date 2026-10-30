@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // What the master does to a CAN link before it opens it: the bit rate, the bus-off auto-restart and
-// bringing the link up, also on drivers that refuse restart-ms. The netlink calls themselves need
-// a real CAN interface.
+// bringing the link up, also on drivers that refuse restart-ms; the link statistics read from a
+// netlink reply. The netlink calls themselves need a real CAN interface.
 
 #include <cerrno>
+#include <cstring>
+
+#include <linux/if_link.h>
+#include <linux/rtnetlink.h>
 
 #include "can_link.h"
 #include "check.h"
@@ -99,9 +103,31 @@ void check_prepare()
 
 } // namespace
 
+// The frame and drop counts of a link come from IFLA_STATS64.
+void check_parse_stats()
+{
+    alignas(nlmsghdr) unsigned char
+        buf[NLMSG_SPACE(sizeof(ifinfomsg)) + RTA_SPACE(sizeof(rtnl_link_stats64))] = {};
+    nlmsghdr *nh   = reinterpret_cast<nlmsghdr *>(buf);
+    nh->nlmsg_type = RTM_NEWLINK;
+    nh->nlmsg_len  = sizeof(buf);
+    rtattr *a      = reinterpret_cast<rtattr *>(buf + NLMSG_SPACE(sizeof(ifinfomsg)));
+    a->rta_type    = IFLA_STATS64;
+    a->rta_len     = RTA_LENGTH(sizeof(rtnl_link_stats64));
+    rtnl_link_stats64 st{};
+    st.tx_packets = 1488;
+    st.tx_dropped = 182;
+    st.rx_dropped = 2;
+    std::memcpy(RTA_DATA(a), &st, sizeof(st));
+    LinkInfo li;
+    CHECK(parse_newlink(buf, sizeof(buf), li));
+    CHECK(li.has_stats && li.tx_frames == 1488 && li.tx_dropped == 182 && li.rx_dropped == 2);
+}
+
 int main()
 {
     set_log_sink(count_sink);
+    check_parse_stats();
     check_prepare();
 
     // Another bit rate: set it, with the restart delay, and bring the link up.

@@ -167,6 +167,7 @@ void parse_stats(const rtattr *a, LinkInfo &out)
     out.rx_bytes   = st.rx_bytes;
     out.tx_bytes   = st.tx_bytes;
     out.rx_dropped = st.rx_dropped + st.rx_over_errors;
+    out.tx_dropped = st.tx_dropped;
 }
 
 void parse_ifinfo(const nlmsghdr *nh, LinkInfo &out)

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // fake_link.h - a CAN interface stood in for by memory, for prepare_link and the bus thread: its
-// state, bit rate and restart-ms, the calls made to it, and drivers that refuse restart-ms or
-// any change.
+// state, bit rate, restart-ms and transmit counts, the calls made to it, and drivers that refuse
+// restart-ms or any change.
 
 #ifndef CANOPEN_TEST_FAKE_LINK_H
 #define CANOPEN_TEST_FAKE_LINK_H
@@ -79,6 +79,13 @@ class FakeLink : public canopen_plugin::LinkOps
     {
         std::lock_guard<std::mutex> lock(mutex_);
         info_.can_state = state;
+    }
+    void set_tx(uint64_t frames, uint64_t dropped)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        info_.has_stats  = true;
+        info_.tx_frames  = frames;
+        info_.tx_dropped = dropped;
     }
     void no_restart_support()
     {

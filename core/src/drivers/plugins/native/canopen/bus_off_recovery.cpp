@@ -13,18 +13,18 @@ constexpr std::chrono::milliseconds BusOffRecovery::kMaxWait;
 constexpr std::chrono::milliseconds BusOffRecovery::kSoon;
 constexpr std::chrono::milliseconds BusOffRecovery::kHealthy;
 
-bool BusOffRecovery::reading(BusState state, long restart_ms, bool restart_refused,
+bool BusOffRecovery::reading(LinkFault fault, long restart_ms, bool restart_refused,
                              clock::time_point now)
 {
-    if (state != BusState::BusOff)
+    if (fault == LinkFault::None)
     {
-        bus_off_ = false;
-        held_    = false;
+        faulty_ = false;
+        held_   = false;
         return false;
     }
-    if (!bus_off_)
+    if (!faulty_)
     {
-        bus_off_   = true;
+        faulty_    = true;
         since_     = now;
         held_      = false;
         held_told_ = false;
@@ -37,7 +37,8 @@ bool BusOffRecovery::reading(BusState state, long restart_ms, bool restart_refus
                 wait_ = std::chrono::milliseconds(0);
         }
     }
-    if (!restart_refused && restart_ms > 0 &&
+    // The kernel restarts a bus-off link only.
+    if (fault == LinkFault::BusOff && !restart_refused && restart_ms > 0 &&
         now - since_ < std::chrono::milliseconds(restart_ms) + kKernelGrace)
         return false;
     if (have_reset_ && now < last_reset_ + wait_)
@@ -52,7 +53,7 @@ void BusOffRecovery::reset_done(clock::time_point now)
 {
     have_reset_ = true;
     last_reset_ = now;
-    bus_off_    = false;
+    faulty_     = false;
     held_       = false;
 }
 
