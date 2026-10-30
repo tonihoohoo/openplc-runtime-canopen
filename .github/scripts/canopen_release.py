@@ -174,6 +174,8 @@ def notes(release: Release, args: argparse.Namespace) -> str:
         f"Unofficial CANopen build of {args.product}, based on upstream release {release.base}.",
         "",
     ]
+    if args.about.strip():
+        lines += [args.about.strip(), ""]
     if args.notes.strip():
         lines += [args.notes.strip(), ""]
     lines += [
@@ -202,6 +204,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--require-workflow", action="append", default=[])
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--product", default="OpenPLC")
+    p.add_argument("--about", default="")
     p.add_argument("--notes", default="")
     p.add_argument("--note", action="append", default=[])
     p.add_argument("--notes-out")

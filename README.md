@@ -1,5 +1,18 @@
 # OpenPLC Runtime v4
 
+> **CANopen edition.** This is an unofficial fork of the OpenPLC Runtime that adds a CANopen master.
+> It is not made or supported by the upstream OpenPLC project.
+>
+> The `canopen` plugin drives CANopen nodes on a Linux SocketCAN interface (such as `can0`): it checks
+> and configures each node at start-up with SDOs, exchanges PDOs with the PLC program's located
+> variables every scan cycle, supervises the nodes (heartbeat, reboot of a lost node, bus-off and
+> stall recovery) and reports their status to the editor. The configuration is made in the
+> [OpenPLC Editor (CANopen edition)](https://github.com/tonihoohoo/openplc-editor-canopen); everything
+> else works as in upstream OpenPLC Runtime.
+>
+> Releases: [GitHub Releases](https://github.com/tonihoohoo/openplc-runtime-canopen/releases) and
+> `ghcr.io/tonihoohoo/openplc-runtime`. Install and use: [docs/CANOPEN.md](docs/CANOPEN.md).
+
 OpenPLC Runtime v4 is a headless industrial Programmable Logic Controller (PLC) runtime that can run IEC 61131-3 programs on standard computing hardware. It is designed to be controlled by the [OpenPLC Editor v4](https://github.com/Autonomy-Logic/openplc-editor) desktop application via a REST API or via the [Autonomy Edge Cloud](https://autonomy-edge.com)
 
 ## OpenPLC Runtime Components
