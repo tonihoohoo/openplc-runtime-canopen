@@ -72,7 +72,8 @@ jobs:
             --base-file VERSION --event "$GITHUB_EVENT_NAME" --ref-name "$GITHUB_REF_NAME" \
             --version "$VERSION_INPUT" --require-workflow canopen.yml \
             --product "OpenPLC Runtime" --notes "$NOTES" \
-            --note "Install: see the CANopen section of the README. The image is ${IMAGE}." \
+            --about "This fork of the OpenPLC Runtime adds a CANopen master plugin: it configures CANopen nodes on a SocketCAN interface at start-up, exchanges PDOs with the PLC program every scan cycle, supervises the nodes and recovers from node loss, bus-off and stalls. Configure it with the OpenPLC Editor (CANopen edition), https://github.com/tonihoohoo/openplc-editor-canopen. It is not made or supported by the upstream OpenPLC project." \
+            --note "Install: see Installing a release in docs/CANOPEN.md. The image is ${IMAGE}." \
             --notes-out "$RUNNER_TEMP/release-notes.md"
           cat "$RUNNER_TEMP/release-notes.md"
 
