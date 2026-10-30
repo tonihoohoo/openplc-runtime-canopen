@@ -22,8 +22,31 @@ env:
   EDITOR_REPOSITORY: tonihoohoo/openplc-editor-canopen
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.files.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Docs-only pull request
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: .github/scripts/docs-only.sh
+
   plugin:
     name: Plugin build and tests
+    needs: changes
+    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -42,6 +65,9 @@ jobs:
 
   vcan:
     name: Host test on vcan
+    needs: changes
+    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     # Its kernel has a linux-modules-extra package with vcan.
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -64,6 +90,9 @@ jobs:
 
   e2e:
     name: End-to-end with the editor
+    needs: changes
+    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:

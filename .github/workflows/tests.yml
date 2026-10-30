@@ -19,8 +19,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Changed files
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs_only: ${{ steps.files.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Docs-only pull request
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: .github/scripts/docs-only.sh
+
   bootloader:
     name: Bootloader (Go)
+    needs: changes
+    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -52,6 +75,9 @@ jobs:
 
   webserver:
     name: Webserver (pytest)
+    needs: changes
+    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -120,6 +146,9 @@ jobs:
 
   shell:
     name: Installer scripts
+    needs: changes
+    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
+    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
