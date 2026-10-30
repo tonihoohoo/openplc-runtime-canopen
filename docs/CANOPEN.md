@@ -231,8 +231,15 @@ The installer records the image repository on the device, so the OpenPLC Editor'
 earlier tag rolls back. The runtime container runs privileged on the host network, so it sees
 `can0`. Leave out `--runtime-version` to install `latest`.
 
-`/api/capabilities` reports `"canopen": {"configVersions": [2], "features": ["status"]}` when the
-plugin is built, and the editor warns before uploading a CANopen project to a runtime without it.
+**Upload the project again after installing or changing version.** Every install, version change
+or rollback creates a new runtime container, and the compiled program, `canopen.json` and the
+plugin's entry in `plugins.conf` live inside the container, so the PLC starts empty with CANopen off.
+The data directory keeps only the editor's project snapshot, which the runtime does not rebuild
+from. This is upstream behaviour and affects every program, not only CANopen ones.
+
+`/api/capabilities` reports `"canopen": {"configVersions": [...], "features": [...]}` when the
+plugin is built, and the editor refuses to upload a CANopen project to a runtime without it or
+without the project's config version.
 
 Each release image keeps the plugin's licence and Lely's `LICENSE` and `NOTICE` in
 `/workdir/core/src/drivers/plugins/native/canopen/build/licenses/`. How releases are made is in
