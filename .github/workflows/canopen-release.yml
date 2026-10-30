@@ -215,9 +215,9 @@ jobs:
         run: |
           docker buildx imagetools create --tag "$IMAGE:$TAG" --tag "$IMAGE:latest" \
             $(printf "$IMAGE@sha256:%s " *)
-          docker buildx imagetools inspect "$IMAGE:$TAG"
+          docker buildx imagetools inspect "$IMAGE:$TAG" | tee "$RUNNER_TEMP/manifest.txt"
           for arch in arm64 amd64; do
-            docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest}}' | grep -q "\"architecture\":\"$arch\"" \
+            grep -Eq "^ +Platform: +linux/$arch *\$" "$RUNNER_TEMP/manifest.txt" \
               || { echo "::error::$IMAGE:$TAG has no $arch image"; exit 1; }
           done
 
