@@ -207,7 +207,7 @@ def test_refused_before_the_plugin(tmp_path: Path, request_body: object, answer:
     plugin = FakePlugin(sock_path, b'{"ok":true}\n')
     try:
         assert send_canopen_request(request_body, sock_path) == answer
-        assert plugin.received() == []
+        assert not plugin.received()
     finally:
         plugin.close()
 
