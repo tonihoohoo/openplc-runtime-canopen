@@ -133,7 +133,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 | `master_node_id` | 1-127, default 127. |
 | `heartbeat_producer_ms` | The master's own heartbeat, 0 for none. Nodes that watch it (0x1016, written as a configuration SDO) react when the runtime stops or dies. |
 | `priority` | SCHED_FIFO priority of the network's bus thread while the master runs, 1-97, default 90. |
-| `sdo_timeout_ms` | Timeout of each configuration SDO, default 1000. |
+| `sdo_timeout_ms` | Timeout of each SDO the master sends to a node while it boots and configures it (identity check, restore, configuration), default 1000. |
 | `sync.mode`, `sync.period_us` | `none`, `period` (with `period_us`), `plc_cycle`. SYNC uses COB-ID 0x080. |
 | `on_plc_stop` | NMT command for all nodes on a PLC stop. |
 | `boot_timeout_ms` | 100-60000, default 2000: a node not booted this long after the start is reported as not answering (mandatory) or absent (optional). |
@@ -288,6 +288,8 @@ itself; they lower the worst-case delays, not the typical ones.
   hash sorts above every numbered release of the same base.
 - While the interface is missing or down the master logs it once and retries every second.
 - Messages go to the runtime log with the `[CANOPEN]` prefix and the interface name.
+  A failed boot or configuration SDO is reported once per node; the CANopen stack's own line for
+  each attempt is logged at debug level only.
 - Existing installs keep their `plugins.conf`; add the `canopen` line from `plugins_default.conf`
   to it, or remove it so that it is created again.
 
