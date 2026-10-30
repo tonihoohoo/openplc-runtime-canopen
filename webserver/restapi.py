@@ -25,7 +25,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import webserver.config
 from webserver import project_snapshot
 from webserver.canopen_capability import canopen_capability
-from webserver.canopen_status import canopen_status_response
+from webserver.canopen_status import canopen_status_response, send_canopen_request
 from webserver.logger import get_logger
 from webserver.version import MIN_EDITOR_VERSION, RUNTIME_VERSION
 
@@ -122,7 +122,7 @@ def restapi_capabilities():
               type: object
               description: Present when the CANopen plugin is built; configVersions lists the
                 canopen.json format versions it accepts, features the optional CANopen routes
-                (status for /api/canopen/status)
+                (status for /api/canopen/status; sdo, nmt and service for /api/canopen/request)
     """
     capabilities = {
         "runtimeVersion": RUNTIME_VERSION,
@@ -158,6 +158,33 @@ def restapi_canopen_status():
         description: The CANopen plugin did not give a usable answer
     """
     body, status = canopen_status_response()
+    return jsonify(body), status
+
+
+@restapi_bp.route("/canopen/request", methods=["POST"])
+@jwt_required()
+def restapi_canopen_request():
+    """Forward one online-tools request to the CANopen plugin.
+
+    The JSON body is one plugin request (op sdo_read, sdo_write, nmt, job,
+    service_open or service_close, see docs/CANOPEN.md) and the plugin's answer
+    is returned unchanged, its refusals included.
+    ---
+    tags:
+      - CANopen
+    security:
+      - BearerAuth: []
+    responses:
+      200:
+        description: The plugin's answer, or active false when the plugin is not loaded
+      400:
+        description: Not a JSON object, or an op this route does not forward
+      413:
+        description: The request is too large
+      502:
+        description: The CANopen plugin did not give a usable answer
+    """
+    body, status = send_canopen_request(request.get_json(silent=True))
     return jsonify(body), status
 
 

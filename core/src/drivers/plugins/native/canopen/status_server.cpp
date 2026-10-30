@@ -13,7 +13,6 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-#include "cJSON.h"
 #include "log.h"
 
 namespace canopen_plugin
@@ -21,9 +20,10 @@ namespace canopen_plugin
 
 constexpr int StatusServer::kClientTimeoutMs;
 constexpr size_t StatusServer::kMaxRequest;
+constexpr int StatusServer::kTickMs;
 
-StatusServer::StatusServer(std::string path, Handler handler)
-    : path_(std::move(path)), handler_(std::move(handler))
+StatusServer::StatusServer(std::string path, Handler handler, std::function<void()> tick)
+    : path_(std::move(path)), handler_(std::move(handler)), tick_(std::move(tick))
 {
 }
 
@@ -107,7 +107,7 @@ void StatusServer::thread_main()
     for (;;)
     {
         pollfd fds[2] = {{stop_pipe_[0], POLLIN, 0}, {listen_fd_, POLLIN, 0}};
-        int rc        = poll(fds, 2, -1);
+        int rc        = poll(fds, 2, tick_ ? kTickMs : -1);
         if (rc < 0)
         {
             if (errno == EINTR)
@@ -117,6 +117,8 @@ void StatusServer::thread_main()
         }
         if (fds[0].revents)
             return;
+        if (tick_)
+            tick_();
         if (!(fds[1].revents & POLLIN))
             continue;
         int client = accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
@@ -156,7 +158,7 @@ void StatusServer::serve(int fd)
             continue;
         if (rc <= 0 || fds[1].revents)
             return;
-        char chunk[512];
+        char chunk[4096];
         ssize_t n = recv(fd, chunk, sizeof(chunk), 0);
         if (n < 0 && errno == EINTR)
             continue;
@@ -164,24 +166,6 @@ void StatusServer::serve(int fd)
             return;
         buf.append(chunk, static_cast<size_t>(n));
     }
-}
-
-std::string handle_status_request(const std::string &request,
-                                  const std::function<std::string()> &status)
-{
-    cJSON *req      = cJSON_Parse(request.c_str());
-    const cJSON *op = req ? cJSON_GetObjectItemCaseSensitive(req, "op") : nullptr;
-    std::string answer;
-    if (!req || !cJSON_IsObject(req))
-        answer = R"({"error":"the request is not a JSON object"})";
-    else if (!cJSON_IsString(op))
-        answer = R"({"error":"the request has no op"})";
-    else if (std::strcmp(op->valuestring, "status") == 0)
-        answer = status();
-    else
-        answer = R"({"error":"unknown op"})";
-    cJSON_Delete(req);
-    return answer;
 }
 
 } // namespace canopen_plugin

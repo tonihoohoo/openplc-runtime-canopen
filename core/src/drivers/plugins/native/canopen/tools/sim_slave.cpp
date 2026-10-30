@@ -40,6 +40,13 @@ class Dcf
               << std::hex << type << "\nAccessType=" << access << "\nDefaultValue=0x" << value
               << std::dec << "\nPDOMapping=" << (map ? 1 : 0) << "\n\n";
     }
+    void str(const char *idx, const char *name, const char *value)
+    {
+        list_.push_back(idx);
+        body_ << "[" << idx << "]\nParameterName=" << name
+              << "\nObjectType=0x7\nDataType=0x9\nAccessType=const\nDefaultValue=" << value
+              << "\nPDOMapping=0\n\n";
+    }
     void rec(const char *idx, const char *name, unsigned subs, unsigned highest,
              const char *sub0_access = "ro")
     {
@@ -95,8 +102,13 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     Dcf d;
     d.var("1000", "Device type", 0x7, "ro", s.device_type);
     d.var("1001", "Error register", 0x5, "ro", 0);
+    d.str("1008", "Manufacturer device name", "Generic I/O module");
     d.var("100C", "Guard time", 0x6, "rw", 0);
     d.var("100D", "Life time factor", 0x5, "rw", 0);
+    d.rec("1010", "Store parameters", 4, 3);
+    d.sub("1010", 1, "Save all", 0x7, "rw", 1);
+    d.sub("1010", 2, "Save communication", 0x7, "rw", 1);
+    d.sub("1010", 3, "Save application", 0x7, "rw", 1);
     d.rec("1011", "Restore default parameters", 4, 3);
     d.sub("1011", 1, "Restore all", 0x7, "rw", 1);
     d.sub("1011", 2, "Restore communication", 0x7, "rw", 1);
@@ -126,6 +138,7 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     d.sub("1A00", 1, "Mapped object", 0x7, "rw", 0x60000108);
     d.sub("1A00", 2, "Mapped object", 0x7, "rw", 0x64010110);
     d.var("2100", "Parameter", 0x7, s.parameter_read_only ? "ro" : "rw", 0);
+    d.var("2101", "Pre-operational parameter", 0x6, "rw", 10);
     d.rec("6000", "Digital inputs", 2, 1);
     d.sub("6000", 1, "Inputs 1-8", 0x5, "rw", 0, true);
     d.rec("6200", "Digital outputs", 2, 1);
@@ -143,9 +156,28 @@ class Slave : public lely::canopen::BasicSlave
   public:
     Slave(ev_exec_t *exec, lely::io::TimerBase &timer, lely::io::CanChannelBase &chan,
           const std::string &dcf, std::atomic<uint8_t> &nmt, std::atomic<unsigned> &restores,
-          bool refuse)
+          std::atomic<unsigned> &saves, bool refuse)
         : BasicSlave(exec, timer, chan, dcf, ""), nmt_(nmt)
     {
+        for (uint8_t sub = 1; sub <= 3; ++sub)
+            OnWrite<uint32_t>(
+                0x1010, sub,
+                [&saves](uint16_t, uint8_t, uint32_t &value, uint32_t) -> std::error_code
+                {
+                    if (value != 0x65766173)
+                        return lely::canopen::SdoErrc::DATA;
+                    ++saves;
+                    value = 1;
+                    return {};
+                });
+        // Taken only while the node is not operational.
+        OnWrite<uint16_t>(0x2101, 0,
+                          [this](uint16_t, uint8_t, uint16_t &, uint16_t) -> std::error_code
+                          {
+                              if (nmt_.load() == 1)
+                                  return lely::canopen::SdoErrc::DATA_DEV;
+                              return {};
+                          });
         // Every object comes back from the DCF at the next reset anyway, so a restore only has
         // to be accepted and counted.
         for (uint8_t sub = 1; sub <= 3; ++sub)
@@ -206,6 +238,7 @@ void SimSlave::start()
     stop_     = false;
     ready_    = false;
     restores_ = 0;
+    saves_    = 0;
     thread_   = std::thread([this] { thread_main(); });
     while (!ready_ && !stop_)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -268,7 +301,8 @@ void SimSlave::thread_main()
             chan->open(*ctrl);
             base = chan.get();
         }
-        Slave slave(exec, timer, *base, dcf_path_, nmt_state_, restores_, spec_.restore_refused);
+        Slave slave(exec, timer, *base, dcf_path_, nmt_state_, restores_, saves_,
+                    spec_.restore_refused);
         slave.Reset();
         ready_ = true;
         while (!stop_)

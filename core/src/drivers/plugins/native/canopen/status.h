@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "client.h"
 #include "config.h"
 #include "pi_mutex.h"
 
@@ -30,7 +31,9 @@ enum class NodeRun : uint8_t
     Failed,      // the last boot failed; retried in the background
     Operational, // up and started
     Lost,        // was up; retried in the background
-    Stopped      // the PLC stopped
+    Stopped,     // the PLC stopped
+    Manual,      // stopped or pre-operational by a client's NMT command
+    Service      // service mode: the master does not run the node
 };
 
 enum class NmtSeen : uint8_t
@@ -143,7 +146,10 @@ enum class EventKind : uint8_t
     PdoBack,
     PdoLength,
     BusChange,
-    BusReset
+    BusReset,
+    SdoWrite,   // a client's SDO write
+    NmtCommand, // a client's NMT command
+    Service     // service mode opened or closed
 };
 
 enum class ResetOutcome : uint8_t
@@ -173,6 +179,13 @@ struct Event
     BusState bus       = BusState::Unknown;
     ResetOutcome reset = ResetOutcome::Done; // BusReset
     ResetCause cause   = ResetCause::BusOff; // BusReset
+    uint16_t index     = 0;                  // SdoWrite
+    uint8_t subindex   = 0;                  // SdoWrite
+    bool ok            = true;               // SdoWrite
+    bool has_abort     = false;              // SdoWrite
+    uint32_t abort     = 0;                  // SdoWrite
+    NmtRequest command = NmtRequest::Start;  // NmtCommand
+    bool open          = false;              // Service
 };
 
 struct NodeStatus
@@ -196,6 +209,7 @@ struct NodeStatus
 
 struct NetworkSnapshot
 {
+    bool service = false; // service mode
     std::string name;
     std::string interface;
     BusStatus bus;
@@ -244,6 +258,17 @@ class NetworkStatus
     void link_reset(ResetOutcome outcome, ResetCause cause = ResetCause::BusOff);
     // Every node stopped (the PLC stopped).
     void stop_all();
+    // Stopped or pre-operational by a client's NMT command; the NMT state comes from the node.
+    void manual(unsigned node);
+    // A held node released by a client: no longer held, booting.
+    void release(unsigned node);
+    // A client's SDO write and its outcome; the data is not kept.
+    void client_write(unsigned node, uint16_t index, uint8_t subindex, bool ok, bool has_abort,
+                      uint32_t abort);
+    // A client's NMT command to a node, or to every node (0).
+    void nmt_command(unsigned node, NmtRequest command);
+    // Service mode: every node in state Service, and an event for the open or the close.
+    void set_service(bool open);
 
     NetworkSnapshot snapshot() const;
 

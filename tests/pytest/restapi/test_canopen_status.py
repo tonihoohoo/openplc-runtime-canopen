@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GET /api/canopen/status: the CANopen plugin's status, read from its socket.
+"""GET /api/canopen/status and POST /api/canopen/request, through the CANopen plugin's socket.
 
 A fake plugin socket stands in for the plugin.
 """
@@ -13,7 +13,12 @@ import pytest
 from conftest import auth, create_user, token_for
 
 from webserver import canopen_status, restapi
-from webserver.canopen_status import CanopenStatusError, read_canopen_status
+from webserver.canopen_status import (
+    MAX_REQUEST,
+    CanopenStatusError,
+    read_canopen_status,
+    send_canopen_request,
+)
 
 
 class FakePlugin:
@@ -158,3 +163,94 @@ def test_capabilities_list_the_status_feature(client, monkeypatch) -> None:
     )
     body = client.get("/api/capabilities").get_json()
     assert body["canopen"]["features"] == ["status"]
+
+
+def test_request_is_forwarded_unchanged(tmp_path: Path) -> None:
+    sock_path = tmp_path / "canopen.socket"
+    plugin = FakePlugin(sock_path, b'{"job":7}\n')
+    request = {"op": "sdo_read", "network": 0, "node": 2, "index": 4120, "subindex": 1}
+    try:
+        assert send_canopen_request(request, sock_path) == ({"job": 7}, 200)
+        assert plugin.received() == [
+            b'{"op":"sdo_read","network":0,"node":2,"index":4120,"subindex":1}\n'
+        ]
+    finally:
+        plugin.close()
+
+
+def test_plugin_refusal_is_returned(tmp_path: Path) -> None:
+    sock_path = tmp_path / "canopen.socket"
+    plugin = FakePlugin(sock_path, b'{"error":"unknown_node"}\n')
+    try:
+        body, status = send_canopen_request({"op": "nmt", "network": 0, "node": 9}, sock_path)
+        assert (body, status) == ({"error": "unknown_node"}, 200)
+    finally:
+        plugin.close()
+
+
+@pytest.mark.parametrize(
+    "request_body, answer",
+    [
+        (None, ({"error": "bad_request"}, 400)),
+        ([1], ({"error": "bad_request"}, 400)),
+        ({"op": "status"}, ({"error": "unknown_op"}, 400)),
+        ({"op": "teleport"}, ({"error": "unknown_op"}, 400)),
+        ({"node": 2}, ({"error": "unknown_op"}, 400)),
+        (
+            {"op": "sdo_write", "data": "00" * (MAX_REQUEST // 2)},
+            ({"error": "too_large"}, 413),
+        ),
+    ],
+)
+def test_refused_before_the_plugin(tmp_path: Path, request_body: object, answer: object) -> None:
+    sock_path = tmp_path / "canopen.socket"
+    plugin = FakePlugin(sock_path, b'{"ok":true}\n')
+    try:
+        assert send_canopen_request(request_body, sock_path) == answer
+        assert plugin.received() == []
+    finally:
+        plugin.close()
+
+
+def test_request_without_the_plugin(tmp_path: Path) -> None:
+    sock_path = tmp_path / "canopen.socket"
+    assert send_canopen_request({"op": "service_close"}, sock_path) == ({"active": False}, 200)
+
+
+def test_request_with_a_bad_answer(tmp_path: Path) -> None:
+    sock_path = tmp_path / "canopen.socket"
+    plugin = FakePlugin(sock_path, b"garbage\n")
+    try:
+        body, status = send_canopen_request({"op": "job", "job": 1}, sock_path)
+        assert status == 502 and "not valid JSON" in str(body["error"])
+    finally:
+        plugin.close()
+
+
+def test_request_route_needs_a_login(client) -> None:
+    assert client.post("/api/canopen/request", json={"op": "job", "job": 1}).status_code == 401
+
+
+def test_request_route_forwards(client, monkeypatch, tmp_path: Path) -> None:
+    sock_path = tmp_path / "canopen.socket"
+    create_user(client, "admin", "admin-pass")
+    token = token_for(client, "admin", "admin-pass")
+    plugin = FakePlugin(sock_path, b'{"state":"done","data":"0a00"}\n')
+    monkeypatch.setattr(
+        restapi, "send_canopen_request", lambda body: send_canopen_request(body, sock_path)
+    )
+    try:
+        resp = client.post(
+            "/api/canopen/request", json={"op": "job", "job": 3}, headers=auth(token)
+        )
+        assert resp.status_code == 200
+        assert resp.get_json() == {"state": "done", "data": "0a00"}
+        resp = client.post(
+            "/api/canopen/request",
+            data="not json",
+            headers=auth(token),
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+    finally:
+        plugin.close()

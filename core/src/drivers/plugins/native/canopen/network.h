@@ -18,6 +18,13 @@
 // Node loss (heartbeat or node guarding timeout, or a boot-up message): the node's inputs hold or
 // go to zero, its PDOs stop, its state reads 0, and it is booted again, or, with the network's
 // on_node_error set to stop, sent NMT stop and left alone until the next PLC start.
+// Client requests (the online tools): SDO jobs run one at a time through the master's own SDO
+// client, so they queue behind the master's SDOs; Lely refuses them while it boots the node. NMT
+// stop or pre-operational from a client is a manual state, not a loss: no boot retries, no late-PDO
+// warnings, inputs held or zeroed, heartbeat still supervised. Start or a reset hands the node back
+// to the master, which boots it again (also a held node).
+// Service mode (PLC stopped): the master is never started, so it sends nothing of its own; client
+// SDOs use a client SDO of their own per node and NMT commands are sent as plain frames.
 // With a TIME producer, the TIME object carries the host's clock at the configured period.
 // A received PDO with a receive timeout that is late has its inputs held or zeroed in the same
 // way; the node keeps running. Everything seen is also recorded in the network's status.
@@ -30,14 +37,17 @@
 #include <chrono>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <lely/coapp/master.hpp>
+#include <lely/coapp/sdo.hpp>
 #include <lely/ev/task.h>
 #include <lely/io2/posix/poll.hpp>
 #include <lely/io2/timer.hpp>
 
+#include "client.h"
 #include "config.h"
 #include "master_dcf.h"
 #include "process_image.h"
@@ -56,10 +66,11 @@ class Network : public lely::canopen::BasicMaster
     Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &timer,
             lely::io::TimerBase &tick, lely::io::CanChannelBase &chan, const std::string &dcf_path,
             const NetworkConfig &cfg, const MasterLayout &layout, ProcessImage &image,
-            NetworkStatus &status);
+            NetworkStatus &status, ClientQueue *client = nullptr, bool service = false);
     ~Network() override;
 
-    // Resets the master, which boots every node, and starts the periodic work.
+    // Resets the master, which boots every node, and starts the periodic work. In service mode it
+    // only starts serving client requests.
     void Start();
     // Sends the configured NMT command to every node and stops sending PDOs and SYNC.
     void StopNodes();
@@ -113,6 +124,7 @@ class Network : public lely::canopen::BasicMaster
         bool restore_pending = false; // waiting for the reset that follows the restore
         bool held            = false; // lost and stopped until the next PLC start
         bool has_abort       = false; // a configuration SDO was refused in this boot
+        bool manual          = false; // stopped or pre-operational by a client
         Problem abort;
         uint8_t state      = 0;
         bool retry_pending = false;
@@ -155,6 +167,14 @@ class Network : public lely::canopen::BasicMaster
     void WriteOutputs(bool all);
     void WriteObject(uint16_t index, CoType type, uint64_t value);
     void SendSync();
+    void ServeClient();
+    void ClientRead(const ClientJob &job);
+    void ClientWrite(ClientJob &job);
+    void ClientNmt(const ClientJob &job);
+    void ManualNmt(uint8_t id, NmtRequest cmd);
+    void SendNmt(NmtRequest cmd, uint8_t id);
+    void FinishSdo(uint64_t job, std::error_code ec, std::vector<uint8_t> data);
+    lely::canopen::Sdo &ServiceSdo(uint8_t id);
 
     ev_exec_t *exec_;
     lely::io::Poll &poll_;
@@ -182,6 +202,10 @@ class Network : public lely::canopen::BasicMaster
     uint64_t synced_scans_ = 0;
     uint64_t merged_scans_ = 0;
     bool running_          = false;
+    ClientQueue *client_;
+    bool service_;
+    bool client_busy_ = false; // a client SDO is running
+    std::map<uint8_t, std::unique_ptr<lely::canopen::Sdo>> service_sdos_;
     clock::time_point started_{};
     clock::time_point next_time_{};
 };
