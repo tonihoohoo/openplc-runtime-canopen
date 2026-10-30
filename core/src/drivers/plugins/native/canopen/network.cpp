@@ -61,7 +61,7 @@ void pdo_set_bits(uint8_t *data, unsigned offset, unsigned bits, uint64_t value)
 Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &timer,
                  lely::io::TimerBase &tick, lely::io::CanChannelBase &chan,
                  const std::string &dcf_path, const NetworkConfig &cfg, const MasterLayout &layout,
-                 ProcessImage &image, NetworkStatus &status)
+                 ProcessImage &image, NetworkStatus &status, ClientQueue *client, bool service)
     : BasicMaster(exec, timer, chan, dcf_path, "", static_cast<uint8_t>(cfg.master_node_id)),
       exec_(exec), poll_(poll), tick_(tick), tick_wait_(exec,
                                                         [this](int, std::error_code ec)
@@ -69,7 +69,7 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
                                                             if (!ec)
                                                                 OnTick();
                                                         }),
-      cfg_(cfg), layout_(layout), image_(image), status_(status)
+      cfg_(cfg), layout_(layout), image_(image), status_(status), client_(client), service_(service)
 {
     for (size_t slot = 0; slot < cfg_.nodes.size(); ++slot)
     {
@@ -105,6 +105,15 @@ Network::~Network()
 
 void Network::Start()
 {
+    if (service_)
+    {
+        // Never reset: the master sends no boot-up, heartbeat or NMT command of its own.
+        status_.begin_session();
+        log_info("%s: service mode, %zu node(s)", cfg_.label().c_str(), nodes_.size());
+        tick_.settime(kTick, kTick);
+        tick_.submit_wait(tick_wait_);
+        return;
+    }
     running_      = true;
     synced_scans_ = image_.scans();
     started_      = clock::now();
@@ -165,6 +174,8 @@ void Network::OnScanTask(ev_task *task)
 
 void Network::StopNodes()
 {
+    if (service_)
+        return;
     running_ = false;
     if (cfg_.sync == SyncMode::Period)
     {
@@ -265,6 +276,8 @@ void Network::OnNodeGuarding(uint8_t id, bool occurred) noexcept
 
 void Network::OnState(uint8_t id, NmtState st) noexcept
 {
+    // On a boot-up, drops the node's SDO client, which Lely's boot of the node needs.
+    BasicMaster::OnState(id, st);
     HandleState(id, st);
 }
 
@@ -495,6 +508,7 @@ void Network::HandleLoss(uint8_t id, ProblemKind kind)
     NodeState *n = Find(id);
     if (!n || !n->up || n->stopped || n->held)
         return;
+    n->manual       = false;
     const char *why = kind == ProblemKind::Heartbeat  ? "heartbeat timeout"
                       : kind == ProblemKind::Guarding ? "node guarding timeout"
                                                       : "node reset";
@@ -615,7 +629,7 @@ void Network::HandleRpdoError(int num, uint16_t eec)
     uint16_t &last     = rpdo_error_[static_cast<size_t>(num - 1)];
     NodeState *node    = Find(static_cast<uint8_t>(m.node_id));
     // A deadline missed while the node is not running says nothing about the PDO.
-    if (eec == 0x8250 && (!node || !node->up))
+    if (eec == 0x8250 && (!node || !node->up || node->manual))
         return;
     if (last == eec)
         return;
@@ -782,6 +796,7 @@ void Network::ReadFoundIdentity(uint8_t id, IdentityField field)
 void Network::OnTick()
 {
     tick_.submit_wait(tick_wait_);
+    ServeClient();
     if (!running_)
         return;
     auto now = clock::now();
@@ -803,7 +818,7 @@ void Network::OnTick()
                          "powered, connected, set to node ID %u and to the bus bit rate",
                          n.cfg->label().c_str(), it.first);
         }
-        if (n.up || n.stopped || n.held || n.booting)
+        if (n.up || n.stopped || n.held || n.booting || n.manual)
             continue;
         if (!n.retry_pending)
         {
@@ -1000,6 +1015,249 @@ void Network::SendSync()
     msg.id      = 0x80;
     std::lock_guard<lely::util::BasicLockable> lock(*this);
     can_net_send(net(), &msg);
+}
+
+void Network::ServeClient()
+{
+    if (!client_ || client_busy_)
+        return;
+    ClientJob job;
+    if (!client_->next(job))
+        return;
+    switch (job.kind)
+    {
+    case ClientJob::Kind::Read:
+        ClientRead(job);
+        break;
+    case ClientJob::Kind::Write:
+        ClientWrite(job);
+        break;
+    case ClientJob::Kind::Nmt:
+        ClientNmt(job);
+        break;
+    }
+}
+
+lely::canopen::Sdo &Network::ServiceSdo(uint8_t id)
+{
+    std::unique_ptr<lely::canopen::Sdo> &sdo = service_sdos_[id];
+    if (!sdo)
+        sdo.reset(new lely::canopen::Sdo(net(), id));
+    return *sdo;
+}
+
+void Network::FinishSdo(uint64_t job, std::error_code ec, std::vector<uint8_t> data)
+{
+    client_busy_ = false;
+    JobResult r;
+    if (!ec)
+    {
+        r.state = JobResult::State::Done;
+        r.data  = std::move(data);
+    }
+    else
+    {
+        r.state = JobResult::State::Failed;
+        if (ec.category() != lely::canopen::SdoCategory())
+            r.reason = "error";
+        else if (static_cast<uint32_t>(ec.value()) ==
+                 static_cast<uint32_t>(lely::canopen::SdoErrc::NO_SDO))
+            r.reason = "booting"; // Lely boots the node with its own client SDO
+        else
+        {
+            r.has_abort  = true;
+            r.abort_code = static_cast<uint32_t>(ec.value());
+        }
+    }
+    client_->finish(job, std::move(r));
+}
+
+void Network::ClientRead(const ClientJob &job)
+{
+    const uint64_t jid = job.id;
+    const auto timeout = std::chrono::milliseconds(cfg_.sdo_timeout_ms);
+    auto con = [this, jid](uint8_t, uint16_t, uint8_t, std::error_code ec, std::vector<uint8_t> v)
+    { FinishSdo(jid, ec, std::move(v)); };
+    client_busy_ = true;
+    std::error_code ec;
+    try
+    {
+        if (service_)
+        {
+            std::lock_guard<lely::util::BasicLockable> lock(*this);
+            ServiceSdo(static_cast<uint8_t>(job.node))
+                .SubmitUpload<std::vector<uint8_t>>(exec_, job.index, job.subindex, con, false,
+                                                    timeout);
+        }
+        else
+            SubmitRead<std::vector<uint8_t>>(exec_, static_cast<uint8_t>(job.node), job.index,
+                                             job.subindex, con, timeout, ec);
+    }
+    catch (const std::exception &e)
+    {
+        log_debug("node %u: client read failed: %s", job.node, e.what());
+        ec = std::make_error_code(std::errc::io_error);
+    }
+    if (ec)
+        FinishSdo(jid, ec, {});
+}
+
+void Network::ClientWrite(ClientJob &job)
+{
+    const uint64_t jid   = job.id;
+    const unsigned node  = job.node;
+    const uint16_t index = job.index;
+    const uint8_t sub    = job.subindex;
+    const auto timeout   = std::chrono::milliseconds(cfg_.sdo_timeout_ms);
+    auto con = [this, jid, node, index, sub](uint8_t, uint16_t, uint8_t, std::error_code ec)
+    {
+        bool abort    = ec && ec.category() == lely::canopen::SdoCategory();
+        uint32_t code = abort ? static_cast<uint32_t>(ec.value()) : 0;
+        if (ec)
+            log_warn("node %u: online write to 0x%04X:%u failed: %s", node, index, sub,
+                     ec.message().c_str());
+        else
+            log_info("node %u: online write to 0x%04X:%u", node, index, sub);
+        status_.client_write(node, index, sub, !ec, abort, code);
+        FinishSdo(jid, ec, {});
+    };
+    client_busy_ = true;
+    std::error_code ec;
+    try
+    {
+        if (service_)
+        {
+            std::lock_guard<lely::util::BasicLockable> lock(*this);
+            ServiceSdo(static_cast<uint8_t>(node))
+                .SubmitDownload(exec_, index, sub, std::move(job.data), con, false, timeout);
+        }
+        else
+            SubmitWrite(exec_, static_cast<uint8_t>(node), index, sub, std::move(job.data), con,
+                        timeout, ec);
+    }
+    catch (const std::exception &e)
+    {
+        log_debug("node %u: client write failed: %s", node, e.what());
+        ec = std::make_error_code(std::errc::io_error);
+    }
+    if (ec)
+    {
+        con(0, 0, 0, ec);
+    }
+}
+
+void Network::SendNmt(NmtRequest cmd, uint8_t id)
+{
+    static const uint8_t cs[] = {1, 2, 0x80, 0x81, 0x82};
+    can_msg msg               = CAN_MSG_INIT;
+    msg.id                    = 0;
+    msg.len                   = 2;
+    msg.data[0]               = cs[static_cast<size_t>(cmd)];
+    msg.data[1]               = id;
+    std::lock_guard<lely::util::BasicLockable> lock(*this);
+    can_net_send(net(), &msg);
+}
+
+void Network::ManualNmt(uint8_t id, NmtRequest cmd)
+{
+    if (service_)
+    {
+        SendNmt(cmd, id);
+        return;
+    }
+    NodeState *n = Find(id);
+    if (!n)
+        return;
+    static const NmtCommand lely_cmd[] = {NmtCommand::START, NmtCommand::STOP,
+                                          NmtCommand::ENTER_PREOP, NmtCommand::RESET_NODE,
+                                          NmtCommand::RESET_COMM};
+    try
+    {
+        Command(lely_cmd[static_cast<size_t>(cmd)], id);
+    }
+    catch (const std::exception &e)
+    {
+        log_warn("%s: cannot send the NMT command: %s", n->cfg->label().c_str(), e.what());
+        return;
+    }
+    // `wait`: the node's boot-up message starts the boot; the retry is only a fallback.
+    auto boot_again = [this, n, id](std::chrono::milliseconds wait)
+    {
+        if (cfg_.on_node_error == OnNodeError::Stop)
+        {
+            // Back in the network list, which the boot needs; taken out again once it is up.
+            std::error_code ec;
+            Write<uint32_t>(0x1F81, id, slave_assignment(*n->cfg), ec);
+        }
+        n->manual        = false;
+        n->retry_pending = true;
+        n->retry_at      = clock::now() + wait;
+        n->backoff       = kRetryMin;
+    };
+    switch (cmd)
+    {
+    case NmtRequest::Stop:
+    case NmtRequest::PreOperational:
+        n->manual = true;
+        status_.manual(id);
+        if (n->up && n->cfg->on_loss == OnLoss::Zero)
+        {
+            ZeroInputs(*n);
+            image_.commit();
+        }
+        break;
+    case NmtRequest::Start:
+        if (n->held)
+        {
+            n->held = false;
+            status_.release(id);
+            boot_again(std::chrono::milliseconds(0));
+        }
+        else if (n->up)
+        {
+            n->manual = false;
+            status_.set_state(id, NodeRun::Operational);
+        }
+        else
+            boot_again(std::chrono::milliseconds(0));
+        break;
+    case NmtRequest::ResetNode:
+    case NmtRequest::ResetCommunication:
+        if (n->held)
+        {
+            n->held = false;
+            status_.release(id);
+        }
+        // The boot-up that follows is expected: no loss, the master boots the node again.
+        if (n->up)
+            SetUp(*n, false);
+        status_.set_state(id, NodeRun::Booting);
+        boot_again(kRetryMin);
+        break;
+    }
+}
+
+void Network::ClientNmt(const ClientJob &job)
+{
+    if (job.node == 0)
+    {
+        if (service_)
+        {
+            for (const auto &it : nodes_)
+                SendNmt(job.command, static_cast<uint8_t>(it.first));
+        }
+        else
+            for (const auto &it : nodes_)
+                ManualNmt(static_cast<uint8_t>(it.first), job.command);
+    }
+    else
+        ManualNmt(static_cast<uint8_t>(job.node), job.command);
+    log_info("%s: NMT %s to %s from a client", cfg_.label().c_str(), nmt_request_name(job.command),
+             job.node ? ("node " + std::to_string(job.node)).c_str() : "every node");
+    status_.nmt_command(job.node, job.command);
+    JobResult r;
+    r.state = JobResult::State::Done;
+    client_->finish(job.id, std::move(r));
 }
 
 } // namespace canopen_plugin

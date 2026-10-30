@@ -94,7 +94,9 @@ void NetworkStatus::begin_session()
     for (NodeStatus &n : data_.nodes)
     {
         // A held node stays lost and stopped across sessions until the next PLC start.
-        if (!n.held)
+        if (data_.service)
+            change(n, NodeRun::Service);
+        else if (!n.held)
             change(n, NodeRun::Waiting);
         n.nmt = NmtSeen::Unknown;
         n.late.clear();
@@ -352,6 +354,64 @@ void NetworkStatus::link_reset(ResetOutcome outcome, ResetCause cause)
     push(e);
 }
 
+void NetworkStatus::manual(unsigned node)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    NodeStatus *n = find(node);
+    if (!n)
+        return;
+    change(*n, NodeRun::Manual);
+    n->late.clear();
+}
+
+void NetworkStatus::release(unsigned node)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    NodeStatus *n = find(node);
+    if (!n)
+        return;
+    n->held = false;
+    change(*n, NodeRun::Booting);
+}
+
+void NetworkStatus::client_write(unsigned node, uint16_t index, uint8_t subindex, bool ok,
+                                 bool has_abort, uint32_t abort)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    Event e;
+    e.node      = node;
+    e.kind      = EventKind::SdoWrite;
+    e.index     = index;
+    e.subindex  = subindex;
+    e.ok        = ok;
+    e.has_abort = has_abort;
+    e.abort     = abort;
+    push(e);
+}
+
+void NetworkStatus::nmt_command(unsigned node, NmtRequest command)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    Event e;
+    e.node    = node;
+    e.kind    = EventKind::NmtCommand;
+    e.command = command;
+    push(e);
+}
+
+void NetworkStatus::set_service(bool open)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    data_.service = open;
+    if (open)
+        for (NodeStatus &n : data_.nodes)
+            change(n, NodeRun::Service);
+    Event e;
+    e.kind = EventKind::Service;
+    e.open = open;
+    push(e);
+}
+
 void NetworkStatus::stop_all()
 {
     std::lock_guard<PiMutex> lock(mutex_);
@@ -388,6 +448,10 @@ const char *node_run_name(NodeRun s)
         return "lost";
     case NodeRun::Stopped:
         return "stopped";
+    case NodeRun::Manual:
+        return "manual";
+    case NodeRun::Service:
+        return "service";
     }
     return "waiting";
 }
@@ -535,6 +599,12 @@ const char *event_name(EventKind k)
         return "bus_state";
     case EventKind::BusReset:
         return "bus_reset";
+    case EventKind::SdoWrite:
+        return "sdo_write";
+    case EventKind::NmtCommand:
+        return "nmt_command";
+    case EventKind::Service:
+        return "service";
     }
     return "boot_ok";
 }
@@ -679,6 +749,19 @@ cJSON *event_json(const Event &ev)
         cJSON_AddStringToObject(o, "outcome", reset_outcome_name(ev.reset));
         cJSON_AddStringToObject(o, "cause", reset_cause_name(ev.cause));
         break;
+    case EventKind::SdoWrite:
+        add_uint(o, "index", ev.index);
+        add_uint(o, "subindex", ev.subindex);
+        cJSON_AddBoolToObject(o, "ok", ev.ok);
+        if (ev.has_abort)
+            add_uint(o, "abort_code", ev.abort);
+        break;
+    case EventKind::NmtCommand:
+        cJSON_AddStringToObject(o, "command", nmt_request_name(ev.command));
+        break;
+    case EventKind::Service:
+        cJSON_AddBoolToObject(o, "open", ev.open);
+        break;
     default:
         break;
     }
@@ -699,6 +782,8 @@ std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t no
         cJSON *o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "name", n.name.c_str());
         cJSON_AddStringToObject(o, "interface", n.interface.c_str());
+        if (n.service)
+            cJSON_AddStringToObject(o, "mode", "service");
         cJSON_AddItemToObject(o, "bus", bus_json(n.bus));
         cJSON_AddBoolToObject(o, "all_mandatory_up", n.all_up(false));
         cJSON_AddBoolToObject(o, "all_optional_up", n.all_up(true));

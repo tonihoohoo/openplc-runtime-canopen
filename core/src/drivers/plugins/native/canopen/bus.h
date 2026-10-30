@@ -25,6 +25,7 @@
 #include "bus_monitor.h"
 #include "bus_off_recovery.h"
 #include "can_link.h"
+#include "client.h"
 #include "config.h"
 #include "link_stall.h"
 #include "master_dcf.h"
@@ -45,9 +46,10 @@ namespace canopen_plugin
 // The signal Lely's poll uses to wake a bus thread. Not SIGUSR1, which the runtime uses for its
 // own tasks: each poll replaces the signal's handler while it lives and puts the old one back.
 int wake_signal();
-// Installs a no-op handler for wake_signal(); call before the first bus thread starts.
+// Installs a no-op handler for wake_signal(); call before a set of bus threads starts. Counted, so
+// sets may overlap.
 void prepare_wake_signal();
-// Ignores wake_signal() again; call after the last bus thread ended (the handler is in this
+// Ignores wake_signal() again once every set that prepared it has ended (the handler is in this
 // library, which the runtime unloads).
 void release_wake_signal();
 
@@ -56,12 +58,18 @@ class Bus
   public:
     Bus(const NetworkConfig &net, const MasterLayout &layout, ProcessImage &image,
         NetworkStatus &status, std::string dcf_path,
-        std::shared_ptr<lely::io::VirtualCanController> vbus = nullptr, LinkOps *links = nullptr);
+        std::shared_ptr<lely::io::VirtualCanController> vbus = nullptr, LinkOps *links = nullptr,
+        bool service = false);
     ~Bus();
 
     void start();
     // Sends the network's NMT command for a PLC stop, ends the session and joins. Idempotent.
     void stop();
+    // Client requests to this network (the online tools); served while a session runs.
+    ClientQueue &client()
+    {
+        return client_;
+    }
     // True while a session runs at the real-time priority.
     bool realtime() const
     {
@@ -96,6 +104,8 @@ class Bus
     std::string dcf_path_;
     std::shared_ptr<lely::io::VirtualCanController> vbus_;
     LinkOps &links_;
+    bool service_; // service mode: the master runs no node, only client requests
+    ClientQueue client_;
     bool use_link_; // a CAN interface (real or stood in for) is read and prepared
     LinkSetup setup_;
     BusOffRecovery recovery_;

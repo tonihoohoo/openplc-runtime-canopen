@@ -24,8 +24,8 @@ CONFIG_HEADER = (
 _CONFIG_VERSION_RE = re.compile(r"constexpr\s+int\s+kConfigVersion\s*=\s*(\d+)\s*;")
 
 
-# GET /api/canopen/status
-FEATURES = ["status"]
+# status: GET /api/canopen/status; sdo, nmt and service: POST /api/canopen/request
+FEATURES = ["status", "sdo", "nmt", "service"]
 
 
 class CanopenCapability(TypedDict):

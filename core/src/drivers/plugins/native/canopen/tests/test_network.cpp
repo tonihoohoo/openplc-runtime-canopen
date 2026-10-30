@@ -40,6 +40,7 @@
 #include "log.h"
 #include "master_dcf.h"
 #include "process_image.h"
+#include "requests.h"
 #include "sim_slave.h"
 #include "status.h"
 #include "status_server.h"
@@ -542,7 +543,7 @@ size_t events_of(const NetworkStatus &status, unsigned id, EventKind kind)
     return n;
 }
 
-// One request over the status socket at `path`; "" on failure.
+// One request over the status socket at `path`, without the newline; "" on failure.
 std::string ask(const std::string &path, const std::string &request)
 {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -570,6 +571,8 @@ std::string ask(const std::string &path, const std::string &request)
         answer.append(buf, static_cast<size_t>(n));
     }
     close(fd);
+    if (!answer.empty() && answer.back() == '\n')
+        answer.pop_back();
     return answer;
 }
 
@@ -763,6 +766,180 @@ void check_link_fault_reset(std::shared_ptr<lely::io::VirtualCanController> vbus
 
 } // namespace
 
+// Service mode: the master sends nothing of its own, neither resets nor starts the node, and
+// serves SDO and NMT requests to it.
+void check_service_mode(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                        const std::string &wire, const std::string &dir,
+                        const plugin_runtime_args_t &rt)
+{
+    SimSlaveSpec spec;
+    spec.node_id = 2;
+    SimSlave io(spec, dir + "/service_node2.dcf", vbus, wire);
+    io.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    ServiceRequest req;
+    req.interface           = wire.empty() ? "vcan-test" : wire;
+    req.sdo_timeout_ms      = 500;
+    req.nodes               = {2, 3};
+    const NetworkConfig net = service_network(req);
+    MasterLayout layout     = master_layout(net);
+    ProcessImage image;
+    std::vector<std::string> errors;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/service.dcf";
+    {
+        FILE *f       = std::fopen(dcf.c_str(), "w");
+        std::string t = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+    }
+
+    std::atomic<bool> run{true};
+    std::vector<Frame> frames;
+    std::thread listener;
+    if (vbus)
+        listener = std::thread([&] { listen(vbus, run, frames); });
+    NetworkStatus status(net);
+    status.set_service(true);
+    Bus bus(net, layout, image, status, dcf, vbus, nullptr, true);
+    bus.start();
+    CHECK(scan_until(
+        image, rt, [&status] { return node_status(status, 2).state == NodeRun::Service; },
+        std::chrono::seconds(2)));
+
+    auto finish = [&](ClientJob job)
+    {
+        std::string reason;
+        JobResult r;
+        uint64_t id = 0;
+        auto end    = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!(id = bus.client().submit(job, reason)) && std::chrono::steady_clock::now() < end)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(id != 0);
+        end = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (std::chrono::steady_clock::now() < end && bus.client().result(id, r) &&
+               r.state == JobResult::State::Pending)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return r;
+    };
+    ClientJob read;
+    read.kind   = ClientJob::Kind::Read;
+    read.node   = 2;
+    read.index  = 0x1000;
+    JobResult r = finish(read);
+    CHECK(r.state == JobResult::State::Done && r.data.size() == 4);
+    // An absent node: the SDO times out.
+    read.node = 3;
+    r         = finish(read);
+    CHECK(r.state == JobResult::State::Failed && r.has_abort && r.abort_code == 0x05040000);
+
+    ClientJob nmt;
+    nmt.kind    = ClientJob::Kind::Nmt;
+    nmt.node    = 2;
+    nmt.command = NmtRequest::PreOperational;
+    r           = finish(nmt);
+    CHECK(r.state == JobResult::State::Done);
+    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (io.last_command() != 0x80 && std::chrono::steady_clock::now() < end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(io.last_command() == 0x80);
+    CHECK(node_status(status, 2).state == NodeRun::Service);
+
+    bus.stop();
+    run = false;
+    if (listener.joinable())
+        listener.join();
+    // The only NMT frame is the client's; no SYNC.
+    size_t nmt_frames = 0, syncs = 0;
+    for (const Frame &f : frames)
+    {
+        nmt_frames += f.id == 0;
+        syncs += f.id == 0x80;
+    }
+    if (vbus)
+        CHECK(nmt_frames == 1 && syncs == 0);
+    io.stop();
+}
+
+// The socket's requests over one bus, as the plugin answers them while a PLC runs.
+class BusRequests : public Requests
+{
+  public:
+    BusRequests(NetworkStatus &status, Bus &bus, const NetworkConfig &net)
+        : status_(status), bus_(bus), net_(net)
+    {
+    }
+    std::string status() override
+    {
+        return status_json({status_.snapshot()}, wall_ms());
+    }
+    Lookup network(size_t net, unsigned node, ClientQueue *&queue) override
+    {
+        if (net != 0)
+            return Lookup::UnknownNetwork;
+        bool known = node == 0;
+        for (const NodeConfig &n : net_.nodes)
+            known = known || n.node_id == node;
+        if (!known)
+            return Lookup::UnknownNode;
+        queue = &bus_.client();
+        return Lookup::Ok;
+    }
+    bool job(uint64_t id, JobResult &out) override
+    {
+        return bus_.client().result(id, out);
+    }
+    std::string service_open(const ServiceRequest &) override
+    {
+        return "plc_running";
+    }
+    void service_close() override {}
+
+  private:
+    NetworkStatus &status_;
+    Bus &bus_;
+    const NetworkConfig &net_;
+};
+
+// Sends an SDO request and waits for its job to end, scanning meanwhile; the job's last answer.
+std::string run_job(ProcessImage &image, const plugin_runtime_args_t &rt, const std::string &sock,
+                    const std::string &request)
+{
+    std::string answer = ask(sock, request);
+    size_t at          = answer.find("\"job\":");
+    if (at == std::string::npos)
+        return answer;
+    const std::string poll =
+        "{\"op\":\"job\",\"job\":" + answer.substr(at + 6, answer.find('}') - at - 6) + "}";
+    scan_until(
+        image, rt,
+        [&]
+        {
+            answer = ask(sock, poll);
+            return answer.find("pending") == std::string::npos;
+        },
+        std::chrono::seconds(5));
+    return answer;
+}
+
+std::string sdo_request(const char *op, unsigned node, unsigned index, unsigned sub,
+                        const std::string &data = "")
+{
+    std::string r = std::string("{\"op\":\"") + op +
+                    "\",\"network\":0,\"node\":" + std::to_string(node) +
+                    ",\"index\":" + std::to_string(index) + ",\"subindex\":" + std::to_string(sub);
+    if (!data.empty())
+        r += ",\"data\":\"" + data + "\"";
+    return r + "}";
+}
+
+std::string nmt_request(unsigned node, const char *command)
+{
+    return "{\"op\":\"nmt\",\"network\":0,\"node\":" + std::to_string(node) + ",\"command\":\"" +
+           command + "\"}";
+}
+
 int main()
 {
     set_log_sink(quiet_sink);
@@ -829,13 +1006,9 @@ int main()
     Bus bus(net, layout, image, status, dcf, vbus);
     bus.start();
     const std::string sock = dir + "/status.socket";
-    StatusServer server(sock,
-                        [&status](const std::string &request)
-                        {
-                            return handle_status_request(
-                                request,
-                                [&status] { return status_json({status.snapshot()}, wall_ms()); });
-                        });
+    BusRequests requests(status, bus, net);
+    StatusServer server(sock, [&requests](const std::string &request)
+                        { return handle_request(request, requests); });
     std::string problem;
     CHECK(server.start(problem));
 
@@ -959,8 +1132,81 @@ int main()
             CHECK(std::string(bus_state->valuestring) == "error_active");
             cJSON_Delete(root);
         }
-        CHECK(ask(sock, R"({"op":"nmt"})").find("unknown op") != std::string::npos);
+        CHECK(ask(sock, R"({"op":"nmt"})") == R"({"error":"bad_request"})");
+        CHECK(ask(sock, R"({"op":"teleport"})") == R"({"error":"unknown_op"})");
         CHECK(ask(sock, "nonsense").find("error") != std::string::npos);
+    }
+
+    // Online tools on node 2: reads (expedited and segmented), a write the node refuses while
+    // operational, then the same write in pre-operational, a save and a reset.
+    {
+        std::string a = run_job(image, rt, sock, sdo_request("sdo_read", 2, 0x1018, 1));
+        CHECK(a.find("\"state\":\"done\",\"data\":\"") != std::string::npos);
+        CHECK(run_job(image, rt, sock, sdo_request("sdo_read", 2, 0x1008, 0)) ==
+              "{\"state\":\"done\",\"data\":\"" +
+                  to_hex({'G', 'e', 'n', 'e', 'r', 'i', 'c', ' ', 'I', '/', 'O', ' ', 'm', 'o', 'd',
+                          'u', 'l', 'e'}) +
+                  "\"}");
+        CHECK(run_job(image, rt, sock, sdo_request("sdo_read", 2, 0x5555, 0)) ==
+              R"({"state":"failed","abort_code":100794368})"); // 0x06020000
+        CHECK(run_job(image, rt, sock, sdo_request("sdo_write", 2, 0x2101, 0, "1400")) ==
+              R"({"state":"failed","abort_code":134217762})"); // 0x08000022
+        CHECK(ask(sock, sdo_request("sdo_read", 7, 0x1000, 0)) == R"({"error":"unknown_node"})");
+        CHECK(ask(sock, R"({"op":"sdo_read","network":0,"node":2,"index":1})") ==
+              R"({"error":"bad_request"})");
+
+        size_t late_events = events_of(status, 2, EventKind::PdoLate);
+        CHECK(ask(sock, nmt_request(2, "pre_operational")) == R"({"ok":true})");
+        CHECK(scan_until(
+            image, rt, [&status] { return node_status(status, 2).state == NodeRun::Manual; },
+            std::chrono::seconds(2)));
+        CHECK(scan_until(
+            image, rt, [&io1] { return io1->last_command() == 0x80; }, std::chrono::seconds(2)));
+        // In pre-operational the node sends no PDOs; that is not reported as late or as a loss.
+        scan_until(image, rt, [] { return false; }, std::chrono::milliseconds(400));
+        CHECK(node_status(status, 2).state == NodeRun::Manual);
+        CHECK(node_status(status, 2).losses == 0);
+        CHECK(events_of(status, 2, EventKind::PdoLate) == late_events);
+        CHECK(g_byte_in[0] == 0xA5);
+        CHECK(events_of(status, 2, EventKind::NmtCommand) == 1);
+
+        CHECK(run_job(image, rt, sock, sdo_request("sdo_write", 2, 0x2101, 0, "1400")) ==
+              R"({"state":"done"})");
+        CHECK(run_job(image, rt, sock, sdo_request("sdo_read", 2, 0x2101, 0)) ==
+              R"({"state":"done","data":"1400"})");
+        CHECK(run_job(image, rt, sock, sdo_request("sdo_write", 2, 0x1010, 1, "73617665")) ==
+              R"({"state":"done"})");
+        CHECK(io1->saves() == 1);
+        CHECK(events_of(status, 2, EventKind::SdoWrite) == 3);
+
+        CHECK(ask(sock, nmt_request(2, "start")) == R"({"ok":true})");
+        CHECK(scan_until(
+            image, rt, [&status] { return node_status(status, 2).state == NodeRun::Operational; },
+            std::chrono::seconds(2)));
+        CHECK(scan_until(
+            image, rt, [&io1] { return io1->last_command() == 1; }, std::chrono::seconds(2)));
+
+        // A reset node is configured and started again, without counting as a loss.
+        CHECK(ask(sock, nmt_request(2, "reset_node")) == R"({"ok":true})");
+        CHECK(scan_until(
+            image, rt, [&status] { return node_status(status, 2).state == NodeRun::Booting; },
+            std::chrono::seconds(2)));
+        CHECK(scan_until(
+            image, rt,
+            [&status, &io1] {
+                return node_status(status, 2).state == NodeRun::Operational &&
+                       io1->last_command() == 1;
+            },
+            std::chrono::seconds(10)));
+        CHECK(io1->parameter() == 0x12345678);
+        CHECK(node_status(status, 2).losses == 0);
+        // The reset put the node's parameter back to its default.
+        CHECK(run_job(image, rt, sock, sdo_request("sdo_read", 2, 0x2101, 0)) ==
+              R"({"state":"done","data":"0a00"})");
+        // Its inputs, reset too, come in again.
+        CHECK(scan_until(image, rt, [] { return g_byte_in[0] == 0; }, std::chrono::seconds(2)));
+        io1->set_inputs(0xA5, -1234);
+        CHECK(scan_until(image, rt, [] { return g_byte_in[0] == 0xA5; }, std::chrono::seconds(2)));
     }
 
     // Loss: heartbeat stops, state 0, inputs held.
@@ -1019,6 +1265,7 @@ int main()
         check_link_fault_reset(vbus, dir, rt);
     }
     check_node_options(vbus, wire, dir, rt);
+    check_service_mode(vbus, wire, dir, rt);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }

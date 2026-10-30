@@ -26,6 +26,9 @@ namespace canopen_plugin
 namespace
 {
 void wake_noop(int) {}
+// The PLC's networks and service mode can overlap while one closes and the other starts.
+std::mutex wake_mutex;
+unsigned wake_users = 0;
 } // namespace
 
 int wake_signal()
@@ -35,6 +38,9 @@ int wake_signal()
 
 void prepare_wake_signal()
 {
+    std::lock_guard<std::mutex> lock(wake_mutex);
+    if (wake_users++)
+        return;
     struct sigaction sa = {};
     sa.sa_handler       = wake_noop;
     sigemptyset(&sa.sa_mask);
@@ -43,6 +49,9 @@ void prepare_wake_signal()
 
 void release_wake_signal()
 {
+    std::lock_guard<std::mutex> lock(wake_mutex);
+    if (wake_users == 0 || --wake_users)
+        return;
     struct sigaction sa = {};
     sa.sa_handler       = SIG_IGN;
     sigemptyset(&sa.sa_mask);
@@ -58,10 +67,10 @@ constexpr std::chrono::milliseconds Bus::kResetPause;
 
 Bus::Bus(const NetworkConfig &net, const MasterLayout &layout, ProcessImage &image,
          NetworkStatus &status, std::string dcf_path,
-         std::shared_ptr<lely::io::VirtualCanController> vbus, LinkOps *links)
+         std::shared_ptr<lely::io::VirtualCanController> vbus, LinkOps *links, bool service)
     : net_(net), layout_(layout), image_(image), status_(status), monitor_(net.interface),
       dcf_path_(std::move(dcf_path)), vbus_(std::move(vbus)),
-      links_(links ? *links : system_link_ops()), use_link_(!vbus_ || links)
+      links_(links ? *links : system_link_ops()), service_(service), use_link_(!vbus_ || links)
 {
 }
 
@@ -338,7 +347,8 @@ void Bus::run_session()
             base = chan.get();
         }
 
-        Network net(exec, poll, timer, tick, *base, dcf_path_, net_, layout_, image_, status_);
+        Network net(exec, poll, timer, tick, *base, dcf_path_, net_, layout_, image_, status_,
+                    &client_, service_);
         session_rate_ = 0;
         stall_.clear();
         if (use_link_)
@@ -346,6 +356,7 @@ void Bus::run_session()
         else
             status_.set_bus(monitor_.simulated());
         net.Start();
+        client_.set_running(true);
         bool shut_down = false;
         bool lost      = false;
         int slices     = 0;
@@ -367,6 +378,7 @@ void Bus::run_session()
                 {
                     lost = true;
                 }
+                client_.set_running(false);
                 // Cancels every pending operation, after which the loop drains and stops.
                 ctx.shutdown();
                 shut_down = true;
@@ -382,6 +394,7 @@ void Bus::run_session()
                 break;
             }
         }
+        client_.set_running(false);
         net.MarkAllDown();
         if (lost && !resetting_)
             log_error("CAN interface %s went down; the nodes are not operational, retrying",
@@ -389,6 +402,7 @@ void Bus::run_session()
     }
     catch (const std::exception &e)
     {
+        client_.set_running(false);
         for (size_t slot = 0; slot < net_.nodes.size(); ++slot)
             image_.set_node_state(slot, 0);
         image_.commit();

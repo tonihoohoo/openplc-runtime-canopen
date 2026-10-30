@@ -12,12 +12,14 @@
 #include <linux/rtnetlink.h>
 #include <net/if.h>
 #include <string>
+#include <vector>
 
 #include "bus_monitor.h"
 #include "cJSON.h"
 #include "can_link.h"
 #include "check.h"
 #include "config.h"
+#include "requests.h"
 #include "status.h"
 #include "status_server.h"
 
@@ -238,14 +240,172 @@ void test_optional_and_held()
     CHECK(node(st.snapshot(), 2).state == NodeRun::Lost);
 }
 
+struct FakeRequests : Requests
+{
+    ClientQueue queue;
+    bool known_node = true;
+    std::string refuse;
+    ServiceRequest opened;
+    int closes = 0;
+
+    std::string status() override
+    {
+        return "{\"active\":true}";
+    }
+    Lookup network(size_t net, unsigned node, ClientQueue *&q) override
+    {
+        if (net != 0)
+            return Lookup::UnknownNetwork;
+        if (node && !known_node)
+            return Lookup::UnknownNode;
+        q = &queue;
+        return Lookup::Ok;
+    }
+    bool job(uint64_t id, JobResult &out) override
+    {
+        return queue.result(id, out);
+    }
+    std::string service_open(const ServiceRequest &req) override
+    {
+        opened = req;
+        return refuse;
+    }
+    void service_close() override
+    {
+        ++closes;
+    }
+};
+
+uint64_t job_id(const std::string &answer)
+{
+    size_t at = answer.find("\"job\":");
+    return at == std::string::npos ? 0 : std::stoull(answer.substr(at + 6));
+}
+
 void test_requests()
 {
-    auto status = [] { return std::string("{\"active\":true}"); };
-    CHECK(handle_status_request("{\"op\":\"status\"}", status) == "{\"active\":true}");
-    CHECK(handle_status_request("{\"op\":\"sdo_read\"}", status).find("unknown op") !=
-          std::string::npos);
-    CHECK(handle_status_request("[1]", status).find("not a JSON object") != std::string::npos);
-    CHECK(handle_status_request("{}", status).find("no op") != std::string::npos);
+    FakeRequests t;
+    CHECK(handle_request("{\"op\":\"status\"}", t) == "{\"active\":true}");
+    CHECK(handle_request("{\"op\":\"teleport\"}", t) == "{\"error\":\"unknown_op\"}");
+    CHECK(handle_request("[1]", t) == "{\"error\":\"bad_request\"}");
+    CHECK(handle_request("{}", t) == "{\"error\":\"bad_request\"}");
+    CHECK(handle_request("not json", t) == "{\"error\":\"bad_request\"}");
+
+    // No session yet: refused.
+    const std::string read = R"({"op":"sdo_read","network":0,"node":2,"index":4120,"subindex":2})";
+    CHECK(handle_request(read, t) == "{\"error\":\"not_running\"}");
+    t.queue.set_running(true);
+    uint64_t id = job_id(handle_request(read, t));
+    CHECK(id != 0);
+    CHECK(handle_request("{\"op\":\"job\",\"job\":" + std::to_string(id) + "}", t) ==
+          "{\"state\":\"pending\"}");
+    ClientJob job;
+    CHECK(t.queue.next(job) && job.id == id && job.kind == ClientJob::Kind::Read);
+    CHECK(job.node == 2 && job.index == 0x1018 && job.subindex == 2);
+    JobResult done;
+    done.state = JobResult::State::Done;
+    done.data  = {0x34, 0x12, 0x00, 0x00};
+    t.queue.finish(id, done);
+    CHECK(handle_request("{\"op\":\"job\",\"job\":" + std::to_string(id) + "}", t) ==
+          "{\"state\":\"done\",\"data\":\"34120000\"}");
+    CHECK(handle_request("{\"op\":\"job\",\"job\":999999}", t) == "{\"error\":\"unknown_job\"}");
+    CHECK(handle_request("{\"op\":\"job\",\"job\":0}", t) == "{\"error\":\"bad_request\"}");
+
+    // Writes: hex data, either case; bad hex, empty data and out-of-range fields are refused.
+    id = job_id(handle_request(
+        R"({"op":"sdo_write","network":0,"node":2,"index":8449,"subindex":0,"data":"0A0b"})", t));
+    CHECK(id != 0 && t.queue.next(job) && job.kind == ClientJob::Kind::Write);
+    CHECK(job.data.size() == 2 && job.data[0] == 0x0A && job.data[1] == 0x0B);
+    JobResult aborted;
+    aborted.state      = JobResult::State::Failed;
+    aborted.has_abort  = true;
+    aborted.abort_code = 0x08000022;
+    t.queue.finish(id, aborted);
+    CHECK(handle_request("{\"op\":\"job\",\"job\":" + std::to_string(id) + "}", t) ==
+          "{\"state\":\"failed\",\"abort_code\":134217762}");
+    for (const char *bad :
+         {R"({"op":"sdo_write","network":0,"node":2,"index":1,"subindex":0,"data":"abc"})",
+          R"({"op":"sdo_write","network":0,"node":2,"index":1,"subindex":0,"data":"zz"})",
+          R"({"op":"sdo_write","network":0,"node":2,"index":1,"subindex":0,"data":""})",
+          R"({"op":"sdo_write","network":0,"node":2,"index":1,"subindex":0})",
+          R"({"op":"sdo_read","network":0,"node":0,"index":1,"subindex":0})",
+          R"({"op":"sdo_read","network":0,"node":128,"index":1,"subindex":0})",
+          R"({"op":"sdo_read","network":0,"node":2,"index":65536,"subindex":0})",
+          R"({"op":"sdo_read","network":0,"node":2,"index":1,"subindex":256})",
+          R"({"op":"sdo_read","network":0,"node":2.5,"index":1,"subindex":0})",
+          R"({"op":"sdo_read","node":2,"index":1,"subindex":0})"})
+        CHECK(handle_request(bad, t) == "{\"error\":\"bad_request\"}");
+    std::string big(2 * (ClientQueue::kMaxData + 1), '0');
+    CHECK(
+        handle_request(R"({"op":"sdo_write","network":0,"node":2,"index":1,"subindex":0,"data":")" +
+                           big + "\"}",
+                       t) == "{\"error\":\"too_large\"}");
+    CHECK(handle_request(R"({"op":"sdo_read","network":1,"node":2,"index":1,"subindex":0})", t) ==
+          "{\"error\":\"unknown_network\"}");
+    t.known_node = false;
+    CHECK(handle_request(read, t) == "{\"error\":\"unknown_node\"}");
+    t.known_node = true;
+
+    // NMT: node 0 for all nodes, named commands only.
+    CHECK(handle_request(R"({"op":"nmt","network":0,"node":0,"command":"pre_operational"})", t) ==
+          "{\"ok\":true}");
+    CHECK(t.queue.next(job) && job.kind == ClientJob::Kind::Nmt && job.node == 0 &&
+          job.command == NmtRequest::PreOperational);
+    CHECK(handle_request(R"({"op":"nmt","network":0,"node":2,"command":"jump"})", t) ==
+          "{\"error\":\"bad_request\"}");
+    CHECK(handle_request(R"({"op":"nmt"})", t) == "{\"error\":\"bad_request\"}");
+    for (const char *name :
+         {"start", "stop", "pre_operational", "reset_node", "reset_communication"})
+    {
+        NmtRequest r;
+        CHECK(parse_nmt_request(name, r) && std::strcmp(nmt_request_name(r), name) == 0);
+    }
+
+    // The queue holds kMaxWaiting jobs; ending the session fails what is left.
+    uint64_t first = 0;
+    for (size_t i = 0; i < ClientQueue::kMaxWaiting; ++i)
+    {
+        uint64_t n = job_id(handle_request(read, t));
+        CHECK(n != 0);
+        if (!first)
+            first = n;
+    }
+    CHECK(handle_request(read, t) == "{\"error\":\"queue_full\"}");
+    t.queue.set_running(false);
+    CHECK(handle_request("{\"op\":\"job\",\"job\":" + std::to_string(first) + "}", t) ==
+          "{\"state\":\"failed\",\"reason\":\"not_running\"}");
+
+    // Service mode.
+    const std::string open =
+        R"({"op":"service_open","interface":"can0","bitrate":250000,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2,5]})";
+    CHECK(handle_request(open, t) == "{\"ok\":true,\"network\":0}");
+    CHECK(t.opened.interface == "can0" && t.opened.bitrate == 250000 &&
+          t.opened.sdo_timeout_ms == 500 && t.opened.nodes.size() == 2 && t.opened.nodes[1] == 5);
+    CHECK(t.opened.name == "Service");
+    CHECK(
+        handle_request(
+            R"({"op":"service_open","name":"CANopen 1","interface":"can0","bitrate":0,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2]})",
+            t) == "{\"ok\":true,\"network\":0}");
+    CHECK(t.opened.name == "CANopen 1");
+    CHECK(
+        handle_request(
+            R"({"op":"service_open","name":"","interface":"can0","bitrate":0,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2]})",
+            t) == "{\"error\":\"bad_request\"}");
+    t.refuse = "plc_running";
+    CHECK(handle_request(open, t) == "{\"error\":\"plc_running\"}");
+    for (
+        const char *bad :
+        {R"({"op":"service_open","interface":"can0","bitrate":123,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2]})",
+         R"({"op":"service_open","interface":"a-very-long-name0","bitrate":0,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2]})",
+         R"({"op":"service_open","interface":"can0","bitrate":0,"master_node_id":2,"sdo_timeout_ms":500,"nodes":[2]})",
+         R"({"op":"service_open","interface":"can0","bitrate":0,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2,2]})",
+         R"({"op":"service_open","interface":"can0","bitrate":0,"master_node_id":127,"sdo_timeout_ms":0,"nodes":[2]})",
+         R"({"op":"service_open","interface":"","bitrate":0,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2]})"})
+        CHECK(handle_request(bad, t) == "{\"error\":\"bad_request\"}");
+    CHECK(handle_request("{\"op\":\"service_close\"}", t) == "{\"ok\":true}" && t.closes == 1);
+
+    std::vector<uint8_t> bytes;
+    CHECK(from_hex("00ff7F", bytes) && to_hex(bytes) == "00ff7f");
 }
 
 // Appends an attribute to the message in `buf` and returns it.
