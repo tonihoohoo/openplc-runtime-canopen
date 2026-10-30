@@ -793,11 +793,12 @@ void Network::OnTick()
         {
             // Lely waits for a node that never answers without reporting it.
             n.silent_logged = true;
-            status_.silent(it.first);
-            if (n.cfg->optional)
-                log_info("%s (optional) is absent; it is started when it answers",
+            // Reported once until the node boots, not again in each bus session.
+            const bool first = status_.silent(it.first);
+            if (first && n.cfg->optional)
+                log_info("%s is optional and absent; it is started when it answers",
                          n.cfg->label().c_str());
-            else
+            else if (first)
                 log_warn("%s has not answered since the master started; check that it is "
                          "powered, connected, set to node ID %u and to the bus bit rate",
                          n.cfg->label().c_str(), it.first);

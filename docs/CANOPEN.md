@@ -300,8 +300,9 @@ itself; they lower the worst-case delays, not the typical ones.
   hash sorts above every numbered release of the same base.
 - While the interface is missing or down the master logs it once and retries every second.
 - Messages go to the runtime log with the `[CANOPEN]` prefix and the interface name.
-  A failed boot or configuration SDO is reported once per node; the CANopen stack's own line for
-  each attempt is logged at debug level only.
+  A failed boot or configuration SDO is reported once per node, and a node that has not answered
+  once until it boots; the CANopen stack's own lines for each failed SDO or frame are logged at
+  debug level only (link faults are reported by the bus state).
 - Existing installs keep their `plugins.conf`; add the `canopen` line from `plugins_default.conf`
   to it, or remove it so that it is created again.
 

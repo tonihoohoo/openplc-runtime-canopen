@@ -122,17 +122,21 @@ void NetworkStatus::set_nmt(unsigned node, NmtSeen nmt)
         n->nmt = nmt;
 }
 
-void NetworkStatus::silent(unsigned node)
+bool NetworkStatus::silent(unsigned node)
 {
     std::lock_guard<PiMutex> lock(mutex_);
     NodeStatus *n = find(node);
     if (!n)
-        return;
+        return false;
     change(*n, n->optional ? NodeRun::Absent : NodeRun::Silent);
+    if (n->silent_reported)
+        return false;
+    n->silent_reported = true;
     Event e;
     e.node = node;
     e.kind = n->optional ? EventKind::Absent : EventKind::Silent;
     push(e);
+    return true;
 }
 
 void NetworkStatus::held(unsigned node)
@@ -149,7 +153,8 @@ void NetworkStatus::boot_ok(unsigned node)
     if (!n)
         return;
     ++n->boots;
-    n->problem = Problem();
+    n->problem         = Problem();
+    n->silent_reported = false;
     change(*n, NodeRun::Operational);
     n->nmt = NmtSeen::Operational;
     Event e;
