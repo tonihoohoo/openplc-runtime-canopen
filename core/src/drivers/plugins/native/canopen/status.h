@@ -185,7 +185,8 @@ struct NodeStatus
     NmtSeen nmt    = NmtSeen::Unknown;
     int64_t since  = 0;
     unsigned boots = 0; // finished boot attempts since the PLC started
-    unsigned losses = 0;
+    unsigned losses      = 0;
+    bool silent_reported = false; // the silent or absent event was sent; cleared when it boots
     Problem problem;
     std::vector<Emcy> emcy; // newest first
     std::vector<LatePdo> late;
@@ -222,8 +223,9 @@ class NetworkStatus
     void begin_session();
     void set_state(unsigned node, NodeRun state);
     void set_nmt(unsigned node, NmtSeen nmt);
-    // Not booted within the boot-up timeout: silent when mandatory, absent when optional.
-    void silent(unsigned node);
+    // Not booted within the boot-up timeout: silent when mandatory, absent when optional. Returns
+    // true the first time since the PLC start or the node's last boot, when the event is sent.
+    bool silent(unsigned node);
     // Lost and left stopped until the next PLC start.
     void held(unsigned node);
     bool is_held(unsigned node);

@@ -205,14 +205,23 @@ void test_optional_and_held()
     NetworkConfig net     = two_nodes();
     net.nodes[1].optional = true;
     NetworkStatus st(net);
-    st.silent(2);
-    st.silent(3);
+    CHECK(st.silent(2));
+    CHECK(st.silent(3));
     NetworkSnapshot s = st.snapshot();
     CHECK(node(s, 2).state == NodeRun::Silent && node(s, 3).state == NodeRun::Absent);
     CHECK(s.events.front().kind == EventKind::Absent);
+    // A new bus session reports a node that is still silent again in its state, not as an event.
+    const size_t events = s.events.size();
+    st.begin_session();
+    CHECK(!st.silent(2) && !st.silent(3));
+    s = st.snapshot();
+    CHECK(s.events.size() == events && node(s, 2).state == NodeRun::Silent);
     st.boot_ok(2);
     s = st.snapshot();
     CHECK(s.all_up(false) && !s.all_up(true));
+    // Once it has booted, a later silence is reported again.
+    CHECK(st.silent(2));
+    st.boot_ok(2);
 
     Problem g;
     g.kind = ProblemKind::Guarding;

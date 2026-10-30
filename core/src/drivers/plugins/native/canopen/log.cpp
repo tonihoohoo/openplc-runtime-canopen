@@ -72,11 +72,17 @@ LogLevel from_severity(diag_severity s)
     }
 }
 
-// Lely logs each failed boot or configuration SDO, every attempt; the plugin reports these
-// failures itself, once, with the node's name.
-bool boot_sdo_abort(const char *msg)
+// Lely logs each failed boot or configuration SDO, each failed frame and each node error, every
+// time; the plugin reports these itself (node problems once per node, link faults by state).
+bool repeated_failure(const char *msg)
 {
-    return std::strncmp(msg, "SDO abort code ", 15) == 0;
+    static const char *const kRepeated[] = {"SDO abort code ", "error reading CAN frame",
+                                            "error writing CAN frame", "CAN frame successfully ",
+                                            "NMT: error indicated for "};
+    for (const char *prefix : kRepeated)
+        if (std::strncmp(msg, prefix, std::strlen(prefix)) == 0)
+            return true;
+    return false;
 }
 
 void lely_diag(void *, diag_severity severity, int errc, const char *format, va_list ap)
@@ -89,7 +95,7 @@ void lely_diag(void *, diag_severity severity, int errc, const char *format, va_
                       errc2str(errc));
     else
         std::snprintf(buf, sizeof(buf), "[CANOPEN] %slely: %s", t_prefix.c_str(), msg);
-    g_sink(boot_sdo_abort(msg) ? LogLevel::Debug : from_severity(severity), buf);
+    g_sink(repeated_failure(msg) ? LogLevel::Debug : from_severity(severity), buf);
 }
 
 void lely_diag_at(void *, diag_severity severity, int errc, const floc *at, const char *format,

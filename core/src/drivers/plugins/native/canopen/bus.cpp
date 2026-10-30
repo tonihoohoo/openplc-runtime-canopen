@@ -373,7 +373,11 @@ void Bus::run_session()
             }
             else if (shut_down && ++slices >= kShutdownSlices)
             {
-                log_warn("the CANopen session did not end cleanly");
+                // Expected while a faulty link is reset: writes stuck in the adapter never finish.
+                if (resetting_)
+                    log_debug("the CANopen session did not end cleanly");
+                else
+                    log_warn("the CANopen session did not end cleanly");
                 loop.stop();
                 break;
             }
