@@ -232,7 +232,7 @@ gives no usable answer.
 | `{"op": "sdo_write", "network": 0, "node": 2, "index": 8449, "subindex": 0, "data": "1400"}` | `{"job": 42}` |
 | `{"op": "job", "job": 41}` | `{"state": "pending"}`, `{"state": "done", "data": "34120000"}` (a read), `{"state": "done"}` (a write or NMT), `{"state": "failed", "abort_code": 134217762}` (the node's SDO abort, or 0x05040000 for a timeout) or `{"state": "failed", "reason": "booting"}` |
 | `{"op": "nmt", "network": 0, "node": 2, "command": "pre_operational"}` | `{"ok": true}` |
-| `{"op": "service_open", "interface": "can0", "bitrate": 250000, "master_node_id": 127, "sdo_timeout_ms": 1000, "nodes": [2, 3]}` | `{"ok": true, "network": 0}` |
+| `{"op": "service_open", "name": "CANopen 1", "interface": "can0", "bitrate": 250000, "master_node_id": 127, "sdo_timeout_ms": 1000, "nodes": [2, 3]}` | `{"ok": true, "network": 0}` |
 | `{"op": "service_close"}` | `{"ok": true}` |
 
 - `network` is the network's index in `canopen.json`; `node` must be one of its nodes (1 to 127).
@@ -258,7 +258,7 @@ gives no usable answer.
 
 Service mode runs the online tools while the PLC is stopped, with no program uploaded. A client
 opens it with `service_open` and the CAN settings to use; the plugin then runs a master on that
-interface that sends nothing of its own (no NMT reset, start or stop, no SYNC, no boot, no
+interface (under `name` in the status, `Service` when left out) that sends nothing of its own (no NMT reset, start or stop, no SYNC, no boot, no
 configuration) and only serves the requests, with the NMT commands sent as plain frames. The nodes
 listed are the ones requests may address, all in state `service`. It is refused with `plc_running`
 while the PLC runs CANopen, and `busy` while it is already open. A PLC start closes it first, as do

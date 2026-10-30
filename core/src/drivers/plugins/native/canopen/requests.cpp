@@ -135,7 +135,14 @@ std::string service_open(const cJSON *req, Requests &target)
         !get_uint(req, "master_node_id", 1, 127, s.master_node_id) ||
         !get_uint(req, "sdo_timeout_ms", 1, 60000, s.sdo_timeout_ms) || !cJSON_IsArray(nodes))
         return error("bad_request");
-    s.interface = itf->valuestring;
+    s.interface       = itf->valuestring;
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(req, "name");
+    if (name)
+    {
+        if (!cJSON_IsString(name) || !*name->valuestring || std::strlen(name->valuestring) > 64)
+            return error("bad_request");
+        s.name = name->valuestring;
+    }
     const cJSON *n;
     cJSON_ArrayForEach(n, nodes)
     {
@@ -161,7 +168,7 @@ std::string service_open(const cJSON *req, Requests &target)
 NetworkConfig service_network(const ServiceRequest &req)
 {
     NetworkConfig net;
-    net.name           = "Service";
+    net.name           = req.name;
     net.interface      = req.interface;
     net.bitrate        = req.bitrate;
     net.master_node_id = req.master_node_id;

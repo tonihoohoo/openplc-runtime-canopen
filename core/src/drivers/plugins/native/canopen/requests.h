@@ -21,6 +21,7 @@ namespace canopen_plugin
 // The network settings a client sends to open service mode.
 struct ServiceRequest
 {
+    std::string name = "Service"; // the network's name in the status
     std::string interface;
     unsigned bitrate        = 0;
     unsigned master_node_id = 127;

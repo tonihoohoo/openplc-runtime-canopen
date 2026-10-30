@@ -372,6 +372,16 @@ void test_requests()
     CHECK(handle_request(open, t) == "{\"ok\":true,\"network\":0}");
     CHECK(t.opened.interface == "can0" && t.opened.bitrate == 250000 &&
           t.opened.sdo_timeout_ms == 500 && t.opened.nodes.size() == 2 && t.opened.nodes[1] == 5);
+    CHECK(t.opened.name == "Service");
+    CHECK(
+        handle_request(
+            R"({"op":"service_open","name":"CANopen 1","interface":"can0","bitrate":0,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2]})",
+            t) == "{\"ok\":true,\"network\":0}");
+    CHECK(t.opened.name == "CANopen 1");
+    CHECK(
+        handle_request(
+            R"({"op":"service_open","name":"","interface":"can0","bitrate":0,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2]})",
+            t) == "{\"error\":\"bad_request\"}");
     t.refuse = "plc_running";
     CHECK(handle_request(open, t) == "{\"error\":\"plc_running\"}");
     for (

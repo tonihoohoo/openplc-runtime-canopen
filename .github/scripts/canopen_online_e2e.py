@@ -119,6 +119,7 @@ def main() -> None:
 
     service: Json = {
         "op": "service_open",
+        "name": "canopen_1",
         "interface": args.interface,
         "bitrate": 0,
         "master_node_id": 127,
