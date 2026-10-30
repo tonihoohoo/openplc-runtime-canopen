@@ -7,10 +7,11 @@
 //   0x6200:01 UNSIGNED8  digital outputs  RPDO1 (0x200 + id)
 //   0x2100:00 UNSIGNED32 a parameter the master can write during configuration (read-only, so the
 //                        write is refused, with parameter_read_only)
-// It produces heartbeats at 0x1017 (default 50 ms) and emergencies on request (0x80 + id), can
-// watch the master's heartbeat (0x1016:01, written by the master; 0x1029:01 sets the reaction,
-// pre-operational by default) and runs on its own thread, on Lely's virtual bus or on a SocketCAN
-// interface.
+// It produces heartbeats at 0x1017 (default 50 ms; 0 to be guarded instead, with 0x100C and
+// 0x100D) and emergencies on request (0x80 + id), can watch the master's heartbeat (0x1016:01,
+// written by the master; 0x1029:01 sets the reaction, pre-operational by default), restores its
+// defaults on "load" written to 0x1011 sub 1-3 (taken at the next reset) and runs on its own
+// thread, on Lely's virtual bus or on a SocketCAN interface.
 
 #ifndef CANOPEN_SIM_SLAVE_H
 #define CANOPEN_SIM_SLAVE_H
@@ -41,6 +42,7 @@ struct SimSlaveSpec
     uint32_t revision        = 0x00000003;
     unsigned heartbeat_ms    = 50;
     bool parameter_read_only = false;
+    bool restore_refused     = false; // 0x1011 aborts every write
 };
 
 // The slave's DCF text.
@@ -78,6 +80,11 @@ class SimSlave
     {
         return nmt_state_.load();
     }
+    // Restore requests (0x1011 written with "load") since start().
+    unsigned restores() const
+    {
+        return restores_.load();
+    }
 
   private:
     struct Impl;
@@ -100,6 +107,7 @@ class SimSlave
     std::atomic<uint8_t> outputs_{0};
     std::atomic<uint32_t> parameter_{0};
     std::atomic<uint8_t> nmt_state_{0};
+    std::atomic<unsigned> restores_{0};
 };
 
 } // namespace canopen_sim

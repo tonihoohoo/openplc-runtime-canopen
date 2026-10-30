@@ -78,6 +78,21 @@ class Parser
         return true;
     }
 
+    // A boolean member; missing keeps `out`.
+    bool get_bool(const cJSON *obj, const char *key, const std::string &where, bool &out)
+    {
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(obj, key);
+        if (!v)
+            return true;
+        if (!cJSON_IsBool(v))
+        {
+            error(where, std::string("\"") + key + "\" must be true or false");
+            return false;
+        }
+        out = cJSON_IsTrue(v);
+        return true;
+    }
+
     bool get_string(const cJSON *obj, const char *key, const std::string &where, std::string &out,
                     bool required)
     {
@@ -261,6 +276,36 @@ bool Parser::parse_network(const cJSON *j, size_t pos, NetworkConfig &net)
     if (get_uint(j, "sdo_timeout_ms", where, 10, 60000, v, &def_sdo_timeout))
         net.sdo_timeout_ms = static_cast<unsigned>(v);
 
+    const uint64_t def_boot_timeout = 2000;
+    if (get_uint(j, "boot_timeout_ms", where, 100, 60000, v, &def_boot_timeout))
+        net.boot_timeout_ms = static_cast<unsigned>(v);
+    std::string on_error;
+    if (get_string(j, "on_node_error", where, on_error, false) && !on_error.empty())
+    {
+        if (on_error == "restart")
+            net.on_node_error = OnNodeError::Restart;
+        else if (on_error == "stop")
+            net.on_node_error = OnNodeError::Stop;
+        else
+            error(where, "\"on_node_error\" \"" + on_error + "\" is not one of restart, stop");
+    }
+    const cJSON *time = cJSON_GetObjectItemCaseSensitive(j, "time");
+    if (time && !cJSON_IsNull(time))
+    {
+        const std::string w    = where + ": time";
+        const uint64_t def_cob = 0x100, def_period = 1000;
+        if (!cJSON_IsObject(time))
+            error(where, "\"time\" must be an object or null");
+        else
+        {
+            net.time_producer = true;
+            if (get_uint(time, "cob_id", w, 1, 0x7FF, v, &def_cob))
+                net.time_cob_id = static_cast<uint32_t>(v);
+            if (get_uint(time, "period_ms", w, 10, 65535, v, &def_period))
+                net.time_period_ms = static_cast<unsigned>(v);
+        }
+    }
+
     const cJSON *sync = cJSON_GetObjectItemCaseSensitive(j, "sync");
     if (sync)
     {
@@ -347,8 +392,31 @@ bool Parser::parse_node(const cJSON *j, const NetworkConfig &net, NodeConfig &no
         return false;
     node.node_id = static_cast<unsigned>(v);
     get_string(j, "name", where, node.name, false);
-    where         = net.label() + ": " + node.label();
-    size_t failed = errors_.size();
+    where            = net.label() + ": " + node.label();
+    size_t failed    = errors_.size();
+    node.emcy_cob_id = 0x80 + node.node_id;
+
+    get_bool(j, "optional", where, node.optional);
+    get_bool(j, "configure", where, node.configure);
+    const uint64_t zero_restore = 0;
+    if (get_uint(j, "restore_defaults", where, 0, 127, v, &zero_restore))
+        node.restore_defaults = static_cast<unsigned>(v);
+    if (node.restore_defaults && !node.configure)
+        error(where, "restore defaults needs the node to be initialized (\"configure\": true)");
+
+    const cJSON *emcy = cJSON_GetObjectItemCaseSensitive(j, "emcy");
+    if (emcy)
+    {
+        const uint64_t def_cob = node.emcy_cob_id;
+        if (!cJSON_IsObject(emcy))
+            error(where, "\"emcy\" must be an object");
+        else
+        {
+            get_bool(emcy, "enabled", where + ": emcy", node.emcy_enabled);
+            if (get_uint(emcy, "cob_id", where + ": emcy", 1, 0x7FF, v, &def_cob))
+                node.emcy_cob_id = static_cast<uint32_t>(v);
+        }
+    }
 
     const cJSON *ident = cJSON_GetObjectItemCaseSensitive(j, "identity");
     if (ident)
@@ -386,8 +454,17 @@ bool Parser::parse_node(const cJSON *j, const NetworkConfig &net, NodeConfig &no
                 if (get_uint(sup, "consumer_ms", where + ": supervision", 1, 65535, v))
                     node.heartbeat_consumer_ms = static_cast<unsigned>(v);
             }
+            else if (type == "guarding")
+            {
+                node.supervision = Supervision::Guarding;
+                if (get_uint(sup, "guard_time_ms", where + ": supervision", 1, 65535, v))
+                    node.guard_time_ms = static_cast<unsigned>(v);
+                if (get_uint(sup, "life_time_factor", where + ": supervision", 1, 255, v))
+                    node.life_time_factor = static_cast<unsigned>(v);
+            }
             else
-                error(where, "supervision type \"" + type + "\" is not one of none, heartbeat");
+                error(where,
+                      "supervision type \"" + type + "\" is not one of none, heartbeat, guarding");
         }
     }
 
@@ -426,6 +503,8 @@ bool Parser::parse_node(const cJSON *j, const NetworkConfig &net, NodeConfig &no
                 node.sdo.push_back(std::move(w));
         }
     }
+    if (!node.configure && !node.sdo.empty())
+        error(where, "has configuration SDOs but is not initialized (\"configure\": false)");
 
     const char *keys[2] = {"tpdos", "rpdos"};
     for (int dir = 0; dir < 2; ++dir)
@@ -470,7 +549,10 @@ bool Parser::parse_sdo(const cJSON *j, const std::string &where, SdoWrite &sdo)
     std::string w = where + " " + object_text(sdo.index, sdo.subindex);
     if (sdo.index == 0x1010 || sdo.index == 0x1011)
     {
-        error(w, "the master never writes 0x1010 (store) or 0x1011 (restore defaults)");
+        error(w, sdo.index == 0x1010
+                     ? "the master never writes 0x1010 (store parameters)"
+                     : "0x1011 (restore defaults) is written only through the node's "
+                       "\"restore_defaults\" setting");
         return false;
     }
     if (!parse_hex_bytes(data, sdo.data) || sdo.data.size() > kMaxSdoBytes)
@@ -560,20 +642,32 @@ bool Parser::parse_pdo(const cJSON *j, const std::string &where, IecArea area, P
 void Parser::check_cob_ids(const NetworkConfig &net)
 {
     std::map<uint32_t, std::string> used;
+    auto use = [&](uint32_t cob, const std::string &what)
+    {
+        auto it = used.find(cob);
+        if (it != used.end())
+            error(net.label(), what + " and " + it->second + " use the same COB-ID " + hex(cob, 3));
+        else
+            used[cob] = what;
+    };
+    if (net.time_producer)
+    {
+        if (net.time_cob_id == 0x080 || (net.time_cob_id >= 0x581 && net.time_cob_id <= 0x67F) ||
+            (net.time_cob_id >= 0x701 && net.time_cob_id <= 0x77F))
+            error(net.label(), "TIME COB-ID " + hex(net.time_cob_id, 3) + " is reserved");
+        use(net.time_cob_id, "TIME");
+    }
+    for (const auto &node : net.nodes)
+        if (node.emcy_enabled)
+            use(node.emcy_cob_id, node.label() + " emergency");
     for (const auto &node : net.nodes)
     {
         for (int dir = 0; dir < 2; ++dir)
         {
             for (const auto &p : dir == 0 ? node.tpdos : node.rpdos)
             {
-                std::string what =
-                    node.label() + (dir == 0 ? " TPDO " : " RPDO ") + std::to_string(p.number);
-                auto it = used.find(p.cob_id);
-                if (it != used.end())
-                    error(net.label(),
-                          what + " and " + it->second + " use the same COB-ID " + hex(p.cob_id, 3));
-                else
-                    used[p.cob_id] = what;
+                use(p.cob_id,
+                    node.label() + (dir == 0 ? " TPDO " : " RPDO ") + std::to_string(p.number));
             }
         }
     }

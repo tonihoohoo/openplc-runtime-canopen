@@ -4,15 +4,21 @@
 // network's bus thread.
 //
 // Bring-up: Lely's NMT master boots each node (CiA 302-2): identity check against 0x1F84-0x1F87,
-// then the 'update configuration' step, where this class writes the node's configuration SDOs
-// (one concise DCF), then NMT start. A node that fails is booted again in the background with a
-// growing delay; the other nodes are not held back.
+// then the 'update configuration' step, where this class restores the node's defaults when asked
+// (0x1011, then an NMT reset and a second boot) and writes the node's configuration SDOs (one
+// concise DCF), then NMT start. A node that is not initialized skips all of that and is only
+// started. A node that fails is booted again in the background with a growing delay; a node that
+// has not answered is looked for every second (an SDO read of 0x1000). Every node is optional to
+// Lely, so none holds back the others; mandatory and optional differ only in how a missing node is
+// reported after the network's boot-up timeout.
 // Exchange: received PDOs are decoded into the process image. Each finished scan wakes the bus
 // thread through the image's eventfd; the outputs of the newest scan are then written into the
 // master's TPDO objects and sent when they change (and in full when a node comes up). With SYNC
 // once per PLC cycle, the outputs go first and then SYNC.
-// Node loss (heartbeat timeout or a boot-up message): the node's inputs hold or go to zero, its
-// PDOs stop, its state reads 0, and it is booted again.
+// Node loss (heartbeat or node guarding timeout, or a boot-up message): the node's inputs hold or
+// go to zero, its PDOs stop, its state reads 0, and it is booted again, or, with the network's
+// on_node_error set to stop, sent NMT stop and left alone until the next PLC start.
+// With a TIME producer, the TIME object carries the host's clock at the configured period.
 // A received PDO with a receive timeout that is late has its inputs held or zeroed in the same
 // way; the node keeps running. Everything seen is also recorded in the network's status.
 //
@@ -67,18 +73,22 @@ class Network : public lely::canopen::BasicMaster
         return merged_scans_;
     }
 
-    // Housekeeping (boot retries, the silent-node warning); the exchange runs on each scan's wake.
+    // Housekeeping (boot retries, looking for missing nodes, TIME); the exchange runs on each
+    // scan's wake.
     static constexpr std::chrono::milliseconds kTick{10};
     static constexpr std::chrono::milliseconds kRetryMin{1000};
     static constexpr std::chrono::milliseconds kRetryMax{16000};
-    // A node not heard from this long after Start() is reported once as silent.
-    static constexpr std::chrono::milliseconds kSilentAfter{5000};
+    // How often a node that has not answered is looked for.
+    static constexpr std::chrono::milliseconds kPollEvery{1000};
+    // Written to 0x1011 to restore defaults (CiA 301): ASCII "load", little-endian.
+    static constexpr uint32_t kRestoreSignature = 0x64616F6C;
 
   protected:
     void OnBoot(uint8_t id, lely::canopen::NmtState st, char es,
                 const std::string &what) noexcept override;
     void OnConfig(uint8_t id) noexcept override;
     void OnHeartbeat(uint8_t id, bool occurred) noexcept override;
+    void OnNodeGuarding(uint8_t id, bool occurred) noexcept override;
     void OnState(uint8_t id, lely::canopen::NmtState st) noexcept override;
     void OnRpdo(int num, std::error_code ec, const void *p, std::size_t n) noexcept override;
     void OnEmcy(uint8_t id, uint16_t eec, uint8_t er, uint8_t msef[5]) noexcept override;
@@ -96,7 +106,13 @@ class Network : public lely::canopen::BasicMaster
         bool stopped          = false; // StopNodes ran
         bool heard            = false; // the node or a boot attempt has reported back
         bool silent_logged    = false;
-        bool has_abort        = false; // a configuration SDO was refused in this boot
+        bool booting          = false; // a Lely boot of the node is running
+        bool polling          = false; // a read of 0x1000 is running
+        clock::time_point next_poll{};
+        bool restored        = false; // the defaults were restored in this bring-up
+        bool restore_pending = false; // waiting for the reset that follows the restore
+        bool held            = false; // lost and stopped until the next PLC start
+        bool has_abort       = false; // a configuration SDO was refused in this boot
         Problem abort;
         uint8_t state      = 0;
         bool retry_pending = false;
@@ -113,6 +129,11 @@ class Network : public lely::canopen::BasicMaster
 
     void HandleBoot(uint8_t id, lely::canopen::NmtState st, char es, const std::string &what);
     void HandleConfig(uint8_t id);
+    void HandleRestore(uint8_t id);
+    void Poll(NodeState &node, uint8_t id);
+    void SendTime();
+    // Sends NMT stop to a node held by on_node_error stop, from the executor.
+    void StopHeld(uint8_t id);
     void HandleLoss(uint8_t id, ProblemKind why);
     void HandleState(uint8_t id, lely::canopen::NmtState st);
     void HandleRpdo(int num, const uint8_t *data, std::size_t n);
@@ -162,6 +183,7 @@ class Network : public lely::canopen::BasicMaster
     uint64_t merged_scans_ = 0;
     bool running_          = false;
     clock::time_point started_{};
+    clock::time_point next_time_{};
 };
 
 } // namespace canopen_plugin

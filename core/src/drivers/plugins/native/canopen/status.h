@@ -24,7 +24,8 @@ namespace canopen_plugin
 enum class NodeRun : uint8_t
 {
     Waiting,     // the master started, the node has not reported back yet
-    Silent,      // not heard from kSilentAfter after the master started
+    Silent,      // mandatory, not booted within the boot-up timeout
+    Absent,      // optional, not booted within the boot-up timeout
     Booting,     // the boot (identity check, configuration SDOs) is running
     Failed,      // the last boot failed; retried in the background
     Operational, // up and started
@@ -47,6 +48,7 @@ enum class ProblemKind : uint8_t
     Identity,   // the device is not the configured one
     SdoAbort,   // a configuration SDO was refused
     Heartbeat,  // a running node missed its heartbeat
+    Guarding,   // a running node did not answer node guarding
     Reset,      // a running node sent a boot-up message
     BootError   // any other boot status
 };
@@ -131,6 +133,7 @@ enum class EventKind : uint8_t
     BootOk,
     BootFailed,
     Silent,
+    Absent,
     Lost,
     Emcy,
     EmcyReset,
@@ -167,10 +170,12 @@ struct NodeStatus
 {
     unsigned node_id = 0;
     std::string name;
-    NodeRun state   = NodeRun::Waiting;
-    NmtSeen nmt     = NmtSeen::Unknown;
-    int64_t since   = 0;
-    unsigned boots  = 0; // finished boot attempts since the PLC started
+    bool optional  = false;
+    bool held      = false; // lost and not restarted until the next PLC start (on node error: stop)
+    NodeRun state  = NodeRun::Waiting;
+    NmtSeen nmt    = NmtSeen::Unknown;
+    int64_t since  = 0;
+    unsigned boots = 0; // finished boot attempts since the PLC started
     unsigned losses = 0;
     Problem problem;
     std::vector<Emcy> emcy; // newest first
@@ -188,7 +193,8 @@ struct NetworkSnapshot
     std::vector<NodeStatus> nodes;
     std::deque<Event> events; // newest first
 
-    bool all_nodes_up() const;
+    // Every mandatory (optional) node is operational; true when there is none.
+    bool all_up(bool optional) const;
 };
 
 // Wall-clock time in milliseconds since the epoch.
@@ -203,10 +209,15 @@ class NetworkStatus
     explicit NetworkStatus(const NetworkConfig &cfg);
 
     // A new session: every node waits again unless the PLC stopped; counters and lists stay.
+    // Keeps the nodes held by `held()`: they stay stopped until the next PLC start.
     void begin_session();
     void set_state(unsigned node, NodeRun state);
     void set_nmt(unsigned node, NmtSeen nmt);
+    // Not booted within the boot-up timeout: silent when mandatory, absent when optional.
     void silent(unsigned node);
+    // Lost and left stopped until the next PLC start.
+    void held(unsigned node);
+    bool is_held(unsigned node);
     void boot_ok(unsigned node);
     void boot_failed(unsigned node, const Problem &p);
     // The found value of an identity failure, read after the failure.

@@ -34,10 +34,10 @@ bool NodeStatus::warning() const
     return false;
 }
 
-bool NetworkSnapshot::all_nodes_up() const
+bool NetworkSnapshot::all_up(bool optional) const
 {
     for (const NodeStatus &n : nodes)
-        if (n.state != NodeRun::Operational)
+        if (n.optional == optional && n.state != NodeRun::Operational)
             return false;
     return true;
 }
@@ -56,9 +56,10 @@ NetworkStatus::NetworkStatus(const NetworkConfig &cfg)
     for (const NodeConfig &n : cfg.nodes)
     {
         NodeStatus s;
-        s.node_id = n.node_id;
-        s.name    = n.name;
-        s.since   = now;
+        s.node_id  = n.node_id;
+        s.name     = n.name;
+        s.optional = n.optional;
+        s.since    = now;
         data_.nodes.push_back(s);
     }
 }
@@ -92,10 +93,19 @@ void NetworkStatus::begin_session()
     std::lock_guard<PiMutex> lock(mutex_);
     for (NodeStatus &n : data_.nodes)
     {
-        change(n, NodeRun::Waiting);
+        // A held node stays lost and stopped across sessions until the next PLC start.
+        if (!n.held)
+            change(n, NodeRun::Waiting);
         n.nmt = NmtSeen::Unknown;
         n.late.clear();
     }
+}
+
+bool NetworkStatus::is_held(unsigned node)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    const NodeStatus *n = find(node);
+    return n != nullptr && n->held;
 }
 
 void NetworkStatus::set_state(unsigned node, NodeRun state)
@@ -118,11 +128,18 @@ void NetworkStatus::silent(unsigned node)
     NodeStatus *n = find(node);
     if (!n)
         return;
-    change(*n, NodeRun::Silent);
+    change(*n, n->optional ? NodeRun::Absent : NodeRun::Silent);
     Event e;
     e.node = node;
-    e.kind = EventKind::Silent;
+    e.kind = n->optional ? EventKind::Absent : EventKind::Silent;
     push(e);
+}
+
+void NetworkStatus::held(unsigned node)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    if (NodeStatus *n = find(node))
+        n->held = true;
 }
 
 void NetworkStatus::boot_ok(unsigned node)
@@ -353,6 +370,8 @@ const char *node_run_name(NodeRun s)
         return "waiting";
     case NodeRun::Silent:
         return "silent";
+    case NodeRun::Absent:
+        return "absent";
     case NodeRun::Booting:
         return "booting";
     case NodeRun::Failed:
@@ -442,6 +461,8 @@ const char *problem_name(ProblemKind k)
         return "sdo_abort";
     case ProblemKind::Heartbeat:
         return "heartbeat";
+    case ProblemKind::Guarding:
+        return "guarding";
     case ProblemKind::Reset:
         return "reset";
     case ProblemKind::BootError:
@@ -474,6 +495,8 @@ const char *event_name(EventKind k)
         return "boot_failed";
     case EventKind::Silent:
         return "silent";
+    case EventKind::Absent:
+        return "absent";
     case EventKind::Lost:
         return "lost";
     case EventKind::Emcy:
@@ -564,7 +587,10 @@ cJSON *node_json(const NodeStatus &n)
     cJSON *o = cJSON_CreateObject();
     add_uint(o, "node_id", n.node_id);
     cJSON_AddStringToObject(o, "name", n.name.c_str());
+    cJSON_AddBoolToObject(o, "optional", n.optional);
     cJSON_AddStringToObject(o, "state", node_run_name(n.state));
+    if (n.held)
+        cJSON_AddBoolToObject(o, "held", true);
     cJSON_AddStringToObject(o, "nmt", nmt_name(n.nmt));
     cJSON_AddNumberToObject(o, "since", static_cast<double>(n.since));
     add_uint(o, "boot_attempts", n.boots);
@@ -652,7 +678,8 @@ std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t no
         cJSON_AddStringToObject(o, "name", n.name.c_str());
         cJSON_AddStringToObject(o, "interface", n.interface.c_str());
         cJSON_AddItemToObject(o, "bus", bus_json(n.bus));
-        cJSON_AddBoolToObject(o, "all_nodes_up", n.all_nodes_up());
+        cJSON_AddBoolToObject(o, "all_mandatory_up", n.all_up(false));
+        cJSON_AddBoolToObject(o, "all_optional_up", n.all_up(true));
         cJSON *nodes = cJSON_AddArrayToObject(o, "nodes");
         for (const NodeStatus &s : n.nodes)
             cJSON_AddItemToArray(nodes, node_json(s));
