@@ -215,6 +215,28 @@ jobs:
           cat "$RUNNER_TEMP/sim-online.log"
           exit "$status"
 
+      - name: Upload the PLC function block project with the editor CLI
+        id: blocks
+        working-directory: editor
+        env:
+          OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
+        run: |
+          # An editor branch without the block library has no such project; the check is skipped.
+          if [ ! -d ./e2e/fixtures/canopen-plc-blocks/project ]; then
+            echo "::notice::The editor branch has no PLC function block project; skipped"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli upload \
+            ./e2e/fixtures/canopen-plc-blocks/project --host 127.0.0.1 --yes \
+            --user-data "$RUNNER_TEMP/editor-data" --json
+
+      - name: PLC function blocks against the simulated node, across PLC stops and starts
+        if: steps.blocks.outputs.present == 'true'
+        run: |
+          python3 .github/scripts/canopen_blocks_e2e.py --sim "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" \
+            --interface vcan0 --user ci --password ci-canopen-e2e
+
       - name: The node goes pre-operational when the runtime dies
         run: |
           # The project's node watches the master's heartbeat (0x1016); no NMT command is sent.
