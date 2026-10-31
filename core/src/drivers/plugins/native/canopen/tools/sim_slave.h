@@ -8,6 +8,7 @@
 //   0x2100:00 UNSIGNED32 a parameter the master can write during configuration (read-only, so the
 //                        write is refused, with parameter_read_only)
 //   0x2101:00 UNSIGNED16 a parameter written only while not operational (abort 0x08000022)
+//   0x2102:00 REAL32     a writable parameter holding 1.5
 //   0x1008:00 VISIBLE_STRING its device name; 0x1010 sub 1-3 save on command ("save" counted)
 // It produces heartbeats at 0x1017 (default 50 ms; 0 to be guarded instead, with 0x100C and
 // 0x100D) and emergencies on request (0x80 + id), can watch the master's heartbeat (0x1016:01,

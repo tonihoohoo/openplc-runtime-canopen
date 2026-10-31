@@ -139,6 +139,8 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     d.sub("1A00", 2, "Mapped object", 0x7, "rw", 0x64010110);
     d.var("2100", "Parameter", 0x7, s.parameter_read_only ? "ro" : "rw", 0);
     d.var("2101", "Pre-operational parameter", 0x6, "rw", 10);
+    // Lely reads a REAL32 default as its bit pattern: 1.5.
+    d.var("2102", "Real parameter", 0x8, "rw", 0x3FC00000);
     d.rec("6000", "Digital inputs", 2, 1);
     d.sub("6000", 1, "Inputs 1-8", 0x5, "rw", 0, true);
     d.rec("6200", "Digital outputs", 2, 1);
