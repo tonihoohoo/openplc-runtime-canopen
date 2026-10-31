@@ -286,9 +286,10 @@ void Bus::thread_main()
             LinkResult r = prepare_link(links_, net_.interface, net_.bitrate, problem, setup_);
             if (setup_.no_restart && !restart_noted_)
             {
-                log_info("bus-off restart is off on CAN interface %s; the master resets the link "
-                         "after a bus-off",
-                         net_.interface.c_str());
+                log_info(
+                    "automatic bus-off restart is off on CAN interface %s; should it go bus-off, "
+                    "the master resets the link",
+                    net_.interface.c_str());
                 restart_noted_ = true;
             }
             if (r != LinkResult::Ready)
