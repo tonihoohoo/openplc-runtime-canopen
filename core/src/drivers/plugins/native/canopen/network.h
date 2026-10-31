@@ -49,6 +49,7 @@
 
 #include "client.h"
 #include "config.h"
+#include "link_stall.h"
 #include "master_dcf.h"
 #include "process_image.h"
 #include "status.h"
@@ -83,6 +84,12 @@ class Network : public lely::canopen::BasicMaster
     {
         return merged_scans_;
     }
+    // Since when the master's writes have failed with none confirmed as sent;
+    // LinkStall::kNotFailing while they go out.
+    LinkStall::clock::time_point WritesFailingSince() const
+    {
+        return write_failures_.since();
+    }
 
     // Housekeeping (boot retries, looking for missing nodes, TIME); the exchange runs on each
     // scan's wake.
@@ -105,6 +112,8 @@ class Network : public lely::canopen::BasicMaster
     void OnEmcy(uint8_t id, uint16_t eec, uint8_t er, uint8_t msef[5]) noexcept override;
     // Logged once per PDO instead of Lely's EMCY per frame.
     void OnRpdoError(int num, uint16_t eec, uint8_t er) noexcept override;
+    // Lely's write result: an error, or (ec 0) the first confirmed write after errors.
+    void on_write_error(std::error_code ec, std::size_t errcnt) noexcept override;
 
   private:
     using clock = std::chrono::steady_clock;
@@ -201,7 +210,8 @@ class Network : public lely::canopen::BasicMaster
     std::vector<uint16_t> rpdo_error_; // per master RPDO: the last error logged
     uint64_t synced_scans_ = 0;
     uint64_t merged_scans_ = 0;
-    bool running_          = false;
+    WriteFailures write_failures_;
+    bool running_ = false;
     ClientQueue *client_;
     bool service_;
     bool client_busy_ = false; // a client SDO is running

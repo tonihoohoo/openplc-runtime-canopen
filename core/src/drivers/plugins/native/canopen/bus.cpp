@@ -161,8 +161,9 @@ LinkFault Bus::fault_of(BusState state, const LinkInfo &info)
 {
     if (!session_rate_)
         session_rate_ = info.bitrate;
-    bool stalled = info.has_stats &&
-                   stall_.reading(state, info.tx_frames, info.tx_dropped, LinkStall::clock::now());
+    auto failing = session_net_ ? session_net_->WritesFailingSince() : LinkStall::kNotFailing;
+    bool stalled = info.has_stats && stall_.reading(state, info.tx_frames, info.tx_dropped, failing,
+                                                    LinkStall::clock::now());
     if (!info.has_stats)
         stall_.clear();
     if (state == BusState::BusOff)
@@ -196,6 +197,7 @@ bool Bus::reset_if_faulty(BusState state, const LinkInfo &info)
         return false;
     }
     recovery_.reset_done(now);
+    const bool dropped = stall_.dropped();
     stall_.clear();
     const char *name = net_.interface.c_str();
     const char *what = fault_text(fault);
@@ -207,8 +209,8 @@ bool Bus::reset_if_faulty(BusState state, const LinkInfo &info)
             log_error("CAN interface %s is at %u bit/s, not the configured %u; resetting the link",
                       name, info.bitrate, net_.bitrate);
         else if (fault == LinkFault::TxStalled)
-            log_error("CAN interface %s stopped sending and drops frames; resetting the link",
-                      name);
+            log_error("CAN interface %s stopped sending%s; resetting the link", name,
+                      dropped ? " and drops frames" : "");
         else
             log_error("CAN interface %s is bus-off; resetting the link", name);
         status_.link_reset(ResetOutcome::Done, cause);
@@ -349,6 +351,7 @@ void Bus::run_session()
 
         Network net(exec, poll, timer, tick, *base, dcf_path_, net_, layout_, image_, status_,
                     &client_, service_);
+        session_net_  = &net;
         session_rate_ = 0;
         stall_.clear();
         if (use_link_)
@@ -395,6 +398,7 @@ void Bus::run_session()
             }
         }
         client_.set_running(false);
+        session_net_ = nullptr;
         net.MarkAllDown();
         if (lost && !resetting_)
             log_error("CAN interface %s went down; the nodes are not operational, retrying",
@@ -402,6 +406,7 @@ void Bus::run_session()
     }
     catch (const std::exception &e)
     {
+        session_net_ = nullptr;
         client_.set_running(false);
         for (size_t slot = 0; slot < net_.nodes.size(); ++slot)
             image_.set_node_state(slot, 0);

@@ -332,9 +332,11 @@ The master resets the link in the same way, with the same back-off, in two more 
 - **Wrong bit rate.** The configuration sets a bit rate and the link reports another one, for
   example after someone changed it by hand. The link comes back at the configured rate. With
   `bitrate: 0` the link's rate is left alone.
-- **Stalled transmitter.** The link is error-active or error-warning, has sent no frame for 3 s and
-  dropped transmit frames in that time. A quiet network drops nothing and an unplugged cable gives
-  error-passive, so neither counts.
+- **Stalled transmitter.** The link is error-active or error-warning, has sent no frame for 3 s and,
+  in that time, either dropped transmit frames or the master's writes failed with none confirmed as
+  sent. The second case catches an adapter that takes frames and never sends them, which the kernel
+  does not count as dropped (`tx_dropped` stays 0). A quiet network writes and drops nothing, and an
+  unplugged cable gives error-passive, so neither counts.
 
 Each reset is logged, counted in the status (`link_resets`) and recorded as a `bus_reset` event
 with its cause.
@@ -385,7 +387,7 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 | `test_can_link` | What the master does to the CAN link before opening it: bit rate, bus-off auto-restart (also on a driver that refuses it), bringing it up; the link statistics read from netlink. |
 | `test_config` | Parser and validator of `conf/canopen.json`. |
 | `test_entry_points` | The plugin's C entry points with an allocation failure injected at each point of `start_loop`: no exception leaves them and a failed start leaves nothing running. |
-| `test_link_stall` | When a link counts as stalled: no frame sent and drops for 3 s, never while quiet, error-passive or bus-off. |
+| `test_link_stall` | When a link counts as stalled: no frame sent for 3 s with drops or failing writes, never while quiet, error-passive or bus-off. |
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
 | `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, emergencies, late PDOs, the status and its socket, the online tools (SDO reads and writes, a refused write,
 pre-operational, save, start and reset of a node), service mode, the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |

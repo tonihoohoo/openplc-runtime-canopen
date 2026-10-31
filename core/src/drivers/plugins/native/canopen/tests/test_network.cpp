@@ -762,6 +762,15 @@ void check_link_fault_reset(std::shared_ptr<lely::io::VirtualCanController> vbus
             CHECK(resets_for(status, ResetCause::TxStalled) == 1 && link_resets(status) == 1);
             CHECK(scan_until(image, rt, back_up(status, boots), std::chrono::seconds(10)));
         });
+
+    // The link's sent count stands still but the master's writes are confirmed: no reset.
+    run(0,
+        [&](FakeLink &link, NetworkStatus &status, ProcessImage &)
+        {
+            link.set_tx(300, 0);
+            std::this_thread::sleep_for(std::chrono::milliseconds(4500));
+            CHECK(link.downs() == 0 && link_resets(status) == 0);
+        });
 }
 
 } // namespace
