@@ -363,8 +363,9 @@ LinkResult prepare_link(LinkOps &ops, const std::string &name, unsigned bitrate,
         if (r != -EOPNOTSUPP || setup.restart_refused)
             return false;
         setup.restart_refused = true;
-        log_info("CAN interface %s cannot restart by itself after a bus-off; the master resets "
-                 "the link instead",
+        // A property of the driver, said when the link is first configured, not a bus-off.
+        log_info("CAN interface %s has no automatic restart after a bus-off; should it go bus-off, "
+                 "the master resets the link",
                  name.c_str());
         return true;
     };
