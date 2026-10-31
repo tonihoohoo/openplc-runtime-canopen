@@ -18,6 +18,12 @@
 
 // <lely/can/net.h> clashes with the C++ headers; only this is needed.
 extern "C" int can_net_send(__can_net *net, const can_msg *msg);
+extern "C" __can_recv *can_recv_create(void);
+extern "C" void can_recv_destroy(__can_recv *recv);
+extern "C" void can_recv_set_func(__can_recv *recv, int (*func)(const can_msg *, void *),
+                                  void *data);
+extern "C" void can_recv_start(__can_recv *recv, __can_net *net, uint_least32_t id,
+                               uint_least8_t flags);
 
 namespace canopen_plugin
 {
@@ -96,6 +102,12 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
 
 Network::~Network()
 {
+    {
+        std::lock_guard<lely::util::BasicLockable> lock(*this);
+        for (__can_recv *r : service_recv_)
+            can_recv_destroy(r);
+        service_recv_.clear();
+    }
     tick_.cancel_wait(tick_wait_);
     if (scan_.watched)
         io_poll_watch(poll_, image_.wake_fd(), 0, &scan_.watch);
@@ -109,6 +121,7 @@ void Network::Start()
     {
         // Never reset: the master sends no boot-up, heartbeat or NMT command of its own.
         status_.begin_session();
+        WatchServiceHeartbeats();
         log_info("%s: service mode, %zu node(s)", cfg_.label().c_str(), nodes_.size());
         tick_.settime(kTick, kTick);
         tick_.submit_wait(tick_wait_);
@@ -562,6 +575,7 @@ void Network::HandleState(uint8_t id, NmtState st)
     n->heard = true;
     switch (st)
     {
+    case NmtState::BOOTUP:
     case NmtState::PREOP:
         status_.set_nmt(id, NmtSeen::PreOperational);
         break;
@@ -575,6 +589,9 @@ void Network::HandleState(uint8_t id, NmtState st)
         status_.set_nmt(id, NmtSeen::Unknown);
         break;
     }
+    // Service mode runs no boot and no supervision; the node only reports its NMT state.
+    if (service_)
+        return;
     if (n->held && st == NmtState::BOOTUP)
     {
         // A held node that restarted (power cycle, new session) is stopped again.
@@ -1164,11 +1181,64 @@ void Network::SendNmt(NmtRequest cmd, uint8_t id)
     can_net_send(net(), &msg);
 }
 
+void Network::WatchServiceHeartbeats()
+{
+    std::lock_guard<lely::util::BasicLockable> lock(*this);
+    for (const auto &it : nodes_)
+    {
+        __can_recv *r = can_recv_create();
+        if (!r)
+        {
+            log_warn("%s: cannot watch node %u's heartbeat", cfg_.label().c_str(), it.first);
+            continue;
+        }
+        can_recv_set_func(r, &Network::OnServiceHeartbeat, this);
+        can_recv_start(r, net(), 0x700 + it.first, 0);
+        service_recv_.push_back(r);
+    }
+}
+
+int Network::OnServiceHeartbeat(const can_msg *msg, void *data) noexcept
+{
+    auto *self = static_cast<Network *>(data);
+    if (msg->len < 1)
+        return 0;
+    NmtSeen seen;
+    switch (msg->data[0] & 0x7F)
+    {
+    case 0x00: // boot-up: the node is pre-operational after it
+    case 0x7F:
+        seen = NmtSeen::PreOperational;
+        break;
+    case 0x04:
+        seen = NmtSeen::Stopped;
+        break;
+    case 0x05:
+        seen = NmtSeen::Operational;
+        break;
+    default:
+        seen = NmtSeen::Unknown;
+        break;
+    }
+    self->status_.set_nmt(msg->id - 0x700, seen);
+    return 0;
+}
+
+void Network::ServiceNmtSeen(uint8_t id, NmtRequest cmd)
+{
+    // Service mode consumes no heartbeat, so the state follows the commands; a reset waits for
+    // the boot-up.
+    static const NmtSeen seen[] = {NmtSeen::Operational, NmtSeen::Stopped, NmtSeen::PreOperational,
+                                   NmtSeen::Unknown, NmtSeen::Unknown};
+    status_.set_nmt(id, seen[static_cast<size_t>(cmd)]);
+}
+
 void Network::ManualNmt(uint8_t id, NmtRequest cmd)
 {
     if (service_)
     {
         SendNmt(cmd, id);
+        ServiceNmtSeen(id, cmd);
         return;
     }
     NodeState *n = Find(id);
@@ -1250,7 +1320,10 @@ void Network::ClientNmt(const ClientJob &job)
         if (service_)
         {
             for (const auto &it : nodes_)
+            {
                 SendNmt(job.command, static_cast<uint8_t>(it.first));
+                ServiceNmtSeen(static_cast<uint8_t>(it.first), job.command);
+            }
         }
         else
             for (const auto &it : nodes_)

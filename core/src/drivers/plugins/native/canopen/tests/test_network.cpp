@@ -854,12 +854,32 @@ void check_service_mode(std::shared_ptr<lely::io::VirtualCanController> vbus,
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     CHECK(io.last_command() == 0x80);
     CHECK(node_status(status, 2).state == NodeRun::Service);
+    CHECK(node_status(status, 2).nmt == NmtSeen::PreOperational);
+
+    nmt.command = NmtRequest::Start;
+    r           = finish(nmt);
+    CHECK(r.state == JobResult::State::Done);
+    CHECK(node_status(status, 2).nmt == NmtSeen::Operational);
+
+    // A reset: the boot-up reports pre-operational, and the node stays in service mode.
+    nmt.command = NmtRequest::ResetNode;
+    r           = finish(nmt);
+    CHECK(r.state == JobResult::State::Done);
+    CHECK(scan_until(
+        image, rt,
+        [&status]
+        {
+            NodeStatus s = node_status(status, 2);
+            return s.nmt == NmtSeen::PreOperational && s.state == NodeRun::Service;
+        },
+        std::chrono::seconds(3)));
+    CHECK(node_status(status, 2).state == NodeRun::Service);
 
     bus.stop();
     run = false;
     if (listener.joinable())
         listener.join();
-    // The only NMT frame is the client's; no SYNC.
+    // The only NMT frames are the client's; no SYNC.
     size_t nmt_frames = 0, syncs = 0;
     for (const Frame &f : frames)
     {
@@ -867,7 +887,7 @@ void check_service_mode(std::shared_ptr<lely::io::VirtualCanController> vbus,
         syncs += f.id == 0x80;
     }
     if (vbus)
-        CHECK(nmt_frames == 1 && syncs == 0);
+        CHECK(nmt_frames == 3 && syncs == 0);
     io.stop();
 }
 

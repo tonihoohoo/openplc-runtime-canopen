@@ -206,7 +206,7 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `all_mandatory_up`, `all_optional_up` | Every mandatory (optional) node is operational; `true` when there is none. |
 | `nodes[].state` | `waiting` (master started, not heard yet), `silent` (mandatory, not booted `boot_timeout_ms` after the start), `absent` (optional, not booted by then), `booting` (also while it restores its defaults), `failed` (the last boot failed; retried in the background), `operational`, `lost` (retried in the background unless `held`), `stopped` (PLC stop), `manual` (stopped or pre-operational by a client's NMT command), `service` (service mode: nobody manages the node). |
 | `nodes[].held` | Present and `true` when the node was lost with `on_node_error: stop` and stays stopped until the next PLC start. |
-| `nodes[].nmt` | Last NMT state seen: `pre_operational`, `operational`, `stopped`, `unknown`. In service mode the master does not follow the node's state. |
+| `nodes[].nmt` | Last NMT state seen: `pre_operational` (also after a boot-up), `operational`, `stopped`, `unknown`. In service mode it follows the NMT commands sent and the nodes' heartbeats and boot-ups; a reset makes it `unknown` until the node is heard again. |
 | `networks[].mode` | `service` while [service mode](#service-mode) is open; left out otherwise. |
 | `nodes[].problem` | Why the node is not running, or `null`: `no_response`, `identity` (with `field`, `expected` and the `found` value read from the node), `sdo_abort` (a configuration SDO or the restore write refused, with `index`, `subindex` and `abort_code`), `heartbeat`, `guarding`, `reset`, `boot_error` (with the stack's `text`). `boot_status` is the CiA 302-2 boot error letter. |
 | `nodes[].warning` | An operational node with an active emergency or a late PDO. |
@@ -260,7 +260,8 @@ Service mode runs the online tools while the PLC is stopped, with no program upl
 opens it with `service_open` and the CAN settings to use; the plugin then runs a master on that
 interface (under `name` in the status, `Service` when left out) that sends nothing of its own (no NMT reset, start or stop, no SYNC, no boot, no
 configuration) and only serves the requests, with the NMT commands sent as plain frames. The nodes
-listed are the ones requests may address, all in state `service`. It is refused with `plc_running`
+listed are the ones requests may address, all in state `service`; their `nmt` follows the commands
+sent and the heartbeats and boot-ups the plugin hears. It is refused with `plc_running`
 while the PLC runs CANopen, and `busy` while it is already open. A PLC start closes it first, as do
 `service_close` and five minutes without a request. Opening and closing it are logged and recorded
 as `service` events.
