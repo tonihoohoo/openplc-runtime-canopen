@@ -105,6 +105,49 @@ bool Bus::wait_for(std::chrono::milliseconds d)
     return !stop_;
 }
 
+void Bus::enable_plc(uint8_t index)
+{
+    if (service_)
+        return;
+    std::vector<unsigned> ids;
+    for (const NodeConfig &n : net_.nodes)
+        ids.push_back(n.node_id);
+    plc_.reset(new PlcPort(new_nonce(), index, static_cast<uint8_t>(net_.master_node_id),
+                           ids.data(), ids.size()));
+}
+
+void Bus::publish_bus(const BusStatus &bus)
+{
+    status_.set_bus(bus);
+    if (!plc_)
+        return;
+    uint8_t k = CANOPEN_PLC_NO_ERROR;
+    switch (bus.state)
+    {
+    case BusState::ErrorPassive:
+        k = CANOPEN_PLC_ERROR_PASSIVE;
+        break;
+    case BusState::BusOff:
+        k = CANOPEN_PLC_BUS_OFF;
+        break;
+    case BusState::Stopped:
+    case BusState::Down:
+    case BusState::Missing:
+        k = CANOPEN_PLC_NO_DRIVER;
+        break;
+    default:
+        break;
+    }
+    plc_->set_kernel(k);
+}
+
+void Bus::set_sessions_running(bool running)
+{
+    client_.set_running(running);
+    if (plc_)
+        plc_->set_running(running);
+}
+
 bool Bus::link_lost(bool monitor)
 {
     if (!use_link_)
@@ -114,12 +157,12 @@ bool Bus::link_lost(bool monitor)
     bool lost = rc != 0 || !info.up;
     if (lost)
     {
-        status_.set_bus(monitor_.unusable(rc == -ENODEV ? BusState::Missing : BusState::Down));
+        publish_bus(monitor_.unusable(rc == -ENODEV ? BusState::Missing : BusState::Down));
     }
     else if (monitor)
     {
         BusStatus b = monitor_.update(info, BusMonitor::clock::now());
-        status_.set_bus(b);
+        publish_bus(b);
         if (info.kind == "can" && reset_if_faulty(b.state, info))
             lost = true;
     }
@@ -296,8 +339,8 @@ void Bus::thread_main()
                 if (problem != last_problem)
                     log_error("%s; the nodes are not operational, retrying", problem.c_str());
                 status_.begin_session();
-                status_.set_bus(monitor_.unusable(r == LinkResult::Missing ? BusState::Missing
-                                                                           : BusState::Down));
+                publish_bus(monitor_.unusable(r == LinkResult::Missing ? BusState::Missing
+                                                                       : BusState::Down));
                 last_problem = problem;
                 if (!wait_for(kRetry))
                     break;
@@ -350,16 +393,16 @@ void Bus::run_session()
         }
 
         Network net(exec, poll, timer, tick, *base, dcf_path_, net_, layout_, image_, status_,
-                    &client_, service_);
+                    &client_, service_, plc_.get());
         session_net_  = &net;
         session_rate_ = 0;
         stall_.clear();
         if (use_link_)
             link_lost(true);
         else
-            status_.set_bus(monitor_.simulated());
+            publish_bus(monitor_.simulated());
         net.Start();
-        client_.set_running(true);
+        set_sessions_running(true);
         bool shut_down = false;
         bool lost      = false;
         int slices     = 0;
@@ -381,7 +424,7 @@ void Bus::run_session()
                 {
                     lost = true;
                 }
-                client_.set_running(false);
+                set_sessions_running(false);
                 // Cancels every pending operation, after which the loop drains and stops.
                 ctx.shutdown();
                 shut_down = true;
@@ -397,7 +440,7 @@ void Bus::run_session()
                 break;
             }
         }
-        client_.set_running(false);
+        set_sessions_running(false);
         session_net_ = nullptr;
         net.MarkAllDown();
         if (lost && !resetting_)
@@ -407,7 +450,7 @@ void Bus::run_session()
     catch (const std::exception &e)
     {
         session_net_ = nullptr;
-        client_.set_running(false);
+        set_sessions_running(false);
         for (size_t slot = 0; slot < net_.nodes.size(); ++slot)
             image_.set_node_state(slot, 0);
         image_.commit();

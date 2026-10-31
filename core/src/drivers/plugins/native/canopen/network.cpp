@@ -61,7 +61,8 @@ void pdo_set_bits(uint8_t *data, unsigned offset, unsigned bits, uint64_t value)
 Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &timer,
                  lely::io::TimerBase &tick, lely::io::CanChannelBase &chan,
                  const std::string &dcf_path, const NetworkConfig &cfg, const MasterLayout &layout,
-                 ProcessImage &image, NetworkStatus &status, ClientQueue *client, bool service)
+                 ProcessImage &image, NetworkStatus &status, ClientQueue *client, bool service,
+                 PlcPort *plc)
     : BasicMaster(exec, timer, chan, dcf_path, "", static_cast<uint8_t>(cfg.master_node_id)),
       exec_(exec), poll_(poll), tick_(tick), tick_wait_(exec,
                                                         [this](int, std::error_code ec)
@@ -69,7 +70,8 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
                                                             if (!ec)
                                                                 OnTick();
                                                         }),
-      cfg_(cfg), layout_(layout), image_(image), status_(status), client_(client), service_(service)
+      cfg_(cfg), layout_(layout), image_(image), status_(status), client_(client),
+      service_(service), plc_(plc)
 {
     for (size_t slot = 0; slot < cfg_.nodes.size(); ++slot)
     {
@@ -667,6 +669,8 @@ void Network::HandleEmcy(uint8_t id, uint16_t eec, uint8_t er, const uint8_t mse
     if (!n)
         return;
     status_.emcy(id, eec, er, msef);
+    if (plc_)
+        plc_->push_emcy(id, eec, er, msef);
     auto now = clock::now();
     if (eec == 0)
     {
@@ -706,6 +710,8 @@ void Network::SetState(NodeState &node, uint8_t state)
 {
     node.state = state;
     image_.set_node_state(node.slot, state);
+    if (plc_)
+        plc_->set_nmt(node.cfg->node_id, state);
 }
 
 void Network::ScheduleRetry(NodeState &node)
@@ -1029,11 +1035,22 @@ void Network::SendSync()
 
 void Network::ServeClient()
 {
-    if (!client_ || client_busy_)
+    if (client_busy_)
         return;
+    // The PLC's blocks and the online tools take turns, so neither can hold off the other.
+    if (plc_first_ && ServePlc())
+    {
+        plc_first_ = false;
+        return;
+    }
+    plc_first_ = true;
     ClientJob job;
-    if (!client_->next(job))
+    if (!client_ || !client_->next(job))
+    {
+        if (ServePlc())
+            plc_first_ = false;
         return;
+    }
     switch (job.kind)
     {
     case ClientJob::Kind::Read:
@@ -1247,27 +1264,203 @@ void Network::ManualNmt(uint8_t id, NmtRequest cmd)
     }
 }
 
-void Network::ClientNmt(const ClientJob &job)
+void Network::RunNmt(unsigned node, NmtRequest cmd)
 {
-    if (job.node == 0)
+    if (node == 0)
     {
         if (service_)
         {
             for (const auto &it : nodes_)
-                SendNmt(job.command, static_cast<uint8_t>(it.first));
+                SendNmt(cmd, static_cast<uint8_t>(it.first));
         }
         else
             for (const auto &it : nodes_)
-                ManualNmt(static_cast<uint8_t>(it.first), job.command);
+                ManualNmt(static_cast<uint8_t>(it.first), cmd);
     }
     else
-        ManualNmt(static_cast<uint8_t>(job.node), job.command);
+        ManualNmt(static_cast<uint8_t>(node), cmd);
+}
+
+void Network::ClientNmt(const ClientJob &job)
+{
+    RunNmt(job.node, job.command);
     log_info("%s: NMT %s to %s from a client", cfg_.label().c_str(), nmt_request_name(job.command),
              job.node ? ("node " + std::to_string(job.node)).c_str() : "every node");
     status_.nmt_command(job.node, job.command);
     JobResult r;
     r.state = JobResult::State::Done;
     client_->finish(job.id, std::move(r));
+}
+
+namespace
+{
+bool plc_nmt_request(uint8_t cs, NmtRequest &out)
+{
+    switch (cs)
+    {
+    case 1:
+        out = NmtRequest::Start;
+        return true;
+    case 2:
+        out = NmtRequest::Stop;
+        return true;
+    case 0x80:
+        out = NmtRequest::PreOperational;
+        return true;
+    case 0x81:
+        out = NmtRequest::ResetNode;
+        return true;
+    case 0x82:
+        out = NmtRequest::ResetCommunication;
+        return true;
+    default:
+        return false;
+    }
+}
+} // namespace
+
+bool Network::ServePlc()
+{
+    if (!plc_ || service_)
+        return false;
+    PlcJob job;
+    if (!plc_->take(job))
+        return false;
+    switch (job.kind)
+    {
+    case CANOPEN_PLC_READ:
+        PlcRead(job);
+        break;
+    case CANOPEN_PLC_WRITE:
+        PlcWrite(job);
+        break;
+    default:
+        PlcNmt(job);
+        break;
+    }
+    return true;
+}
+
+bool Network::PlcLogDue(unsigned node, uint32_t what)
+{
+    uint64_t key = (static_cast<uint64_t>(node) << 32) | what;
+    auto now     = clock::now();
+    auto it      = plc_logged_.find(key);
+    if (it != plc_logged_.end() && now - it->second < std::chrono::seconds(1))
+        return false;
+    plc_logged_[key] = now;
+    return true;
+}
+
+void Network::FinishPlc(uint32_t token, std::error_code ec, const std::vector<uint8_t> &data)
+{
+    client_busy_ = false;
+    if (!ec)
+    {
+        if (data.size() > CANOPEN_PLC_MAX_DATA)
+        {
+            plc_->finish(token, CANOPEN_PLC_WRONG_PARAMETER, CANOPEN_PLC_REASON_TOO_LARGE, 0,
+                         nullptr, static_cast<uint32_t>(data.size()));
+            return;
+        }
+        plc_->finish(token, CANOPEN_PLC_NO_ERROR, CANOPEN_PLC_REASON_NONE, 0, data.data(),
+                     static_cast<uint32_t>(data.size()));
+        return;
+    }
+    if (ec.category() != lely::canopen::SdoCategory())
+    {
+        plc_->finish(token, CANOPEN_PLC_INTERNAL, CANOPEN_PLC_REASON_NONE, 0, nullptr, 0);
+        return;
+    }
+    uint32_t code = static_cast<uint32_t>(ec.value());
+    if (code == static_cast<uint32_t>(lely::canopen::SdoErrc::NO_SDO))
+        plc_->finish(token, CANOPEN_PLC_REQUEST_ERROR, CANOPEN_PLC_REASON_BOOTING, 0, nullptr, 0);
+    else if (code == static_cast<uint32_t>(lely::canopen::SdoErrc::TIMEOUT))
+        plc_->finish(token, CANOPEN_PLC_TIMEOUT, CANOPEN_PLC_REASON_NONE, code, nullptr, 0);
+    else
+        plc_->finish(token, CANOPEN_PLC_OTHER_ERROR, CANOPEN_PLC_REASON_NONE, code, nullptr, 0);
+}
+
+void Network::PlcRead(const PlcJob &job)
+{
+    const uint32_t token = job.token;
+    const auto timeout =
+        std::chrono::milliseconds(job.timeout_ms ? job.timeout_ms : cfg_.sdo_timeout_ms);
+    auto con = [this, token](uint8_t, uint16_t, uint8_t, std::error_code ec, std::vector<uint8_t> v)
+    { FinishPlc(token, ec, v); };
+    client_busy_ = true;
+    std::error_code ec;
+    try
+    {
+        SubmitRead<std::vector<uint8_t>>(exec_, job.node, job.index, job.subindex, con, timeout,
+                                         ec);
+    }
+    catch (const std::exception &e)
+    {
+        log_debug("node %u: PLC read failed: %s", job.node, e.what());
+        ec = std::make_error_code(std::errc::io_error);
+    }
+    if (ec)
+        FinishPlc(token, ec, {});
+}
+
+void Network::PlcWrite(const PlcJob &job)
+{
+    const uint32_t token = job.token;
+    const unsigned node  = job.node;
+    const uint16_t index = job.index;
+    const uint8_t sub    = job.subindex;
+    const auto timeout =
+        std::chrono::milliseconds(job.timeout_ms ? job.timeout_ms : cfg_.sdo_timeout_ms);
+    auto con = [this, token, node, index, sub](uint8_t, uint16_t, uint8_t, std::error_code ec)
+    {
+        bool abort    = ec && ec.category() == lely::canopen::SdoCategory();
+        uint32_t code = abort ? static_cast<uint32_t>(ec.value()) : 0;
+        if (PlcLogDue(node, (static_cast<uint32_t>(index) << 8) | sub))
+        {
+            if (ec)
+                log_warn("node %u: PLC write to 0x%04X:%u failed: %s", node, index, sub,
+                         ec.message().c_str());
+            else
+                log_info("node %u: PLC write to 0x%04X:%u", node, index, sub);
+            status_.client_write(node, index, sub, !ec, abort, code);
+        }
+        FinishPlc(token, ec, {});
+    };
+    client_busy_ = true;
+    std::error_code ec;
+    try
+    {
+        std::vector<uint8_t> bytes(job.data, job.data + job.length);
+        SubmitWrite(exec_, job.node, index, sub, std::move(bytes), con, timeout, ec);
+    }
+    catch (const std::exception &e)
+    {
+        log_debug("node %u: PLC write failed: %s", node, e.what());
+        ec = std::make_error_code(std::errc::io_error);
+    }
+    if (ec)
+        con(0, 0, 0, ec);
+}
+
+void Network::PlcNmt(const PlcJob &job)
+{
+    NmtRequest cmd;
+    if (!plc_nmt_request(job.command, cmd))
+    {
+        plc_->finish(job.token, CANOPEN_PLC_WRONG_PARAMETER, CANOPEN_PLC_REASON_COMMAND, 0, nullptr,
+                     0);
+        return;
+    }
+    RunNmt(job.node, cmd);
+    if (PlcLogDue(job.node, 0xFF000000u | job.command))
+    {
+        log_info("%s: NMT %s to %s from the PLC program", cfg_.label().c_str(),
+                 nmt_request_name(cmd),
+                 job.node ? ("node " + std::to_string(job.node)).c_str() : "every node");
+        status_.nmt_command(job.node, cmd);
+    }
+    plc_->finish(job.token, CANOPEN_PLC_NO_ERROR, CANOPEN_PLC_REASON_NONE, 0, nullptr, 0);
 }
 
 } // namespace canopen_plugin

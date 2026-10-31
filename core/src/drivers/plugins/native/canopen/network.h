@@ -51,6 +51,7 @@
 #include "config.h"
 #include "link_stall.h"
 #include "master_dcf.h"
+#include "plc_port.h"
 #include "process_image.h"
 #include "status.h"
 
@@ -67,7 +68,8 @@ class Network : public lely::canopen::BasicMaster
     Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &timer,
             lely::io::TimerBase &tick, lely::io::CanChannelBase &chan, const std::string &dcf_path,
             const NetworkConfig &cfg, const MasterLayout &layout, ProcessImage &image,
-            NetworkStatus &status, ClientQueue *client = nullptr, bool service = false);
+            NetworkStatus &status, ClientQueue *client = nullptr, bool service = false,
+            PlcPort *plc = nullptr);
     ~Network() override;
 
     // Resets the master, which boots every node, and starts the periodic work. In service mode it
@@ -177,11 +179,21 @@ class Network : public lely::canopen::BasicMaster
     void WriteObject(uint16_t index, CoType type, uint64_t value);
     void SendSync();
     void ServeClient();
+    // Takes and starts the next request of the PLC's blocks; false when none waits.
+    bool ServePlc();
+    void PlcRead(const PlcJob &job);
+    void PlcWrite(const PlcJob &job);
+    void PlcNmt(const PlcJob &job);
+    void FinishPlc(uint32_t token, std::error_code ec, const std::vector<uint8_t> &data);
+    // A write or NMT command of the blocks is logged at most once a second per node and object.
+    bool PlcLogDue(unsigned node, uint32_t what);
     void ClientRead(const ClientJob &job);
     void ClientWrite(ClientJob &job);
     void ClientNmt(const ClientJob &job);
     void ManualNmt(uint8_t id, NmtRequest cmd);
     void SendNmt(NmtRequest cmd, uint8_t id);
+    // NMT from a client or the PLC: one node, or with 0 every node of the network.
+    void RunNmt(unsigned node, NmtRequest cmd);
     void FinishSdo(uint64_t job, std::error_code ec, std::vector<uint8_t> data);
     lely::canopen::Sdo &ServiceSdo(uint8_t id);
 
@@ -214,7 +226,10 @@ class Network : public lely::canopen::BasicMaster
     bool running_ = false;
     ClientQueue *client_;
     bool service_;
-    bool client_busy_ = false; // a client SDO is running
+    bool client_busy_ = false; // a client or PLC SDO is running
+    PlcPort *plc_;
+    bool plc_first_ = true; // the PLC's queue is looked at first on the next free turn
+    std::map<uint64_t, clock::time_point> plc_logged_;
     std::map<uint8_t, std::unique_ptr<lely::canopen::Sdo>> service_sdos_;
     clock::time_point started_{};
     clock::time_point next_time_{};

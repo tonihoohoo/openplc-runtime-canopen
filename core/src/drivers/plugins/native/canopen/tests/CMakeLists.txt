@@ -4,7 +4,8 @@ add_library(canopen_sim STATIC ${CMAKE_CURRENT_SOURCE_DIR}/../tools/sim_slave.cp
 target_include_directories(canopen_sim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../tools)
 target_link_libraries(canopen_sim PUBLIC canopen_core)
 
-foreach(name test_bus_off_recovery test_can_link test_config test_link_stall test_master_dcf test_network test_status)
+foreach(name test_bus_off_recovery test_can_link test_config test_link_stall test_master_dcf test_network test_plc_port
+             test_status)
     add_executable(${name} ${CMAKE_CURRENT_SOURCE_DIR}/${name}.cpp)
     target_compile_options(${name} PRIVATE -Wall -Wextra -Wno-unused-parameter)
     target_link_libraries(${name} PRIVATE canopen_core canopen_sim)
@@ -21,3 +22,15 @@ set_tests_properties(test_entry_points PROPERTIES TIMEOUT 300)
 
 add_executable(canopen_sim_slave ${CMAKE_CURRENT_SOURCE_DIR}/../tools/sim_slave_main.cpp)
 target_link_libraries(canopen_sim_slave PRIVATE canopen_sim)
+
+# The built plugin loaded as the runtime loads it, and looked up as the blocks do.
+add_executable(test_plc_api ${CMAKE_CURRENT_SOURCE_DIR}/test_plc_api.cpp)
+target_compile_options(test_plc_api PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_include_directories(test_plc_api PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..
+                                                ${OPENPLC_ROOT}/core/src/drivers
+                                                ${OPENPLC_ROOT}/core/src/lib)
+target_compile_definitions(test_plc_api PRIVATE
+    CANOPEN_PLUGIN_PATH="$<TARGET_FILE:canopen_plugin>")
+target_link_libraries(test_plc_api PRIVATE dl)
+add_dependencies(test_plc_api canopen_plugin)
+add_test(NAME test_plc_api COMMAND test_plc_api)
