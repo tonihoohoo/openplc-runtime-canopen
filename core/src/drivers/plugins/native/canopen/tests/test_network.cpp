@@ -773,6 +773,106 @@ void check_link_fault_reset(std::shared_ptr<lely::io::VirtualCanController> vbus
         });
 }
 
+// Joins a master's virtual bus to a node's; while `cut` is set, the master's frames are lost on the
+// way to the node (a transmitter that stops sending), the node's still reach the master.
+class Bridge
+{
+  public:
+    Bridge(std::shared_ptr<lely::io::VirtualCanController> master,
+           std::shared_ptr<lely::io::VirtualCanController> node)
+        : master_(master), node_(node)
+    {
+        worker_ = std::thread([this] { run(); });
+    }
+    ~Bridge()
+    {
+        stop_ = true;
+        worker_.join();
+    }
+    std::atomic<bool> cut{false};
+
+  private:
+    void run()
+    {
+        lely::io::Context ctx;
+        lely::ev::Loop loop;
+        lely::io::VirtualCanChannel m(ctx, loop.get_executor());
+        lely::io::VirtualCanChannel n(ctx, loop.get_executor());
+        m.open(*master_);
+        n.open(*node_);
+        while (!stop_)
+        {
+            can_msg msg = CAN_MSG_INIT;
+            std::error_code ec;
+            if (m.read(&msg, nullptr, nullptr, 1, ec) == 1 && !cut)
+                n.write(msg, 100, ec);
+            if (n.read(&msg, nullptr, nullptr, 1, ec) == 1)
+                m.write(msg, 100, ec);
+        }
+    }
+
+    std::shared_ptr<lely::io::VirtualCanController> master_;
+    std::shared_ptr<lely::io::VirtualCanController> node_;
+    std::atomic<bool> stop_{false};
+    std::thread worker_;
+};
+
+// A node that misses the master's NMT reset of a new session (its frames lost) but keeps sending
+// its heartbeat is booted once the master's frames reach it again.
+void check_boot_after_lost_reset(const std::string &dir, const plugin_runtime_args_t &rt)
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(kWatchConfig, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/lostreset.dcf";
+    {
+        FILE *f       = std::fopen(dcf.c_str(), "w");
+        std::string t = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+    }
+    auto mbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
+    auto nbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
+    Bridge bridge(mbus, nbus);
+    SimSlaveSpec spec;
+    spec.node_id = 2;
+    SimSlave io(spec, dir + "/lostreset_node2.dcf", nbus, "");
+    io.start();
+    {
+        FakeLink link;
+        NetworkStatus status(net);
+        Bus bus(net, layout, image, status, dcf, mbus, &link);
+        bus.start();
+        CHECK(scan_until(image, rt, [] { return g_byte_in[10] == 5; }, std::chrono::seconds(10)));
+        unsigned boots = node_status(status, 2).boots;
+        // A new session whose NMT reset and boot never reach the node.
+        bridge.cut = true;
+        link.set_can_state(canopen_test::kCanBusOff);
+        CHECK(scan_until(
+            image, rt, [&link] { return link.downs() == 1 && link.ups() == 1; },
+            std::chrono::seconds(3)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        CHECK(node_status(status, 2).state != NodeRun::Operational);
+        bridge.cut = false;
+        CHECK(scan_until(
+            image, rt,
+            [&status, boots]
+            {
+                return node_status(status, 2).state == NodeRun::Operational &&
+                       node_status(status, 2).boots > boots;
+            },
+            std::chrono::seconds(15)));
+        bus.stop();
+    }
+    io.stop();
+}
+
 } // namespace
 
 // Service mode: the master sends nothing of its own, neither resets nor starts the node, and
@@ -1292,6 +1392,7 @@ int main()
     {
         check_bus_off_reset(vbus, dir, rt);
         check_link_fault_reset(vbus, dir, rt);
+        check_boot_after_lost_reset(dir, rt);
     }
     check_node_options(vbus, wire, dir, rt);
     check_service_mode(vbus, wire, dir, rt);
