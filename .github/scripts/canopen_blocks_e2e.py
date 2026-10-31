@@ -110,13 +110,19 @@ def main() -> None:
             return False
         return any(n["node_id"] == 2 and n["state"] == "operational" for n in nets[0]["nodes"])
 
+    def plc_status() -> str:
+        return str(call("/status", token).get("status", ""))
+
     def restart(why: str) -> None:
         call("/stop-plc", token)
+        # A start sent while the PLC is still stopping is ignored, so wait for STOPPED.
+        wait_for(f"PLC stopped ({why})", lambda: "STOPPED" in plc_status())
         wait_for(
             f"CANopen stopped ({why})",
             lambda: call("/canopen/status", token).get("active") is False,
         )
         call("/start-plc", token)
+        wait_for(f"PLC running ({why})", lambda: "RUNNING" in plc_status())
         wait_for(f"node 2 operational after the PLC start ({why})", node2_operational)
 
     sim = Sim(
