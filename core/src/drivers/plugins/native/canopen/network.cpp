@@ -320,6 +320,7 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
         // The boot ended so that the node can reset with its defaults; it boots again after.
         n->restore_pending = false;
         n->heard           = true;
+        n->next_poll       = clock::now() + kPollEvery; // the boot-up of the reset comes first
         return;
     }
     if (!n->heard && (es == 'B' || es == 'K'))
@@ -834,7 +835,9 @@ void Network::OnTick()
             continue;
         if (!n.retry_pending)
         {
-            if (!n.heard && !n.polling && now >= n.next_poll)
+            // Also a node heard only by its heartbeat: it missed the NMT reset (frames lost) and
+            // sends no boot-up, so nothing else boots it.
+            if (!n.polling && now >= n.next_poll)
                 Poll(n, static_cast<uint8_t>(it.first));
             continue;
         }
@@ -860,8 +863,9 @@ void Network::OnTick()
     Exchange();
 }
 
-// Looks for a node that has not answered: a boot-up message missed while the master started (the
-// node was already running, or connected later) leaves Lely waiting for nothing. Once asked, Lely
+// Looks for a node that is not up and not being booted: a boot-up message missed while the master
+// started (the node was already running, connected later, or the master's NMT reset was lost)
+// leaves Lely waiting for nothing. Once asked, Lely
 // keeps trying to boot an optional node about every second without reporting each attempt. A node
 // that Lely starts without checking it (not initialized, no heartbeat to wait for) is first asked
 // for 0x1000, so that an absent node is not taken as up.
