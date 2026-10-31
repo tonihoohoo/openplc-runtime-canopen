@@ -294,6 +294,12 @@ void Network::OnEmcy(uint8_t id, uint16_t eec, uint8_t er, uint8_t msef[5]) noex
     Defer([this, id, eec, er, m] { HandleEmcy(id, eec, er, m); });
 }
 
+void Network::on_write_error(std::error_code ec, std::size_t errcnt) noexcept
+{
+    write_failures_.result(!ec, clock::now());
+    BasicMaster::on_write_error(ec, errcnt);
+}
+
 void Network::OnRpdoError(int num, uint16_t eec, uint8_t er) noexcept
 {
     (void)er;

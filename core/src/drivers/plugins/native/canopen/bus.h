@@ -3,11 +3,12 @@
 // bus.h - the bus thread of one network: prepares the CAN link (bit rate, up), opens the SocketCAN
 // interface, runs the network's master on a Lely event loop, and keeps retrying while the
 // interface is missing, down or cannot be configured. A link that is bus-off and not restarted by
-// the kernel, at another bit rate than configured, or stalled, is reset (taken down and up) with a
-// back-off, ending the session. A session runs at the network's
-// SCHED_FIFO priority with 1 ns timer slack; preparing the link and waiting to retry run at
-// SCHED_OTHER. With a virtual controller (tests) the master runs on Lely's in-process bus instead;
-// `links` then stands in for the CAN interface's state, or none is read.
+// the kernel, at another bit rate than configured, or stalled (nothing sent while frames are
+// dropped or the master's writes fail), is reset (taken down and up) with a back-off, ending the
+// session. A session runs at the network's SCHED_FIFO priority with 1 ns timer slack; preparing the
+// link and waiting to retry run at SCHED_OTHER. With a virtual controller (tests) the master runs
+// on Lely's in-process bus instead; `links` then stands in for the CAN interface's state, or none
+// is read.
 //
 // Derived in design from canworks ec7fd59d, plugin/src/canopen/bus.h.
 
@@ -42,6 +43,8 @@ class VirtualCanController;
 
 namespace canopen_plugin
 {
+
+class Network;
 
 // The signal Lely's poll uses to wake a bus thread. Not SIGUSR1, which the runtime uses for its
 // own tasks: each poll replaces the signal's handler while it lives and puts the old one back.
@@ -110,9 +113,10 @@ class Bus
     LinkSetup setup_;
     BusOffRecovery recovery_;
     LinkStall stall_;
-    unsigned session_rate_ = 0;     // the link's bit rate first read in this session
-    bool resetting_        = false; // the session ends for a link reset
-    bool reset_forbidden_  = false; // not permitted to reset; said once
+    const Network *session_net_ = nullptr; // the running session's master, read for write failures
+    unsigned session_rate_      = 0;       // the link's bit rate first read in this session
+    bool resetting_             = false;   // the session ends for a link reset
+    bool reset_forbidden_       = false;   // not permitted to reset; said once
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> realtime_{false};
