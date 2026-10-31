@@ -30,7 +30,8 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
   master only starts it with NMT and supervises it. It must already use the PDO layout and timings
   of the configuration.
 - **Missing nodes.** A node that has not booted is looked for again about every second, which also
-  finds a node that was connected later or whose boot-up message the master missed. A node not
+  finds a node that was connected later or whose boot-up message the master missed, and a node
+  that kept running while the master's reset never reached it (only its heartbeat arrives). A node not
   booted `boot_timeout_ms` after the start is reported once: as not answering (a warning) when it is
   mandatory, as absent (information) when it is `optional`. Mandatory and optional differ only in
   that report: no node, mandatory or not, holds back the others.
@@ -389,7 +390,7 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 | `test_entry_points` | The plugin's C entry points with an allocation failure injected at each point of `start_loop`: no exception leaves them and a failed start leaves nothing running. |
 | `test_link_stall` | When a link counts as stalled: no frame sent for 3 s with drops or failing writes, never while quiet, error-passive or bus-off. |
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
-| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, emergencies, late PDOs, the status and its socket, the online tools (SDO reads and writes, a refused write,
+| `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, a running node that missed the master's reset, emergencies, late PDOs, the status and its socket, the online tools (SDO reads and writes, a refused write,
 pre-operational, save, start and reset of a node), service mode, the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
