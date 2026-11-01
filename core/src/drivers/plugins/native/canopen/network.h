@@ -102,6 +102,8 @@ class Network : public lely::canopen::BasicMaster
     static constexpr std::chrono::milliseconds kRetryMax{16000};
     // How often a node that has not answered is looked for.
     static constexpr std::chrono::milliseconds kPollEvery{1000};
+    // A pre-operational report this soon after the node came up is taken as a late heartbeat.
+    static constexpr std::chrono::milliseconds kStartGrace{200};
     // Written to 0x1011 to restore defaults (CiA 301): ASCII "load", little-endian.
     static constexpr uint32_t kRestoreSignature = 0x64616F6C;
 
@@ -138,6 +140,7 @@ class Network : public lely::canopen::BasicMaster
         bool held            = false; // lost and stopped until the next PLC start
         bool has_abort       = false; // a configuration SDO was refused in this boot
         bool manual          = false; // stopped or pre-operational by a client
+        clock::time_point up_since{}; // when the node last came up
         Problem abort;
         uint8_t state      = 0;
         bool retry_pending = false;
