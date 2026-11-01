@@ -20,7 +20,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 3,
+  "version": 4,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 250000, "master_node_id": 1,
     "heartbeat_producer_ms": 200,
@@ -116,6 +116,40 @@ void test_concise_dcf()
     CHECK((concise_dcf({}) == std::vector<uint8_t>{0, 0, 0, 0}));
 }
 
+void test_config_runs()
+{
+    std::vector<SdoWrite> sdo(6);
+    for (size_t k = 0; k < sdo.size(); ++k)
+    {
+        sdo[k].index = static_cast<uint16_t>(0x2100 + k);
+        sdo[k].data  = {static_cast<uint8_t>(k)};
+    }
+    // No policy: one run, the same bytes as the whole list.
+    std::vector<ConfigRun> runs = config_runs(sdo);
+    CHECK(runs.size() == 1 && runs[0].first == 0 && runs[0].last == 5);
+    CHECK(runs[0].concise == concise_dcf(sdo));
+    CHECK(config_runs({}).empty());
+
+    // Item 1 continues, item 2 jumps to item 4.
+    sdo[1].on_abort = OnAbort::Continue;
+    sdo[2].on_abort = OnAbort::Jump;
+    sdo[2].jump_to  = 4;
+    runs            = config_runs(sdo);
+    CHECK(runs.size() == 4);
+    CHECK(runs[0].first == 0 && runs[0].last == 1 && runs[0].policy == OnAbort::Continue);
+    CHECK(runs[0].resume_at == 2);
+    CHECK(runs[1].first == 2 && runs[1].last == 2 && runs[1].resume_at == 4);
+    CHECK(runs[2].first == 3 && runs[2].last == 3 && runs[2].policy == OnAbort::Stop);
+    CHECK(runs[3].first == 4 && runs[3].last == 5);
+    CHECK(run_starting_at(runs, 4) == 3 && run_starting_at(runs, 6) == 4);
+    CHECK(runs[1].concise == concise_dcf({sdo[2]}));
+
+    // A refused last item goes on past the end: no run left.
+    sdo[5].on_abort = OnAbort::Continue;
+    runs            = config_runs(sdo);
+    CHECK(run_starting_at(runs, runs.back().resume_at) == runs.size());
+}
+
 void test_bits()
 {
     uint8_t data[8] = {};
@@ -143,6 +177,7 @@ int main()
 {
     test_layout_and_dcf();
     test_concise_dcf();
+    test_config_runs();
     test_bits();
     return TEST_RESULT();
 }

@@ -85,7 +85,7 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
         NodeState &s        = nodes_[n.node_id];
         s.cfg               = &n;
         s.slot              = slot;
-        s.concise           = concise_dcf(n.sdo);
+        s.runs              = config_runs(n.sdo);
     }
     for (const MasterPdo &m : layout_.rpdos)
         nodes_[m.node_id].in_pdos.push_back(&m);
@@ -94,6 +94,9 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
     last_out_.assign(layout_.output_entries, 0);
     out_valid_.assign(layout_.output_entries, false);
     resend_.assign(layout_.tpdos.size(), false);
+    last_sent_.assign(layout_.tpdos.size(), clock::time_point{});
+    for (const MasterPdo &m : layout_.tpdos)
+        periodic_ = periodic_ || m.pdo->send_period_ms > 0;
     rpdo_error_.assign(layout_.rpdos.size(), 0);
     scan_.watch   = IO_POLL_WATCH_INIT(&Network::OnScanEvent);
     scan_.task    = EV_TASK_INIT(exec, &Network::OnScanTask);
@@ -269,11 +272,12 @@ void Network::OnConfig(uint8_t id) noexcept
         Defer([this, id] { HandleRestore(id); });
         return;
     }
-    if (!n || n->concise.size() <= 4)
+    if (!n || n->runs.empty())
     {
         ConfigResult(id, {});
         return;
     }
+    n->run = 0;
     Defer([this, id] { HandleConfig(id); });
 }
 
@@ -410,34 +414,62 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
 void Network::HandleConfig(uint8_t id)
 {
     NodeState *n = Find(id);
-    if (!n)
+    if (!n || n->run >= n->runs.size())
         return;
-    const uint8_t *begin = n->concise.data();
-    const uint8_t *end   = begin + n->concise.size();
+    if (n->run == 0)
+        status_.clear_skipped(id);
+    const ConfigRun &run = n->runs[n->run];
+    const uint8_t *begin = run.concise.data();
+    const uint8_t *end   = begin + run.concise.size();
     auto con             = [this](uint8_t id, uint16_t idx, uint8_t subidx, std::error_code ec)
     {
+        NodeState *n = Find(id);
+        if (!n || n->run >= n->runs.size())
+            return;
+        const ConfigRun &run = n->runs[n->run];
         if (ec)
         {
-            NodeState *n = Find(id);
-            log_error("%s: configuration SDO to 0x%04X:%u failed: %s",
-                      n ? n->cfg->label().c_str() : "node", idx, subidx, ec.message().c_str());
             // Not an abort from the node (a local error): CiA 301 "general error".
-            uint32_t code = ec.category() == lely::canopen::SdoCategory()
-                                ? static_cast<uint32_t>(ec.value())
-                                : 0x08000000u;
-            if (n)
+            const bool from_node = ec.category() == lely::canopen::SdoCategory();
+            uint32_t code        = from_node ? static_cast<uint32_t>(ec.value()) : 0x08000000u;
+            const SdoWrite &last = n->cfg->sdo[run.last];
+            if (from_node && run.policy != OnAbort::Stop && idx == last.index &&
+                subidx == last.subindex)
             {
+                log_warn("%s: configuration SDO to 0x%04X:%u refused (abort 0x%08X); %s",
+                         n->cfg->label().c_str(), idx, subidx, code,
+                         run.policy == OnAbort::Continue ? "continuing with the next write"
+                                                         : "jumping to a later write");
+                status_.sdo_abort(id, idx, subidx, code, run.policy);
+                n->run = run_starting_at(n->runs, run.resume_at);
+            }
+            else
+            {
+                log_error("%s: configuration SDO to 0x%04X:%u failed: %s",
+                          n->cfg->label().c_str(), idx, subidx, ec.message().c_str());
                 n->has_abort        = true;
                 n->abort            = Problem();
                 n->abort.kind       = ProblemKind::SdoAbort;
                 n->abort.index      = idx;
                 n->abort.subindex   = subidx;
                 n->abort.abort_code = code;
+                status_.sdo_abort(id, idx, subidx, code);
+                std::lock_guard<lely::util::BasicLockable> lock(*this);
+                ConfigResult(id, ec);
+                return;
             }
-            status_.sdo_abort(id, idx, subidx, code);
+        }
+        else
+        {
+            ++n->run;
+        }
+        if (n->run < n->runs.size())
+        {
+            Defer([this, id] { HandleConfig(id); });
+            return;
         }
         std::lock_guard<lely::util::BasicLockable> lock(*this);
-        ConfigResult(id, ec);
+        ConfigResult(id, {});
     };
     std::error_code ec;
     try
@@ -966,6 +998,18 @@ void Network::WriteOutputs(bool all)
 {
     bool fresh          = false;
     const uint64_t *out = image_.latest_outputs(&fresh);
+    const auto now      = clock::now();
+    if (periodic_)
+    {
+        // An RPDO with a send period goes out again when it has not been sent for that long.
+        for (const MasterPdo &m : layout_.tpdos)
+        {
+            size_t num = m.master_number - 1;
+            if (m.pdo->send_period_ms &&
+                now - last_sent_[num] >= std::chrono::milliseconds(m.pdo->send_period_ms))
+                resend_[num] = true;
+        }
+    }
     if (!all && !fresh && std::find(resend_.begin(), resend_.end(), true) == resend_.end())
         return;
     for (const MasterPdo &m : layout_.tpdos)
@@ -988,7 +1032,10 @@ void Network::WriteOutputs(bool all)
         }
         resend_[num] = false;
         if (send)
+        {
             TpdoEvent(static_cast<int>(m.master_number));
+            last_sent_[num] = now;
+        }
     }
 }
 

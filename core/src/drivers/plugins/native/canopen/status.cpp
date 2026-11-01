@@ -221,10 +221,23 @@ void NetworkStatus::lost(unsigned node, const Problem &p)
     push(e);
 }
 
-void NetworkStatus::sdo_abort(unsigned node, uint16_t index, uint8_t subindex, uint32_t code)
+void NetworkStatus::sdo_abort(unsigned node, uint16_t index, uint8_t subindex, uint32_t code,
+                              OnAbort policy)
 {
     std::lock_guard<PiMutex> lock(mutex_);
+    if (policy != OnAbort::Stop)
+    {
+        if (NodeStatus *n = find(node))
+        {
+            SkippedSdo s;
+            s.index      = index;
+            s.subindex   = subindex;
+            s.abort_code = code;
+            n->skipped.push_back(s);
+        }
+    }
     Event e;
+    e.policy             = policy;
     e.node               = node;
     e.kind               = EventKind::SdoAbort;
     e.problem.kind       = ProblemKind::SdoAbort;
@@ -232,6 +245,13 @@ void NetworkStatus::sdo_abort(unsigned node, uint16_t index, uint8_t subindex, u
     e.problem.subindex   = subindex;
     e.problem.abort_code = code;
     push(e);
+}
+
+void NetworkStatus::clear_skipped(unsigned node)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    if (NodeStatus *n = find(node))
+        n->skipped.clear();
 }
 
 void NetworkStatus::emcy(unsigned node, uint16_t code, uint8_t reg, const uint8_t data[5])
@@ -711,6 +731,15 @@ cJSON *node_json(const NodeStatus &n)
         cJSON_AddNumberToObject(e, "since", static_cast<double>(l.since));
         cJSON_AddItemToArray(late, e);
     }
+    cJSON *skipped = cJSON_AddArrayToObject(o, "sdo_skipped");
+    for (const SkippedSdo &k : n.skipped)
+    {
+        cJSON *e = cJSON_CreateObject();
+        add_uint(e, "index", k.index);
+        add_uint(e, "subindex", k.subindex);
+        add_uint(e, "abort_code", k.abort_code);
+        cJSON_AddItemToArray(skipped, e);
+    }
     return o;
 }
 
@@ -725,8 +754,13 @@ cJSON *event_json(const Event &ev)
     {
     case EventKind::BootFailed:
     case EventKind::Lost:
+        cJSON_AddItemToObject(o, "problem", problem_json(ev.problem));
+        break;
     case EventKind::SdoAbort:
         cJSON_AddItemToObject(o, "problem", problem_json(ev.problem));
+        cJSON_AddStringToObject(o, "policy", ev.policy == OnAbort::Continue ? "continue"
+                                             : ev.policy == OnAbort::Jump   ? "jump"
+                                                                            : "stop");
         break;
     case EventKind::Emcy:
         add_uint(o, "code", ev.code);

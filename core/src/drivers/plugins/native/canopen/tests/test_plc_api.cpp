@@ -23,7 +23,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 3,
+  "version": 4,
   "networks": [
     {"name": "a", "interface": "cotest-none0", "bitrate": 0, "master_node_id": 100,
      "nodes": [{"node_id": 2, "name": "io2", "state_location": "%IB0"}]}

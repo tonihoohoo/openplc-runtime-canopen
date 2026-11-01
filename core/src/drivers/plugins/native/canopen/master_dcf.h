@@ -8,6 +8,7 @@
 #ifndef CANOPEN_MASTER_DCF_H
 #define CANOPEN_MASTER_DCF_H
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -48,6 +49,23 @@ uint32_t slave_assignment(const NodeConfig &node);
 // The node's configuration SDOs as a concise DCF (CiA 302-3: count, then index, sub-index, size
 // and data of each entry, all little-endian).
 std::vector<uint8_t> concise_dcf(const std::vector<SdoWrite> &sdo);
+
+// A stretch of a node's configuration SDOs written as one concise DCF. It ends at an item whose
+// refusal policy is not stop, or before an item a jump goes to.
+struct ConfigRun
+{
+    std::vector<uint8_t> concise;
+    size_t first     = 0; // index of its first and last item in the node's list
+    size_t last      = 0;
+    OnAbort policy   = OnAbort::Stop; // of the last item
+    size_t resume_at = 0;             // item to go on with when the last item is refused
+};
+
+// The node's list cut into runs; empty for an empty list. A list without policies is one run.
+std::vector<ConfigRun> config_runs(const std::vector<SdoWrite> &sdo);
+
+// The run that starts at `item`, or runs.size() when none does (past the end).
+size_t run_starting_at(const std::vector<ConfigRun> &runs, size_t item);
 
 } // namespace canopen_plugin
 

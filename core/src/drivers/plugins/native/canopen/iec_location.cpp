@@ -176,6 +176,14 @@ const char *co_type_name(CoType type)
     return t ? t->name : "UNKNOWN";
 }
 
+bool dummy_object_type(uint16_t index, uint8_t subindex, CoType &out)
+{
+    if (subindex != 0 || index < 0x0001 || index > 0x0007)
+        return false;
+    out = static_cast<CoType>(index);
+    return true;
+}
+
 unsigned co_type_bits(CoType type)
 {
     const TypeInfo *t = find_type(type);

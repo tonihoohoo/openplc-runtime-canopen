@@ -70,6 +70,8 @@ bool parse_co_type(const std::string &name, CoType &out);
 const char *co_type_name(CoType type);
 // Bits the type occupies in a PDO (BOOLEAN = 1).
 unsigned co_type_bits(CoType type);
+// Whether index:sub is a CiA 301 dummy object (0x0001-0x0007, sub-index 0), and its type.
+bool dummy_object_type(uint16_t index, uint8_t subindex, CoType &out);
 // Whether an object of this type fits a location of this size.
 bool co_type_fits(CoType type, IecSize size);
 

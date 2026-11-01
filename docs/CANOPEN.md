@@ -71,7 +71,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "networks": [
     {
       "name": "CANopen 1",
@@ -128,7 +128,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 3. Older files are refused; build the project again with a matching editor. |
+| `version` | Format version, 4. Older files are refused; build the project again with a matching editor. |
 | `interface` | SocketCAN interface, unique per network. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
 | `master_node_id` | 1-127, default 127. |
@@ -146,8 +146,10 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 | `emcy` | `enabled` (default `true`) and `cob_id` (11-bit, default 0x80 + node ID) of the node's emergency messages. |
 | `identity` | Expected 0x1000 and 0x1018 sub 1-3 values; a missing or 0 value is not checked. |
 | `supervision` | `{"type": "none"}`, `{"type": "heartbeat", "consumer_ms": n}` or `{"type": "guarding", "guard_time_ms": n, "life_time_factor": n}` (1-65535 and 1-255). The node's own heartbeat producer (0x1017) or guard time and life time factor (0x100C, 0x100D) are set by SDOs in `sdo`. |
-| `sdo` | Configuration SDO downloads, in order: `data` is the value's bytes in hexadecimal, least significant byte first, 1 to 1024 bytes. Typically the node's PDO communication and mapping parameters and its heartbeat producer time. |
+| `sdo` | Configuration SDO downloads, in order: `data` is the value's bytes in hexadecimal, least significant byte first, 1 to 1024 bytes. Typically the node's PDO communication and mapping parameters and its heartbeat producer time. An item may give `on_abort`: `stop` (default: a refusal fails the node's boot), `continue` (go on with the next item) or `jump` with `jump_to`, the 0-based index of a later item of the same list. A refusal with `continue` or `jump` is logged, recorded as an `sdo_abort` event with its `policy`, and listed under the node's `sdo_skipped`. |
 | `tpdos` / `rpdos` | The node's TPDOs (received by the master, `%I` locations) and RPDOs (sent by the master, `%Q` locations): PDO number on the node, its 11-bit COB-ID, and the mapped entries in mapping order. |
+| `send_period_ms` | RPDOs only: send the PDO again when it has not been sent for this many milliseconds, 1-65535, also when no output changed; absent for none. |
+| `location` | The entry's IEC location. Only a dummy entry (index 0x0001-0x0007, sub-index 0, of the dummy's type) leaves it out: its bits are skipped in a received PDO and sent as zeros. |
 | `receive_timeout_ms` | TPDOs only: report the PDO late after this many milliseconds without a frame, 1-65535; absent or 0 for no timeout. It is the master RPDO's event timer (0x1400 + n sub 5). |
 | `type` | `BOOLEAN`, `INTEGER8/16/32/64`, `UNSIGNED8/16/32/64`, `REAL32`, `REAL64`. Its size must equal the location's (`BOOLEAN` `%IX/%QX`, 8 bits `B`, 16 `W`, 32 `D`, 64 `L`). |
 
@@ -157,7 +159,8 @@ bit rate, a reserved or duplicate COB-ID (PDOs, emergencies and TIME), a configu
 0x1010 or 0x1011, restore defaults or configuration SDOs on a node with `configure: false`, a PDO
 over 64 bits, a type that does not fit its
 location, a `%Q` location in a TPDO or a `%I` location in an RPDO, two entries on the same `%I`
-location, or a location outside the runtime's I/O image. Two entries on the same `%Q` location are
+location, or a location outside the runtime's I/O image, an entry without a location that is not a
+dummy, an unknown `on_abort`, or a `jump_to` that is missing or not a later item. Two entries on the same `%Q` location are
 a warning.
 
 ## Status
@@ -192,7 +195,8 @@ the CANopen device only when `status` is listed, and its online tools only when 
                   "boot_status": "M"},
       "emcy": [{"time": 1793299995000, "code": 8960, "register": 3, "data": "0000000000",
                 "active": true}],
-      "late_pdos": []
+      "late_pdos": [],
+      "sdo_skipped": []
     }],
     "events": [{"time": 1793299990000, "node": 3, "kind": "boot_failed", "problem": {"kind": "identity"}}]
   }]
@@ -213,7 +217,8 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `nodes[].warning` | An operational node with an active emergency or a late PDO. |
 | `nodes[].emcy` | The last 8 emergencies, newest first; an emergency with code 0 (error reset) marks them inactive. |
 | `nodes[].late_pdos` | TPDOs with a receive timeout whose frames are late. |
-| `events` | The last 64 events of the network, newest first: `boot_ok`, `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort`, `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link, with `outcome` `done`, `not_permitted` or `failed`, and `cause` `bus_off`, `bit_rate` or `tx_stalled`), `sdo_write` (a client's SDO write, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `nmt_command` (a client's NMT command, with `command`), `service` (service mode opened or closed, with `open`). |
+| `nodes[].sdo_skipped` | Configuration SDOs the node refused in its current boot that had `on_abort` `continue` or `jump`, with `index`, `subindex` and `abort_code`. |
+| `events` | The last 64 events of the network, newest first: `boot_ok`, `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort` (with `policy` `stop`, `continue` or `jump`), `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link, with `outcome` `done`, `not_permitted` or `failed`, and `cause` `bus_off`, `bit_rate` or `tx_stalled`), `sdo_write` (a client's SDO write, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `nmt_command` (a client's NMT command, with `command`), `service` (service mode opened or closed, with `open`). |
 
 Counters and lists start again when the PLC starts. The status thread never blocks the PLC scan
 or the bus: each answer is built from a copy taken under a short lock.

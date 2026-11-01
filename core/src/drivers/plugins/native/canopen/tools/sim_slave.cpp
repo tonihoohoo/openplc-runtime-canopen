@@ -86,7 +86,11 @@ class Dcf
         out << "[MandatoryObjects]\nSupportedObjects=" << nm << "\n" << mand.str() << "\n";
         out << "[OptionalObjects]\nSupportedObjects=" << no << "\n" << opt.str() << "\n";
         out << "[ManufacturerObjects]\nSupportedObjects=" << nf << "\n" << man.str() << "\n";
-        out << body_.str();
+        // Every dummy object may be mapped (CiA 306).
+        out << "[DummyUsage]\n";
+        for (int i = 1; i <= 7; ++i)
+            out << "Dummy000" << i << "=1\n";
+        out << "\n" << body_.str();
         return out.str();
     }
 
@@ -127,8 +131,9 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     d.rec("1400", "RPDO communication parameter", 3, 2);
     d.sub("1400", 1, "COB-ID", 0x7, "rw", 0x200 + s.node_id);
     d.sub("1400", 2, "Transmission type", 0x5, "rw", 0xFF);
-    d.rec("1600", "RPDO mapping parameter", 2, 1, "rw");
+    d.rec("1600", "RPDO mapping parameter", 3, 1, "rw");
     d.sub("1600", 1, "Mapped object", 0x7, "rw", 0x62000108);
+    d.sub("1600", 2, "Mapped object", 0x7, "rw", 0);
     d.rec("1800", "TPDO communication parameter", 5, 5);
     d.sub("1800", 1, "COB-ID", 0x7, "rw", 0x180 + s.node_id);
     d.sub("1800", 2, "Transmission type", 0x5, "rw", 0xFF);
@@ -158,9 +163,16 @@ class Slave : public lely::canopen::BasicSlave
   public:
     Slave(ev_exec_t *exec, lely::io::TimerBase &timer, lely::io::CanChannelBase &chan,
           const std::string &dcf, std::atomic<uint8_t> &nmt, std::atomic<unsigned> &restores,
-          std::atomic<unsigned> &saves, bool refuse)
+          std::atomic<unsigned> &saves, std::atomic<unsigned> &output_writes, bool refuse)
         : BasicSlave(exec, timer, chan, dcf, ""), nmt_(nmt)
     {
+        // Also called for each RPDO that maps the outputs.
+        OnWrite<uint8_t>(0x6200, 1,
+                         [&output_writes](uint16_t, uint8_t, uint8_t &, uint8_t) -> std::error_code
+                         {
+                             ++output_writes;
+                             return {};
+                         });
         for (uint8_t sub = 1; sub <= 3; ++sub)
             OnWrite<uint32_t>(
                 0x1010, sub,
@@ -303,7 +315,7 @@ void SimSlave::thread_main()
             chan->open(*ctrl);
             base = chan.get();
         }
-        Slave slave(exec, timer, *base, dcf_path_, nmt_state_, restores_, saves_,
+        Slave slave(exec, timer, *base, dcf_path_, nmt_state_, restores_, saves_, output_writes_,
                     spec_.restore_refused);
         slave.Reset();
         ready_ = true;
