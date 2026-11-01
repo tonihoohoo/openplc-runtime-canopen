@@ -1069,6 +1069,174 @@ std::string nmt_request(unsigned node, const char *command)
            command + "\"}";
 }
 
+const char *kPlcConfig = R"({
+  "version": 3,
+  "networks": [{
+    "name": "plc", "interface": "vcan-test", "bitrate": 0,
+    "sdo_timeout_ms": 300,
+    "nodes": [
+      {"node_id": 2, "name": "io1",
+       "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
+       "supervision": {"type": "heartbeat", "consumer_ms": 300},
+       "state_location": "%IB10"},
+      {"node_id": 9, "name": "absent", "optional": true}
+    ]
+  }]
+})";
+
+// The function blocks' requests on a running network, as the PLC scan makes them: reads of every
+// size, a write with read-back, an abort, a timeout, NMT stop and start seen in the node state,
+// emergencies, and the end of a session failing a pending request. No allocation on the scan side.
+void check_plc_blocks(std::shared_ptr<lely::io::VirtualCanController> vbus, const std::string &wire,
+                      const std::string &dir, const plugin_runtime_args_t &rt)
+{
+    std::string text = kPlcConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(text, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/plc.dcf";
+    {
+        FILE *f       = std::fopen(dcf.c_str(), "w");
+        std::string t = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+    }
+    SimSlaveSpec spec;
+    spec.node_id = 2;
+    SimSlave io(spec, dir + "/plc_node2.dcf", vbus, wire);
+    io.start();
+
+    NetworkStatus status(net);
+    Bus bus(net, layout, image, status, dcf, vbus);
+    bus.enable_plc(0);
+    PlcPort *port = bus.plc();
+    CHECK(port != nullptr);
+    if (!port)
+        return;
+    bus.start();
+    CHECK(scan_until(
+        image, rt, [port] { return port->device_state(2) == CANOPEN_PLC_OPERATIONAL; },
+        std::chrono::seconds(10)));
+    CHECK(port->master_node_id() == 127);
+    CHECK(port->device_state(9) == CANOPEN_PLC_NOT_AVAIL);
+
+    long scan_allocs = 0;
+    // Starts a request and scans until it ends; the poll's outcome.
+    auto run =
+        [&](const canopen_plc_request &req, canopen_plc_result &res, uint8_t *data, uint32_t cap)
+    {
+        long before = t_allocs;
+        uint64_t h  = port->start(req, res);
+        scan_allocs += t_allocs - before;
+        if (!h)
+            return 2;
+        int st = 0;
+        scan_until(
+            image, rt,
+            [&]
+            {
+                long b = t_allocs;
+                st     = port->poll(h, res, data, cap);
+                scan_allocs += t_allocs - b;
+                return st != 0;
+            },
+            std::chrono::seconds(5));
+        return st;
+    };
+    auto sdo = [](uint8_t kind, uint8_t node, uint16_t index, uint8_t sub)
+    {
+        canopen_plc_request r{};
+        r.network  = 1;
+        r.kind     = kind;
+        r.node     = node;
+        r.index    = index;
+        r.subindex = sub;
+        return r;
+    };
+
+    canopen_plc_result res{};
+    uint8_t data[CANOPEN_PLC_MAX_DATA] = {};
+    CHECK(run(sdo(CANOPEN_PLC_READ, 2, 0x1018, 1), res, data, 4) == 1);
+    CHECK(res.length == 4 && data[0] == 1 && data[1] == 0);
+    // A string, longer than 4 bytes.
+    CHECK(run(sdo(CANOPEN_PLC_READ, 2, 0x1008, 0), res, data, sizeof data) == 1);
+    CHECK(res.length == 18 && std::memcmp(data, "Generic I/O module", 18) == 0);
+    // A REAL32 object: the bytes of 1.5.
+    CHECK(run(sdo(CANOPEN_PLC_READ, 2, 0x2102, 0), res, data, 4) == 1);
+    float real = 0;
+    std::memcpy(&real, data, 4);
+    CHECK(res.length == 4 && real == 1.5f);
+
+    // Write, then read back.
+    canopen_plc_request w = sdo(CANOPEN_PLC_WRITE, 2, 0x2100, 0);
+    const uint8_t value[] = {0x44, 0x33, 0x22, 0x11};
+    w.data                = value;
+    w.length              = 4;
+    CHECK(run(w, res, nullptr, 0) == 1);
+    CHECK(run(sdo(CANOPEN_PLC_READ, 2, 0x2100, 0), res, data, 4) == 1);
+    CHECK(std::memcmp(data, value, 4) == 0);
+    CHECK(io.parameter() == 0x11223344);
+
+    // An object the node does not have; a node that does not answer.
+    CHECK(run(sdo(CANOPEN_PLC_READ, 2, 0x5FFF, 0), res, data, 4) == 2);
+    CHECK(res.error == CANOPEN_PLC_OTHER_ERROR && res.abort_code == 0x06020000);
+    auto t0               = std::chrono::steady_clock::now();
+    canopen_plc_request t = sdo(CANOPEN_PLC_READ, 9, 0x1000, 0);
+    t.timeout_ms          = 100;
+    CHECK(run(t, res, data, 4) == 2);
+    CHECK(res.error == CANOPEN_PLC_TIMEOUT && res.abort_code == 0x05040000);
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(280));
+
+    // NMT stop and start, seen in the node state; not a loss.
+    canopen_plc_request nmt{};
+    nmt.network = 1;
+    nmt.kind    = CANOPEN_PLC_NMT;
+    nmt.node    = 2;
+    nmt.command = 2;
+    CHECK(run(nmt, res, nullptr, 0) == 1);
+    CHECK(scan_until(
+        image, rt, [port] { return port->device_state(2) == CANOPEN_PLC_STOPPED; },
+        std::chrono::seconds(2)));
+    CHECK(node_status(status, 2).state == NodeRun::Manual);
+    nmt.command = 1;
+    CHECK(run(nmt, res, nullptr, 0) == 1);
+    CHECK(scan_until(
+        image, rt, [port] { return port->device_state(2) == CANOPEN_PLC_OPERATIONAL; },
+        std::chrono::seconds(2)));
+    CHECK(node_status(status, 2).state == NodeRun::Operational);
+
+    // Emergencies after the reader's start only, oldest first.
+    uint64_t cursor = port->emcy_cursor();
+    io.send_emcy(0x8130, 0x11);
+    canopen_plc_emcy e{};
+    CHECK(scan_until(
+        image, rt, [&] { return port->emcy_next(2, cursor, e) == 1; }, std::chrono::seconds(2)));
+    CHECK(e.node == 2 && e.error_code == 0x8130 && e.error_register == 0x11);
+    io.clear_emcy();
+    CHECK(scan_until(
+        image, rt, [&] { return port->emcy_next(0, cursor, e) == 1; }, std::chrono::seconds(2)));
+    CHECK(e.error_code == 0);
+    CHECK(scan_allocs == 0);
+
+    // A request pending when the session ends fails.
+    t.timeout_ms = 2000;
+    uint64_t h   = port->start(t, res);
+    CHECK(h != 0);
+    bus.stop();
+    CHECK(port->poll(h, res, data, 4) == 2 && res.error == CANOPEN_PLC_BUS_OFF);
+    CHECK(port->start(sdo(CANOPEN_PLC_READ, 2, 0x1000, 0), res) == 0);
+    CHECK(port->device_state(2) == CANOPEN_PLC_NOT_AVAIL);
+    io.stop();
+}
+
 int main()
 {
     set_log_sink(quiet_sink);
@@ -1396,6 +1564,7 @@ int main()
     }
     check_node_options(vbus, wire, dir, rt);
     check_service_mode(vbus, wire, dir, rt);
+    check_plc_blocks(vbus, wire, dir, rt);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }

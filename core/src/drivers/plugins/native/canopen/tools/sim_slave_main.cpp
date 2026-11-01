@@ -5,11 +5,19 @@
 //
 //   canopen_sim_slave --interface vcan0 [--node 2] [--steps 5] [--timeout 60]
 //                     [--expect-parameter 0x12345678] [--expect-master-loss 5] [--linger 10]
+//                     [--blocks 1]
 //
 // It sets its digital inputs to 1, 2, ... and waits each time until its outputs follow. With
 // --expect-master-loss it then prints "watching the master" and waits up to that many seconds
 // for its master watch (0x1016) to put it in pre-operational. With --linger it stays on the bus
-// that many seconds more, so its status can be read. Exit status 0 when every step
+// that many seconds more, so its status can be read. With --blocks 1 it then reads commands for
+// the PLC function block test program from stdin, one per line:
+//   run <n>   sets its inputs to 0x40 + n, sends an emergency 0x5000 every 500 ms and waits up to
+//             60 s for the program to write 0xC0DE0000 + n * 0x1000 + 0x1FF to 0x2100; prints
+//             "run <n> started" when the program writes its start mark (0x0BAD0000 + n * 0x1000)
+//             and "run <n> ok" or "run <n> FAIL ..."
+//   quit      ends.
+// Exit status 0 when every step
 // matched (and the parameter was written, and the master loss was seen), 1 otherwise.
 
 #include <chrono>
@@ -25,6 +33,76 @@
 using canopen_sim::SimSlave;
 using canopen_sim::SimSlaveSpec;
 
+namespace
+{
+
+// Runs the commands of the PLC block test (see the header); false on a failed run.
+bool run_blocks(SimSlave &slave)
+{
+    std::printf("blocks: ready\n");
+    std::fflush(stdout);
+    char line[64];
+    bool ok = true;
+    while (std::fgets(line, sizeof line, stdin))
+    {
+        unsigned n = 0;
+        if (std::strncmp(line, "quit", 4) == 0)
+            break;
+        if (std::sscanf(line, "run %u", &n) != 1 || n > 15)
+        {
+            std::printf("blocks: unknown command %s", line);
+            std::fflush(stdout);
+            continue;
+        }
+        const uint32_t mark   = 0x0BAD0000u + n * 0x1000u;
+        const uint32_t wanted = 0xC0DE0000u + n * 0x1000u + 0x1FFu;
+        slave.set_inputs(static_cast<uint8_t>(0x40 + n), 0);
+        auto end       = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        auto next_emcy = std::chrono::steady_clock::now();
+        bool started   = false;
+        uint32_t last  = slave.parameter();
+        bool done      = false;
+        while (std::chrono::steady_clock::now() < end)
+        {
+            uint32_t p = slave.parameter();
+            if (p != last)
+            {
+                std::printf("run %u: 0x2100 = 0x%08X\n", n, p);
+                last = p;
+            }
+            if (p == mark && !started)
+            {
+                started = true;
+                std::printf("run %u started\n", n);
+                std::fflush(stdout);
+            }
+            if (p == wanted)
+            {
+                done = true;
+                break;
+            }
+            if (std::chrono::steady_clock::now() >= next_emcy)
+            {
+                slave.send_emcy(0x5000, 0x01);
+                next_emcy += std::chrono::milliseconds(500);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        if (done)
+            std::printf("run %u ok\n", n);
+        else
+        {
+            ok = false;
+            std::printf("run %u FAIL: 0x2100 = 0x%08X, expected 0x%08X\n", n, slave.parameter(),
+                        wanted);
+        }
+        std::fflush(stdout);
+    }
+    return ok;
+}
+
+} // namespace
+
 int main(int argc, char **argv)
 {
     std::string iface;
@@ -35,6 +113,7 @@ int main(int argc, char **argv)
     unsigned long param = 0;
     int master_loss_s   = 0;
     int linger_s        = 0;
+    bool blocks         = false;
     for (int i = 1; i + 1 < argc; i += 2)
     {
         std::string opt = argv[i];
@@ -49,6 +128,8 @@ int main(int argc, char **argv)
             timeout_s = std::atoi(val);
         else if (opt == "--linger")
             linger_s = std::atoi(val);
+        else if (opt == "--blocks")
+            blocks = std::atoi(val) != 0;
         else if (opt == "--expect-master-loss")
             master_loss_s = std::atoi(val);
         else if (opt == "--expect-parameter")
@@ -113,6 +194,8 @@ int main(int argc, char **argv)
         }
         std::printf("master loss seen: pre-operational\n");
     }
+    if (blocks && !run_blocks(slave))
+        return 1;
     if (linger_s > 0)
         std::this_thread::sleep_for(std::chrono::seconds(linger_s));
     std::printf("PASS\n");

@@ -30,6 +30,7 @@
 #include "config.h"
 #include "link_stall.h"
 #include "master_dcf.h"
+#include "plc_port.h"
 #include "process_image.h"
 #include "status.h"
 
@@ -73,6 +74,14 @@ class Bus
     {
         return client_;
     }
+    // Opens the network to the PLC's function blocks as network `index` (0-based); call before
+    // start(). Not in service mode.
+    void enable_plc(uint8_t index);
+    // The blocks' side of the network, or null.
+    PlcPort *plc()
+    {
+        return plc_.get();
+    }
     // True while a session runs at the real-time priority.
     bool realtime() const
     {
@@ -98,6 +107,9 @@ class Bus
     // Resets the link if a reading calls for it; true if the link was taken down.
     bool reset_if_faulty(BusState state, const LinkInfo &info);
     bool wait_for(std::chrono::milliseconds d); // false if stop was requested
+    // Records the bus state in the status and for the blocks.
+    void publish_bus(const BusStatus &bus);
+    void set_sessions_running(bool running);
 
     const NetworkConfig &net_;
     const MasterLayout &layout_;
@@ -109,6 +121,7 @@ class Bus
     LinkOps &links_;
     bool service_; // service mode: the master runs no node, only client requests
     ClientQueue client_;
+    std::unique_ptr<PlcPort> plc_;
     bool use_link_; // a CAN interface (real or stood in for) is read and prepared
     LinkSetup setup_;
     BusOffRecovery recovery_;

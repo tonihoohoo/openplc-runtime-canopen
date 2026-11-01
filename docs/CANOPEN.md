@@ -267,6 +267,37 @@ while the PLC runs CANopen, and `busy` while it is already open. A PLC start clo
 `service_close` and five minutes without a request. Opening and closing it are logged and recorded
 as `service` events.
 
+## PLC function blocks
+
+The OpenPLC Editor's `canopen` block library (CiA 405 names: `SDO_READ4`, `SDO_WRITE4`,
+`SDO_READ_DATA`, `SDO_WRITE_DATA`, `SDO_READ_STRING`, `SDO_WRITE_STRING`, `NMT`, `GET_STATE`,
+`RECV_EMCY`, `RECV_EMCY_DEV`, `GET_LOCAL_NODE_ID`, `GET_CANOPEN_KERNEL_STATE`) lets a PLC program
+read and write a node's objects, send NMT commands and read node states and emergencies while it
+runs. The editor's CANopen documentation describes the blocks; this is what the plugin does for them.
+
+- The plugin exports `canopen_plc_api(version)`, a table of C functions (`plc_api.h`, version 1).
+  The blocks find the loaded plugin by its SONAME `libcanopen_plugin.so` and keep nothing between
+  calls, since the runtime loads the plugin again at each PLC start while the program stays loaded.
+- Nothing a block calls waits, locks or allocates. An SDO or NMT request goes into one of 16 slots
+  of its network; the network's bus thread takes the oldest, one transfer at a time, taking turns
+  with the online tools' requests, which have their own queue. A request with a timeout of 0 uses
+  the network's `sdo_timeout_ms`; transfers are expedited or segmented, up to 256 bytes.
+- A request is refused at once with a CiA 405 kernel error when no network runs
+  (`CANOPEN_KERNEL_NO_DRIVER`), the network or node is not configured (`NET_ID_UNKNOWN`,
+  `NODE_ID_UNKNOWN`), the link is down (`BUS_OFF`, or `NO_DRIVER` for a missing interface) or the
+  16 slots are taken (`REQUEST_ERROR`). A node being booted answers `REQUEST_ERROR`; an SDO abort
+  is `OTHER_ERROR` with the abort code, no answer is `TIMEOUT` (abort code 0x05040000).
+- A link reset or PLC stop ends every pending request with `BUS_OFF`. A request handle from an
+  earlier PLC run is answered `NO_DRIVER` (cancelled by the restart), never with another request's
+  result.
+- `GET_STATE` reads the node's NMT state as the master tracks it (`NOT_AVAIL` while the node is not
+  up), `GET_CANOPEN_KERNEL_STATE` the CAN controller state, and both answer in the same scan. Each
+  network keeps its last 32 emergencies for `RECV_EMCY`; a reader that falls behind continues with
+  the oldest and is told how many it missed.
+- NMT from a block is handled as from the online tools (a manual stop or pre-operational is not a
+  loss). Block writes and NMT commands are logged and recorded as `sdo_write` and `nmt_command`
+  events, at most once a second per node and object.
+
 ## Installing a release
 
 Releases of this fork are tagged `v<upstream version>-canopen.<N>` (for example `v4.3.1-canopen.1`)
@@ -392,7 +423,9 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 | `test_link_stall` | When a link counts as stalled: no frame sent for 3 s with drops or failing writes, never while quiet, error-passive or bus-off. |
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
 | `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, a running node that missed the master's reset, emergencies, late PDOs, the status and its socket, the online tools (SDO reads and writes, a refused write,
-pre-operational, save, start and reset of a node), service mode, the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
+pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
+| `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, and old handles across PLC runs and reloads. |
+| `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states and the emergency ring, with no allocation on the scan's side. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
@@ -403,6 +436,10 @@ The CI workflow `.github/workflows/canopen.yml` runs these tests, the SocketCAN 
 link, and an end-to-end check: it installs the runtime from source, builds the OpenPLC Editor fork
 (the branch with this branch's name, else `canopen`), uploads its `e2e/fixtures/canopen-generic-io`
 project with the editor's command line, and runs the simulated module against it on `vcan0`.
+It then uploads `e2e/fixtures/canopen-plc-blocks`, a program that calls every function block
+against the simulated module, and `.github/scripts/canopen_blocks_e2e.py` asks it for runs of its
+checks (`canopen_sim_slave --blocks 1` reads the commands), stopping and starting the PLC between
+runs and once while blocks are busy.
 
 vcan needs the kernel's `vcan` module. On a runner whose kernel has no matching
 `linux-modules-extra` package the vcan jobs fail at their first step, and the reason is in its log.

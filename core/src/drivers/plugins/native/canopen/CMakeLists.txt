@@ -78,6 +78,7 @@ add_library(canopen_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/log.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/master_dcf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/network.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/plc_port.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/process_image.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/requests.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/status.cpp
@@ -113,6 +114,8 @@ set_target_properties(canopen_plugin PROPERTIES
     OUTPUT_NAME "canopen_plugin"
     SUFFIX ".so"
 )
+# The function block library finds the loaded plugin by this name (plc_api.h).
+target_link_options(canopen_plugin PRIVATE "-Wl,-soname,libcanopen_plugin.so")
 
 # Licence texts of the plugin and of the statically linked Lely, kept with the build.
 set(CANOPEN_LICENSE_DIR ${CMAKE_BINARY_DIR}/licenses)

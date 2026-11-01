@@ -11,6 +11,7 @@
 //   cycle_end:   reads %Q under the image lock and hands it to the bus threads
 //   stop_loop:   sends each network's NMT command for a PLC stop and joins the bus threads
 //   cleanup:     closes service mode and the socket
+//   canopen_plc_api: the table the canopen function block library calls (plc_api.h)
 // While the PLC is stopped, a client of the socket can open one network in service mode with the
 // settings it sends; it closes on request, at a PLC start, at cleanup and after kServiceIdle.
 // No exception leaves an entry point: the runtime calls them as C functions.
@@ -28,6 +29,8 @@
 #include "config.h"
 #include "log.h"
 #include "master_dcf.h"
+#include "plc_api.h"
+#include "plc_port.h"
 #include "plugin_types.h"
 #include "process_image.h"
 #include "requests.h"
@@ -331,6 +334,7 @@ int do_start_loop()
         run->statuses.emplace_back(new NetworkStatus(net));
         run->buses.emplace_back(
             new Bus(net, run->layouts[i], *run->images[i], *run->statuses.back(), dcf));
+        run->buses.back()->enable_plc(static_cast<uint8_t>(i));
     }
     prepare_wake_signal();
     for (auto &bus : run->buses)
@@ -357,6 +361,137 @@ void do_stop_loop()
     stop_run(std::move(run));
     log_info("CANopen master stopped");
 }
+
+// The function block side. Called from the PLC scan, which only runs between start_loop and
+// stop_loop, like cycle_start and cycle_end: g_run is read behind g_active.
+PlcPort *plc_port(uint8_t network, int &error)
+{
+    if (!g_active.load(std::memory_order_acquire) || !g_run)
+    {
+        error = CANOPEN_PLC_NO_DRIVER;
+        return nullptr;
+    }
+    if (network < 1 || network > g_run->buses.size() || !g_run->buses[network - 1]->plc())
+    {
+        error = CANOPEN_PLC_NET_ID_UNKNOWN;
+        return nullptr;
+    }
+    error = CANOPEN_PLC_NO_ERROR;
+    return g_run->buses[network - 1]->plc();
+}
+
+void plc_fail(canopen_plc_result *res, int error, uint8_t reason)
+{
+    if (!res)
+        return;
+    *res        = canopen_plc_result{};
+    res->error  = static_cast<uint8_t>(error);
+    res->reason = reason;
+}
+
+uint64_t plc_start(const canopen_plc_request *req, canopen_plc_result *res)
+{
+    if (!req || !res)
+        return 0;
+    int error;
+    PlcPort *port = plc_port(req->network, error);
+    if (!port)
+    {
+        plc_fail(res, error,
+                 error == CANOPEN_PLC_NO_DRIVER ? CANOPEN_PLC_REASON_NOT_RUN
+                                                : CANOPEN_PLC_REASON_NONE);
+        return 0;
+    }
+    return port->start(*req, *res);
+}
+
+int plc_poll(uint64_t handle, canopen_plc_result *res, uint8_t *data, uint32_t cap)
+{
+    if (!res)
+        return 2;
+    int error;
+    PlcPort *port = plc_port(static_cast<uint8_t>(PlcPort::network_of(handle) + 1), error);
+    if (!port)
+    {
+        // The run that took the request has ended.
+        plc_fail(res, CANOPEN_PLC_NO_DRIVER, CANOPEN_PLC_REASON_RESTART);
+        return 2;
+    }
+    return port->poll(handle, *res, data, cap);
+}
+
+void plc_cancel(uint64_t handle)
+{
+    int error;
+    if (PlcPort *port = plc_port(static_cast<uint8_t>(PlcPort::network_of(handle) + 1), error))
+        port->cancel(handle);
+}
+
+int plc_node_state(uint8_t network, uint8_t node, uint8_t *state)
+{
+    int error;
+    PlcPort *port = plc_port(network, error);
+    if (!port || !state)
+        return port ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    if (!port->known(node))
+        return CANOPEN_PLC_NODE_ID_UNKNOWN;
+    *state = port->device_state(node);
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int plc_kernel_state(uint8_t network, uint8_t *state)
+{
+    int error;
+    PlcPort *port = plc_port(network, error);
+    if (!port || !state)
+        return port ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    *state = port->kernel_state();
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int plc_local_node_id(uint8_t network, uint8_t *node_id)
+{
+    int error;
+    PlcPort *port = plc_port(network, error);
+    if (!port || !node_id)
+        return port ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    *node_id = port->master_node_id();
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int plc_emcy_cursor(uint8_t network, uint64_t *cursor)
+{
+    int error;
+    PlcPort *port = plc_port(network, error);
+    if (!port || !cursor)
+        return port ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    *cursor = port->emcy_cursor();
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int plc_emcy_next(uint8_t network, uint8_t node, uint64_t *cursor, canopen_plc_emcy *out)
+{
+    int error;
+    PlcPort *port = plc_port(network, error);
+    if (!port || !cursor || !out)
+        return -(port ? CANOPEN_PLC_WRONG_PARAMETER : error);
+    if (node != 0 && !port->known(node))
+        return -CANOPEN_PLC_NODE_ID_UNKNOWN;
+    return port->emcy_next(node, *cursor, *out);
+}
+
+const canopen_plc_api_v1 kPlcApiV1 = {
+    sizeof(canopen_plc_api_v1),
+    1u,
+    plc_start,
+    plc_poll,
+    plc_cancel,
+    plc_node_state,
+    plc_kernel_state,
+    plc_local_node_id,
+    plc_emcy_cursor,
+    plc_emcy_next,
+};
 
 void report(const char *where, const char *what)
 {
@@ -452,6 +587,11 @@ CANOPEN_EXPORT void cycle_end(void)
     catch (...)
     {
     }
+}
+
+CANOPEN_EXPORT const void *canopen_plc_api(uint32_t version)
+{
+    return version == 1u ? &kPlcApiV1 : nullptr;
 }
 
 CANOPEN_EXPORT void cleanup(void)
