@@ -23,6 +23,8 @@
 #include <thread>
 #include <vector>
 
+#include <linux/can.h>
+#include <net/if.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -248,6 +250,39 @@ void listen(std::shared_ptr<lely::io::VirtualCanController> vbus, std::atomic<bo
             frames.push_back(
                 {msg.id, msg.len ? msg.data[0] : uint8_t{0}, std::chrono::steady_clock::now()});
     }
+}
+
+// Sends one frame as another device on the bus would: on the virtual bus, or on SocketCAN `wire`.
+void send_frame(std::shared_ptr<lely::io::VirtualCanController> vbus, const std::string &wire,
+                uint32_t id, std::vector<uint8_t> data)
+{
+    if (vbus)
+    {
+        lely::io::Context ctx;
+        lely::ev::Loop loop;
+        lely::io::VirtualCanChannel chan(ctx, loop.get_executor());
+        chan.open(*vbus);
+        can_msg msg = CAN_MSG_INIT;
+        msg.id      = id;
+        msg.len     = static_cast<uint8_t>(data.size());
+        std::memcpy(msg.data, data.data(), data.size());
+        std::error_code ec;
+        chan.write(msg, 1000, ec);
+        CHECK(!ec);
+        return;
+    }
+    int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+    CHECK(fd >= 0);
+    sockaddr_can addr{};
+    addr.can_family  = AF_CAN;
+    addr.can_ifindex = static_cast<int>(if_nametoindex(wire.c_str()));
+    CHECK(bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0);
+    can_frame f{};
+    f.can_id  = id;
+    f.can_dlc = static_cast<uint8_t>(data.size());
+    std::memcpy(f.data, data.data(), data.size());
+    CHECK(write(fd, &f, sizeof(f)) == static_cast<ssize_t>(sizeof(f)));
+    close(fd);
 }
 
 // One SYNC per scan, right after the scan's outputs, which leave without waiting for a tick.
@@ -516,6 +551,19 @@ void check_node_options(std::shared_ptr<lely::io::VirtualCanController> vbus,
     CHECK(!scan_until(image, rt, [] { return g_byte_in[10] != 0; }, std::chrono::seconds(2)));
     CHECK(node_status(status, 2).held && restored->last_command() == 2);
     CHECK(restored->restores() == 0);
+
+    // With on_node_error stop, a node that stops by itself is lost and held.
+    send_frame(vbus, wire, 0x000, {0x02, 3});
+    CHECK(scan_until(
+        image, rt,
+        [&status]
+        {
+            NodeStatus n = node_status(status, 3);
+            return n.state == NodeRun::Lost && n.problem.kind == ProblemKind::State && n.held;
+        },
+        std::chrono::seconds(2)));
+    CHECK(!scan_until(image, rt, [] { return g_byte_in[11] != 0; }, std::chrono::seconds(2)));
+    CHECK(as_is.last_command() == 2);
 
     again.stop();
     run = false;
@@ -1237,6 +1285,33 @@ void check_plc_blocks(std::shared_ptr<lely::io::VirtualCanController> vbus, cons
     io.stop();
 }
 
+// A session that cannot start (here a missing master DCF) is retried every second and logged once;
+// its nodes wait meanwhile.
+void check_session_failure(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                           const std::string &wire, const std::string &dir)
+{
+    std::string text = kPlcConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(text, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    NetworkStatus status(net);
+    const size_t before = errors_with("CANopen session failed");
+    Bus bus(net, layout, image, status, dir + "/missing.dcf", vbus);
+    bus.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2600));
+    bus.stop();
+    CHECK(errors_with("CANopen session failed") == before + 1);
+    CHECK(node_status(status, 2).state == NodeRun::Waiting);
+}
+
 int main()
 {
     set_log_sink(quiet_sink);
@@ -1528,6 +1603,30 @@ int main()
     CHECK(
         scan_until(image, rt, [node] { return node->outputs() == 0x5A; }, std::chrono::seconds(2)));
 
+    // Leaving operational by itself (here another device's NMT command) is a loss: the node is
+    // booted again. The wait passes the start grace, in which a pre-operational report is taken as
+    // a late heartbeat.
+    scan_until(image, rt, [] { return false; }, std::chrono::milliseconds(400));
+    send_frame(vbus, wire, 0x000, {0x80, 2});
+    CHECK(scan_until(
+        image, rt,
+        [&status]
+        {
+            NodeStatus n = node_status(status, 2);
+            return n.state == NodeRun::Lost && n.problem.kind == ProblemKind::State;
+        },
+        std::chrono::seconds(2)));
+    CHECK(warnings_with("lost (left operational)") == 1);
+    CHECK(g_byte_in[0] == 0x0F);
+    CHECK(scan_until(
+        image, rt,
+        [&status, node] {
+            return node_status(status, 2).state == NodeRun::Operational &&
+                   node->last_command() == 1;
+        },
+        std::chrono::seconds(10)));
+    CHECK(node_status(status, 2).losses == 2);
+
     // The configured node that is not on the bus is reported once; the others are not.
     CHECK(scan_until(
         image, rt, [] { return warnings_with("node 9 (absent) has not answered") > 0; },
@@ -1565,6 +1664,7 @@ int main()
     check_node_options(vbus, wire, dir, rt);
     check_service_mode(vbus, wire, dir, rt);
     check_plc_blocks(vbus, wire, dir, rt);
+    check_session_failure(vbus, wire, dir);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }

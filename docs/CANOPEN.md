@@ -44,8 +44,9 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
   master guards the node with remote frames on 0x700 + node ID every `guard_time_ms` and expects an
   answer within `guard_time_ms` times `life_time_factor` (the node's own 0x100C and 0x100D are set
   by SDOs in `sdo`). Node guarding needs a CAN controller and driver that handle remote frames; use
-  heartbeat when the node has it. A timeout, or a boot-up message from a running node, means the
-  node is lost: its state reads 0, its inputs hold their last values (`on_loss: hold`) or go to 0
+  heartbeat when the node has it. A timeout, a boot-up message from a running node, or a running
+  node that reports pre-operational or stopped without a command from the master or a client
+  (another device's NMT command, for example), means the node is lost: its state reads 0, its inputs hold their last values (`on_loss: hold`) or go to 0
   (`on_loss: zero`), its outputs are no longer sent, and it is booted again
   (`on_node_error: restart`), or sent NMT stop and left alone until the next PLC start
   (`on_node_error: stop`); a new bus session in the same PLC run (after a lost link) stops it again
@@ -209,7 +210,7 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `nodes[].held` | Present and `true` when the node was lost with `on_node_error: stop` and stays stopped until the next PLC start. |
 | `nodes[].nmt` | Last NMT state seen: `pre_operational` (also after a boot-up), `operational`, `stopped`, `unknown`. In service mode it follows the NMT commands sent and the nodes' heartbeats and boot-ups; a reset makes it `unknown` until the node is heard again. |
 | `networks[].mode` | `service` while [service mode](#service-mode) is open; left out otherwise. |
-| `nodes[].problem` | Why the node is not running, or `null`: `no_response`, `identity` (with `field`, `expected` and the `found` value read from the node), `sdo_abort` (a configuration SDO or the restore write refused, with `index`, `subindex` and `abort_code`), `heartbeat`, `guarding`, `reset`, `boot_error` (with the stack's `text`). `boot_status` is the CiA 302-2 boot error letter. |
+| `nodes[].problem` | Why the node is not running, or `null`: `no_response`, `identity` (with `field`, `expected` and the `found` value read from the node), `sdo_abort` (a configuration SDO or the restore write refused, with `index`, `subindex` and `abort_code`), `heartbeat`, `guarding`, `reset`, `state` (the node left operational by itself), `boot_error` (with the stack's `text`). `boot_status` is the CiA 302-2 boot error letter. |
 | `nodes[].warning` | An operational node with an active emergency or a late PDO. |
 | `nodes[].emcy` | The last 8 emergencies, newest first; an emergency with code 0 (error reset) marks them inactive. |
 | `nodes[].late_pdos` | TPDOs with a receive timeout whose frames are late. |
@@ -263,7 +264,7 @@ interface (under `name` in the status, `Service` when left out) that sends nothi
 configuration) and only serves the requests, with the NMT commands sent as plain frames. The nodes
 listed are the ones requests may address, all in state `service`; their `nmt` follows the commands
 sent and the heartbeats and boot-ups the plugin hears. It is refused with `plc_running`
-while the PLC runs CANopen, and `busy` while it is already open. A PLC start closes it first, as do
+while the PLC runs CANopen or is starting it, and `busy` while it is already open. A PLC start closes it first, as do
 `service_close` and five minutes without a request. Opening and closing it are logged and recorded
 as `service` events.
 

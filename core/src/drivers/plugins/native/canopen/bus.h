@@ -135,6 +135,7 @@ class Bus
     std::atomic<bool> realtime_{false};
     bool realtime_warned_ = false;
     bool restart_noted_   = false;
+    std::string session_failure_; // the last failure of a session start, logged once
     std::mutex mutex_;
     std::condition_variable cv_;
 };

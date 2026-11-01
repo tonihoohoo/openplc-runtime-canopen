@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The plugin's C entry points with an allocation failure injected at each point of start_loop: no
-// exception leaves them, a failed start leaves no network running and a later start works.
+// exception leaves them, a failed start leaves no network running and a later start works. Also:
+// service mode is refused while a start is under way (needs the plugin's socket; skipped without).
 
 #include <cstdarg>
 #include <cstdio>
@@ -10,11 +11,16 @@
 #include <fstream>
 #include <new>
 #include <string>
+#include <thread>
 
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include "check.h"
 #include "plugin_types.h"
+#include "status_server.h"
 
 extern "C" int init(void *args);
 extern "C" int start_loop(void);
@@ -130,6 +136,38 @@ void log_error(const char *fmt, ...)
         ++g_not_running;
 }
 
+// One request over the plugin's socket, without the newline; "" when there is no socket.
+std::string ask(const std::string &request)
+{
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return "";
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", canopen_plugin::kStatusSocketPath);
+    std::string line = request + "\n";
+    if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 ||
+        send(fd, line.data(), line.size(), 0) != static_cast<ssize_t>(line.size()))
+    {
+        close(fd);
+        return "";
+    }
+    std::string answer;
+    char buf[1024];
+    while (answer.find('\n') == std::string::npos)
+    {
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0)
+            break;
+        answer.append(buf, static_cast<size_t>(n));
+    }
+    close(fd);
+    return answer;
+}
+
+const char *kServiceOpen = R"({"op":"service_open","interface":"cotest-none2","bitrate":0,)"
+                           R"("master_node_id":1,"sdo_timeout_ms":500,"nodes":[2]})";
+
 } // namespace
 
 int main()
@@ -195,6 +233,32 @@ int main()
     cycle_start();
     cycle_end();
     stop_loop();
+
+    // A start that waits on its configuration (a FIFO) keeps service mode closed until it ends.
+    if (ask(R"({"op":"status"})").empty())
+        std::printf("no plugin socket: the service-mode check during a start is skipped\n");
+    else
+    {
+        const std::string fifo = std::string(dir) + "/slow.json";
+        CHECK(mkfifo(fifo.c_str(), 0600) == 0);
+        std::snprintf(rt.plugin_specific_config_file_path,
+                      sizeof(rt.plugin_specific_config_file_path), "%s", fifo.c_str());
+        CHECK(init(&rt) == 0);
+        int rc = 0;
+        std::thread starting([&rc] { rc = start_loop(); });
+        usleep(200 * 1000);
+        CHECK(ask(kServiceOpen).find("plc_running") != std::string::npos);
+        {
+            std::ofstream out(fifo);
+            out << "{}";
+        }
+        starting.join();
+        CHECK(rc == -1);
+        const std::string after = ask(kServiceOpen);
+        CHECK(!after.empty() && after.find("plc_running") == std::string::npos);
+        ask(R"({"op":"service_close"})");
+        std::remove(fifo.c_str());
+    }
     std::remove(conf.c_str());
     for (int i = 0; i < 2; ++i)
         std::remove((std::string(dir) + "/canopen_master_" + std::to_string(i) + ".dcf").c_str());

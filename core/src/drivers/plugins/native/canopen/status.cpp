@@ -535,6 +535,8 @@ const char *problem_name(ProblemKind k)
         return "guarding";
     case ProblemKind::Reset:
         return "reset";
+    case ProblemKind::State:
+        return "state";
     case ProblemKind::BootError:
         return "boot_error";
     }
