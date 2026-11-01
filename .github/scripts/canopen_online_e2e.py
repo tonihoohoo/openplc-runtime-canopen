@@ -128,6 +128,8 @@ def main() -> None:
     }
     expect("service mode refused while the PLC runs", request(service), {"error": "plc_running"})
     call("/stop-plc", token)
+    # A start sent while the PLC is still stopping is ignored, so wait for STOPPED.
+    wait_for("PLC stopped", lambda: "STOPPED" in str(call("/status", token).get("status", "")))
     wait_for("CANopen stopped", lambda: call("/canopen/status", token).get("active") is False)
     expect("service mode opens", request(service), {"ok": True, "network": 0})
     wait_for("node 2 in service mode", lambda: node2().get("state") == "service")
