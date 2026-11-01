@@ -165,7 +165,7 @@ jobs:
       - name: The runtime reports CANopen support
         run: |
           curl -ks https://127.0.0.1:8443/api/capabilities | tee /dev/stderr \
-            | python3 -c 'import json, sys; c = json.load(sys.stdin)["canopen"]; assert 3 in c["configVersions"] and {"status", "sdo", "nmt", "service"} <= set(c["features"])'
+            | python3 -c 'import json, sys; c = json.load(sys.stdin)["canopen"]; assert 4 in c["configVersions"] and {"status", "sdo", "nmt", "service"} <= set(c["features"])'
 
       - name: Upload the project with the editor CLI
         working-directory: editor
@@ -236,6 +236,55 @@ jobs:
         run: |
           python3 .github/scripts/canopen_blocks_e2e.py --sim "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" \
             --interface vcan0 --user ci --password ci-canopen-e2e
+
+      - name: Upload the boot SDO project with the editor CLI
+        id: boot
+        working-directory: editor
+        env:
+          OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
+        run: |
+          # An editor branch without the boot SDO options has no such project; the check is skipped.
+          if [ ! -d ./e2e/fixtures/canopen-boot-sdo/project ]; then
+            echo "::notice::The editor branch has no boot SDO project; skipped"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli upload \
+            ./e2e/fixtures/canopen-boot-sdo/project --host 127.0.0.1 --yes \
+            --user-data "$RUNNER_TEMP/editor-data" --json
+          sudo cat ../build/plugins/canopen.json
+
+      - name: A refused startup SDO with continue, a gap and an RPDO deadline
+        if: steps.boot.outputs.present == 'true'
+        run: |
+          # The node refuses its 0x2100 write; the boot goes on. Its outputs follow through the gap,
+          # and the master sends them again while they stay the same.
+          "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 3 \
+            --parameter-read-only 1 --expect-resends 10 --timeout 180 --linger 30 \
+            > "$RUNNER_TEMP/sim-boot.log" 2>&1 &
+          sim=$!
+          token=$(curl -ks -X POST https://127.0.0.1:8443/api/login -H 'Content-Type: application/json' \
+            -d '{"username": "ci", "password": "ci-canopen-e2e"}' \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
+          seen=
+          for _ in $(seq 1 60); do
+            if curl -ks -H "Authorization: Bearer $token" https://127.0.0.1:8443/api/canopen/status \
+              | tee /tmp/canopen-boot-status.json \
+              | python3 -c 'import json, sys; n = [x for x in json.load(sys.stdin)["networks"][0]["nodes"] if x["node_id"] == 2][0]; assert n["state"] == "operational" and [k["index"] for k in n["sdo_skipped"]] == [0x2100]' 2>/dev/null; then
+              seen=1
+              break
+            fi
+            sleep 1
+          done
+          cat /tmp/canopen-boot-status.json
+          status=0
+          wait "$sim" || status=$?
+          cat "$RUNNER_TEMP/sim-boot.log"
+          if [ -z "$seen" ]; then
+            echo "::error::/api/canopen/status never reported node 2 operational with its 0x2100 write refused"
+            exit 1
+          fi
+          exit "$status"
 
       - name: The node goes pre-operational when the runtime dies
         run: |

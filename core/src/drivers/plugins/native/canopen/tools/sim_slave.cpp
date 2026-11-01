@@ -128,9 +128,10 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     d.sub("1018", 4, "Serial number", 0x7, "ro", 0);
     d.rec("1029", "Error behaviour", 2, 1);
     d.sub("1029", 1, "Communication error", 0x5, "rw", 0);
-    d.rec("1400", "RPDO communication parameter", 3, 2);
+    d.rec("1400", "RPDO communication parameter", 4, 5);
     d.sub("1400", 1, "COB-ID", 0x7, "rw", 0x200 + s.node_id);
     d.sub("1400", 2, "Transmission type", 0x5, "rw", 0xFF);
+    d.sub("1400", 5, "Event timer", 0x6, "rw", 0);
     d.rec("1600", "RPDO mapping parameter", 3, 1, "rw");
     d.sub("1600", 1, "Mapped object", 0x7, "rw", 0x62000108);
     d.sub("1600", 2, "Mapped object", 0x7, "rw", 0);
