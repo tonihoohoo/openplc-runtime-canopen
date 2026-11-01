@@ -4,7 +4,8 @@
 // and the end-to-end check. Objects:
 //   0x6000:01 UNSIGNED8  digital inputs   TPDO1 (0x180 + id), with 0x6401:01
 //   0x6401:01 INTEGER16  analogue input   TPDO1, sent every 20 ms
-//   0x6200:01 UNSIGNED8  digital outputs  RPDO1 (0x200 + id)
+//   0x6200:01 UNSIGNED8  digital outputs  RPDO1 (0x200 + id); 0x1600 has room for a second entry
+//                        and every dummy object may be mapped
 //   0x2100:00 UNSIGNED32 a parameter the master can write during configuration (read-only, so the
 //                        write is refused, with parameter_read_only)
 //   0x2101:00 UNSIGNED16 a parameter written only while not operational (abort 0x08000022)
@@ -88,6 +89,11 @@ class SimSlave
     {
         return restores_.load();
     }
+    // Writes of 0x6200:01, by SDO or RPDO, since the object was created.
+    unsigned output_writes() const
+    {
+        return output_writes_.load();
+    }
     // Save requests (0x1010 written with "save") since start().
     unsigned saves() const
     {
@@ -117,6 +123,7 @@ class SimSlave
     std::atomic<uint8_t> nmt_state_{0};
     std::atomic<unsigned> restores_{0};
     std::atomic<unsigned> saves_{0};
+    std::atomic<unsigned> output_writes_{0};
 };
 
 } // namespace canopen_sim

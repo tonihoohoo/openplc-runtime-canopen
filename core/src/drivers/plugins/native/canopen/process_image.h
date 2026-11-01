@@ -87,6 +87,9 @@ class ProcessImage
 
     std::vector<IecLocation> in_locs_;
     std::vector<IecLocation> out_locs_;
+    // 0 for a dummy entry: no location, read as 0 and never written to the image.
+    std::vector<uint8_t> in_used_;
+    std::vector<uint8_t> out_used_;
     std::vector<bool> has_state_;
     std::vector<IecLocation> state_locs_;
     std::vector<uint64_t> in_work_;

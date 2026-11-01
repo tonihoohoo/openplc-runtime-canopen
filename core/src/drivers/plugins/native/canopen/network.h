@@ -148,7 +148,8 @@ class Network : public lely::canopen::BasicMaster
         std::chrono::milliseconds backoff{kRetryMin};
         std::string last_problem;
         clock::time_point last_emcy{};
-        std::vector<uint8_t> concise;
+        std::vector<ConfigRun> runs; // configuration SDOs, cut at the refusal policies
+        size_t run = 0;              // the run being written
         std::vector<const MasterPdo *> in_pdos;
         std::vector<const MasterPdo *> out_pdos;
     };
@@ -227,6 +228,8 @@ class Network : public lely::canopen::BasicMaster
     std::vector<uint64_t> last_out_;
     std::vector<bool> out_valid_;
     std::vector<bool> resend_;         // per master TPDO: send in full at the next tick
+    std::vector<clock::time_point> last_sent_; // per master TPDO: when it was last sent
+    bool periodic_ = false;                    // some master TPDO has a send period
     std::vector<uint16_t> rpdo_error_; // per master RPDO: the last error logged
     uint64_t synced_scans_ = 0;
     uint64_t merged_scans_ = 0;

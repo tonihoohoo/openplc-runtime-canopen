@@ -126,6 +126,14 @@ struct Emcy
     bool active     = true;
 };
 
+// A configuration SDO the node refused, with a policy that let the boot go on.
+struct SkippedSdo
+{
+    uint16_t index      = 0;
+    uint8_t subindex    = 0;
+    uint32_t abort_code = 0;
+};
+
 struct LatePdo
 {
     unsigned pdo    = 0; // the node's TPDO number
@@ -187,6 +195,7 @@ struct Event
     uint32_t abort     = 0;                  // SdoWrite
     NmtRequest command = NmtRequest::Start;  // NmtCommand
     bool open          = false;              // Service
+    OnAbort policy     = OnAbort::Stop;      // SdoAbort
 };
 
 struct NodeStatus
@@ -204,6 +213,7 @@ struct NodeStatus
     Problem problem;
     std::vector<Emcy> emcy; // newest first
     std::vector<LatePdo> late;
+    std::vector<SkippedSdo> skipped; // refused writes of the current boot
 
     // An operational node with an active emergency or a late PDO.
     bool warning() const;
@@ -249,7 +259,12 @@ class NetworkStatus
     // The found value of an identity failure, read after the failure.
     void identity_found(unsigned node, IdentityField field, uint32_t value);
     void lost(unsigned node, const Problem &p);
-    void sdo_abort(unsigned node, uint16_t index, uint8_t subindex, uint32_t code);
+    // A refused configuration SDO. With continue or jump the boot goes on and the write is listed
+    // under the node's skipped writes until clear_skipped().
+    void sdo_abort(unsigned node, uint16_t index, uint8_t subindex, uint32_t code,
+                   OnAbort policy = OnAbort::Stop);
+    // A new configuration of the node starts.
+    void clear_skipped(unsigned node);
     void emcy(unsigned node, uint16_t code, uint8_t reg, const uint8_t data[5]);
     void pdo_late(unsigned node, unsigned pdo, uint32_t cob_id);
     void pdo_back(unsigned node, unsigned pdo);

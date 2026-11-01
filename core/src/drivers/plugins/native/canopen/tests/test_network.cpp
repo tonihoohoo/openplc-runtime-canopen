@@ -75,7 +75,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 3,
+  "version": 4,
   "networks": [{
     "name": "test", "interface": "vcan-test", "bitrate": 0,
     "sync": {"mode": "plc_cycle"},
@@ -364,7 +364,7 @@ NodeStatus node_status(const NetworkStatus &status, unsigned id)
 }
 
 const char *kWatchConfig = R"({
-  "version": 3,
+  "version": 4,
   "networks": [{
     "name": "watch", "interface": "vcan-test", "bitrate": 0,
     "heartbeat_producer_ms": 50,
@@ -422,7 +422,7 @@ void check_master_watch(std::shared_ptr<lely::io::VirtualCanController> vbus,
 }
 
 const char *kOptionsConfig = R"({
-  "version": 3,
+  "version": 4,
   "networks": [{
     "name": "options", "interface": "vcan-test", "bitrate": 0,
     "on_node_error": "stop", "boot_timeout_ms": 1000, "sdo_timeout_ms": 500,
@@ -1118,7 +1118,7 @@ std::string nmt_request(unsigned node, const char *command)
 }
 
 const char *kPlcConfig = R"({
-  "version": 3,
+  "version": 4,
   "networks": [{
     "name": "plc", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
@@ -1310,6 +1310,112 @@ void check_session_failure(std::shared_ptr<lely::io::VirtualCanController> vbus,
     bus.stop();
     CHECK(errors_with("CANopen session failed") == before + 1);
     CHECK(node_status(status, 2).state == NodeRun::Waiting);
+}
+
+const char *kBootConfig = R"({
+  "version": 4,
+  "networks": [{
+    "name": "boot", "interface": "vcan-test", "bitrate": 0,
+    "sdo_timeout_ms": 300,
+    "nodes": [
+      {"node_id": 2, "name": "io1",
+       "supervision": {"type": "heartbeat", "consumer_ms": 300},
+       "state_location": "%IB10",
+       "sdo": [{"index": 8448, "subindex": 0, "data": "01000000", "on_abort": "continue"},
+               {"index": 8450, "subindex": 0, "data": "0000C03F"},
+               {"index": 8448, "subindex": 0, "data": "02000000", "on_abort": "jump",
+                "jump_to": 4},
+               {"index": 24575, "subindex": 0, "data": "01"},
+               {"index": 5120, "subindex": 1, "data": "02020080"},
+               {"index": 5632, "subindex": 0, "data": "00"},
+               {"index": 5632, "subindex": 1, "data": "08000500"},
+               {"index": 5632, "subindex": 2, "data": "08010062"},
+               {"index": 5632, "subindex": 0, "data": "02"},
+               {"index": 5120, "subindex": 1, "data": "02020000"}],
+       "tpdos": [{"number": 1, "cob_id": 386, "entries": [
+         {"index": 5, "subindex": 0, "type": "UNSIGNED8"},
+         {"index": 25601, "subindex": 1, "type": "INTEGER16", "location": "%IW0"}]}],
+       "rpdos": [{"number": 1, "cob_id": 514, "send_period_ms": 50, "entries": [
+         {"index": 5, "subindex": 0, "type": "UNSIGNED8"},
+         {"index": 25088, "subindex": 1, "type": "UNSIGNED8", "location": "%QB0"}]}]}
+    ]
+  }]
+})";
+
+// Refusal policies at boot (continue and jump past writes the node refuses), dummy entries in
+// both directions, and a steady output resent at its send period.
+void check_boot_options(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                        const std::string &wire, const std::string &dir,
+                        const plugin_runtime_args_t &rt)
+{
+    std::string text = kBootConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(text, cfg, errors));
+    for (const auto &e : errors)
+        std::fprintf(stderr, "%s\n", e.c_str());
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/boot.dcf";
+    {
+        FILE *f       = std::fopen(dcf.c_str(), "w");
+        std::string t = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+    }
+    SimSlaveSpec spec;
+    spec.node_id             = 2;
+    spec.parameter_read_only = true;
+    SimSlave io(spec, dir + "/boot_node2.dcf", vbus, wire);
+    io.set_inputs(0x99, 1234);
+    io.start();
+
+    NetworkStatus status(net);
+    Bus bus(net, layout, image, status, dcf, vbus);
+    bus.start();
+    std::memset(g_byte_in, 0, sizeof g_byte_in);
+    std::memset(g_int_in, 0, sizeof g_int_in);
+    // Started although two writes were refused; the write jumped over would have failed the boot.
+    CHECK(scan_until(image, rt, [] { return g_byte_in[10] == 5; }, std::chrono::seconds(10)));
+    NodeStatus n = node_status(status, 2);
+    CHECK(n.state == NodeRun::Operational);
+    CHECK(n.skipped.size() == 2);
+    if (n.skipped.size() == 2)
+        CHECK(n.skipped[0].index == 0x2100 && n.skipped[1].index == 0x2100 &&
+              n.skipped[0].abort_code != 0);
+    unsigned continued = 0, jumped = 0;
+    for (const Event &e : status.snapshot().events)
+        if (e.kind == EventKind::SdoAbort)
+        {
+            continued += e.policy == OnAbort::Continue;
+            jumped += e.policy == OnAbort::Jump;
+        }
+    CHECK(continued == 1 && jumped == 1);
+    CHECK(status_json({status.snapshot()}, 0).find("\"sdo_skipped\":[{\"index\":8448") !=
+          std::string::npos);
+
+    // Input gap: the 8-bit inputs are skipped, the analogue input lands in %IW0.
+    CHECK(scan_until(
+        image, rt, [] { return g_int_in[0] == 1234; }, std::chrono::seconds(2)));
+    CHECK(g_byte_in[0] == 0);
+
+    // Output gap: the node maps a dummy byte first, then its outputs.
+    g_byte_out[0] = 0x6C;
+    CHECK(scan_until(image, rt, [&io] { return io.outputs() == 0x6C; }, std::chrono::seconds(2)));
+
+    // Steady outputs: the PDO still goes out about every 50 ms.
+    unsigned before = io.output_writes();
+    scan_until(image, rt, [] { return false; }, std::chrono::milliseconds(1000));
+    unsigned sent = io.output_writes() - before;
+    CHECK(sent >= 12 && sent <= 30);
+    bus.stop();
+    io.stop();
 }
 
 int main()
@@ -1664,6 +1770,7 @@ int main()
     check_node_options(vbus, wire, dir, rt);
     check_service_mode(vbus, wire, dir, rt);
     check_plc_blocks(vbus, wire, dir, rt);
+    check_boot_options(vbus, wire, dir, rt);
     check_session_failure(vbus, wire, dir);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
