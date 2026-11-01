@@ -55,6 +55,8 @@
 #include "process_image.h"
 #include "status.h"
 
+struct __can_recv; // Lely's CAN frame receiver
+
 namespace canopen_plugin
 {
 
@@ -191,6 +193,9 @@ class Network : public lely::canopen::BasicMaster
     void ClientWrite(ClientJob &job);
     void ClientNmt(const ClientJob &job);
     void ManualNmt(uint8_t id, NmtRequest cmd);
+    void ServiceNmtSeen(uint8_t id, NmtRequest cmd);
+    void WatchServiceHeartbeats();
+    static int OnServiceHeartbeat(const can_msg *msg, void *data) noexcept;
     void SendNmt(NmtRequest cmd, uint8_t id);
     // NMT from a client or the PLC: one node, or with 0 every node of the network.
     void RunNmt(unsigned node, NmtRequest cmd);
@@ -231,6 +236,8 @@ class Network : public lely::canopen::BasicMaster
     bool plc_first_ = true; // the PLC's queue is looked at first on the next free turn
     std::map<uint64_t, clock::time_point> plc_logged_;
     std::map<uint8_t, std::unique_ptr<lely::canopen::Sdo>> service_sdos_;
+    // Service mode: receivers of the nodes' boot-up and heartbeat frames, for their NMT state.
+    std::vector<::__can_recv *> service_recv_;
     clock::time_point started_{};
     clock::time_point next_time_{};
 };
