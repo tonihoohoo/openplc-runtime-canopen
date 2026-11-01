@@ -53,6 +53,7 @@ enum class ProblemKind : uint8_t
     Heartbeat,  // a running node missed its heartbeat
     Guarding,   // a running node did not answer node guarding
     Reset,      // a running node sent a boot-up message
+    State,      // a running node left operational without a command
     BootError   // any other boot status
 };
 

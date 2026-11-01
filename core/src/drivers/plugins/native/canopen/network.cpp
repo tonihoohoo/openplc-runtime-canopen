@@ -35,6 +35,7 @@ constexpr std::chrono::milliseconds Network::kTick;
 constexpr std::chrono::milliseconds Network::kRetryMin;
 constexpr std::chrono::milliseconds Network::kRetryMax;
 constexpr std::chrono::milliseconds Network::kPollEvery;
+constexpr std::chrono::milliseconds Network::kStartGrace;
 constexpr uint32_t Network::kRestoreSignature;
 
 uint64_t pdo_get_bits(const uint8_t *data, size_t len, unsigned offset, unsigned bits)
@@ -533,6 +534,7 @@ void Network::HandleLoss(uint8_t id, ProblemKind kind)
     n->manual       = false;
     const char *why = kind == ProblemKind::Heartbeat  ? "heartbeat timeout"
                       : kind == ProblemKind::Guarding ? "node guarding timeout"
+                      : kind == ProblemKind::State    ? "left operational"
                                                       : "node reset";
     const bool stop = cfg_.on_node_error == OnNodeError::Stop;
     log_warn("%s lost (%s); %s its inputs and %s", n->cfg->label().c_str(), why,
@@ -614,6 +616,29 @@ void Network::HandleState(uint8_t id, NmtState st)
     if (st == NmtState::BOOTUP)
     {
         HandleLoss(id, ProblemKind::Reset);
+        return;
+    }
+    if ((st == NmtState::PREOP || st == NmtState::STOP) && !n->manual && !n->stopped)
+    {
+        if (st == NmtState::PREOP && clock::now() - n->up_since < kStartGrace)
+        {
+            // A heartbeat sent before the node took the start command: start it again.
+            Defer(
+                [this, id]
+                {
+                    try
+                    {
+                        Command(NmtCommand::START, id);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        log_warn("node %u: cannot send NMT start: %s", id, e.what());
+                    }
+                });
+            return;
+        }
+        // Lely reports only the state change; the master did not ask for it.
+        HandleLoss(id, ProblemKind::State);
         return;
     }
     SetState(*n, static_cast<uint8_t>(st) & 0x7F);
@@ -705,6 +730,7 @@ void Network::SetUp(NodeState &node, bool up)
     node.up = up;
     if (up)
     {
+        node.up_since = clock::now();
         SetState(node, static_cast<uint8_t>(NmtState::START));
         // Send the node's outputs in full.
         for (const MasterPdo *m : node.out_pdos)

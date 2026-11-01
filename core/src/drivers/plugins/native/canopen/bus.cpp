@@ -404,6 +404,11 @@ void Bus::run_session()
             publish_bus(monitor_.simulated());
         net.Start();
         set_sessions_running(true);
+        if (!session_failure_.empty())
+        {
+            log_info("the CANopen session runs again");
+            session_failure_.clear();
+        }
         bool shut_down = false;
         bool lost      = false;
         int slices     = 0;
@@ -455,7 +460,15 @@ void Bus::run_session()
         for (size_t slot = 0; slot < net_.nodes.size(); ++slot)
             image_.set_node_state(slot, 0);
         image_.commit();
-        log_error("CANopen session failed: %s; retrying", e.what());
+        status_.begin_session();
+        // Retried every second: the same failure is logged once.
+        if (session_failure_ != e.what())
+        {
+            session_failure_ = e.what();
+            log_error("CANopen session failed: %s; retrying", e.what());
+        }
+        else
+            log_debug("CANopen session failed again: %s", e.what());
     }
 }
 

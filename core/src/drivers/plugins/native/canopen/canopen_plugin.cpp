@@ -59,6 +59,7 @@ bool g_have_args = false;
 std::mutex g_mutex;
 std::unique_ptr<Running> g_run;
 std::unique_ptr<Running> g_service;
+bool g_starting = false; // a PLC start is under way; service mode stays closed
 std::chrono::steady_clock::time_point g_last_request;
 std::atomic<bool> g_active{false};
 std::unique_ptr<StatusServer> g_server;
@@ -211,7 +212,7 @@ class PluginRequests : public Requests
 
     std::string service_open(const ServiceRequest &req) override
     {
-        if (g_run)
+        if (g_run || g_starting)
             return "plc_running";
         if (g_service)
             return "busy";
@@ -280,10 +281,26 @@ int do_init(void *args)
     return 0;
 }
 
+// Clears the start flag when do_start_loop returns, however it ends.
+struct StartingGuard
+{
+    StartingGuard()
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_starting = true;
+    }
+    ~StartingGuard()
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_starting = false;
+    }
+};
+
 int do_start_loop()
 {
     if (g_run)
         return 0;
+    StartingGuard starting;
     close_service("the PLC starts");
     if (!g_have_args || !g_args.image_lock || !g_args.image_unlock || !g_args.journal_write_bool ||
         !g_args.journal_write_byte || !g_args.journal_write_int || !g_args.journal_write_dint ||
