@@ -1288,11 +1288,14 @@ void check_plc_blocks(std::shared_ptr<lely::io::VirtualCanController> vbus, cons
 // A session that cannot start (here a missing master DCF) is retried every second and logged once;
 // its nodes wait meanwhile.
 void check_session_failure(std::shared_ptr<lely::io::VirtualCanController> vbus,
-                           const std::string &dir)
+                           const std::string &wire, const std::string &dir)
 {
+    std::string text = kPlcConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
     Config cfg;
     std::vector<std::string> errors;
-    CHECK(parse_config(kPlcConfig, cfg, errors));
+    CHECK(parse_config(text, cfg, errors));
     if (!errors.empty())
         return;
     const NetworkConfig &net = cfg.networks[0];
@@ -1661,7 +1664,7 @@ int main()
     check_node_options(vbus, wire, dir, rt);
     check_service_mode(vbus, wire, dir, rt);
     check_plc_blocks(vbus, wire, dir, rt);
-    check_session_failure(vbus, dir);
+    check_session_failure(vbus, wire, dir);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }
