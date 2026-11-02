@@ -152,7 +152,8 @@ jobs:
       - name: Build the editor
         working-directory: editor
         run: |
-          flags='--no-optimization-minimize --no-devtool --cache-type filesystem'
+          flags='--no-optimization-minimize --no-devtool --cache-type filesystem --infrastructure-logging-level verbose'
+          echo "webpack cache before: $(du -sh node_modules/.cache/webpack/* 2>/dev/null | tr '\n' ' ')"
           npx concurrently --kill-others-on-fail --names main,renderer \
             "npm run build:main -- $flags --cache-name main" \
             "npm run build:renderer -- $flags --cache-name renderer"
