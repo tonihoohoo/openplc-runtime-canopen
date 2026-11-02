@@ -134,29 +134,17 @@ jobs:
           cmake -S "$PLUGIN_DIR" -B "$PLUGIN_DIR/build-sim" -DCANOPEN_BUILD_TESTS=ON
           cmake --build "$PLUGIN_DIR/build-sim" -j"$(nproc)" --target canopen_sim_slave
 
-      - name: Install the editor
+      # Production mode without minification, source maps or module concatenation: about a minute.
+      - name: Build the editor
         working-directory: editor
         run: |
           npm ci --ignore-scripts
           npm run setup:strucpp
           node node_modules/electron/install.js
-
-      - name: Restore the editor's webpack cache
-        uses: actions/cache/restore@v4
-        with:
-          path: editor/node_modules/.cache/webpack
-          key: editor-webpack-${{ hashFiles('editor/package-lock.json', 'editor/configs/webpack/**') }}-${{ github.sha }}
-          restore-keys: editor-webpack-${{ hashFiles('editor/package-lock.json', 'editor/configs/webpack/**') }}-
-
-      # Production mode without minification or source maps; webpack's cache makes a rebuild incremental.
-      - name: Build the editor
-        working-directory: editor
-        run: |
-          flags='--no-optimization-minimize --no-devtool --cache-type filesystem --infrastructure-logging-level verbose'
-          echo "webpack cache before: $(du -sh node_modules/.cache/webpack/* 2>/dev/null | tr '\n' ' ')"
+          flags='--no-optimization-minimize --no-devtool --no-optimization-concatenate-modules'
           npx concurrently --kill-others-on-fail --names main,renderer \
-            "npm run build:main -- $flags --cache-name main" \
-            "npm run build:renderer -- $flags --cache-name renderer"
+            "npm run build:main -- $flags" \
+            "npm run build:renderer -- $flags"
           # Run from dist, the app looks for STruC++'s runtime headers next to main.js.
           mkdir -p release/app/dist/main/node_modules
           ln -sfn "$PWD/node_modules/strucpp" release/app/dist/main/node_modules/strucpp
@@ -164,12 +152,6 @@ jobs:
           mkdir -p "$RUNNER_TEMP/editor-data/User/Runtime"
           echo '[]' > "$RUNNER_TEMP/editor-data/User/Runtime/arduino-core-control.json"
           echo '[]' > "$RUNNER_TEMP/editor-data/User/Runtime/arduino-library-control.json"
-
-      - name: Save the editor's webpack cache
-        uses: actions/cache/save@v4
-        with:
-          path: editor/node_modules/.cache/webpack
-          key: editor-webpack-${{ hashFiles('editor/package-lock.json', 'editor/configs/webpack/**') }}-${{ github.sha }}
 
       - name: Start the runtime
         run: |
