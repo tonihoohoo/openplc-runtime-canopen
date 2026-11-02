@@ -275,4 +275,43 @@ std::vector<uint8_t> concise_dcf(const std::vector<SdoWrite> &sdo)
     return out;
 }
 
+std::vector<ConfigRun> config_runs(const std::vector<SdoWrite> &sdo)
+{
+    std::vector<bool> starts(sdo.size(), false);
+    if (!sdo.empty())
+        starts[0] = true;
+    for (size_t k = 0; k < sdo.size(); ++k)
+    {
+        if (sdo[k].on_abort != OnAbort::Stop && k + 1 < sdo.size())
+            starts[k + 1] = true;
+        if (sdo[k].on_abort == OnAbort::Jump && sdo[k].jump_to < sdo.size())
+            starts[sdo[k].jump_to] = true;
+    }
+    std::vector<ConfigRun> runs;
+    for (size_t k = 0; k < sdo.size();)
+    {
+        size_t end = k + 1;
+        while (end < sdo.size() && !starts[end])
+            ++end;
+        ConfigRun r;
+        r.first     = k;
+        r.last      = end - 1;
+        r.policy    = sdo[r.last].on_abort;
+        r.resume_at = r.policy == OnAbort::Jump ? sdo[r.last].jump_to : r.last + 1;
+        r.concise   = concise_dcf(std::vector<SdoWrite>(sdo.begin() + static_cast<long>(k),
+                                                        sdo.begin() + static_cast<long>(end)));
+        runs.push_back(std::move(r));
+        k = end;
+    }
+    return runs;
+}
+
+size_t run_starting_at(const std::vector<ConfigRun> &runs, size_t item)
+{
+    for (size_t r = 0; r < runs.size(); ++r)
+        if (runs[r].first == item)
+            return r;
+    return runs.size();
+}
+
 } // namespace canopen_plugin

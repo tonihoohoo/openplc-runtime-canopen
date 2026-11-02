@@ -14,7 +14,7 @@ namespace
 {
 
 const char *kValid = R"({
-  "version": 3,
+  "version": 4,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 500000,
     "heartbeat_producer_ms": 100,
@@ -172,7 +172,8 @@ void test_receive_timeout()
 void test_refusals()
 {
     CHECK(refused_with("{", "not valid JSON"));
-    CHECK(refused_with(with(kValid, "\"version\": 3", "\"version\": 2"), "version 2"));
+    CHECK(refused_with(with(kValid, "\"version\": 4", "\"version\": 3"),
+                       "version 3 is not supported (this runtime reads version 4)"));
     CHECK(refused_with(with(kValid, "\"tpdos\": [{\"number\": 1,",
                             "\"tpdos\": [{\"number\": 1, \"receive_timeout_ms\": 70000,"),
                        "receive_timeout_ms"));
@@ -235,6 +236,74 @@ void test_priority()
     CHECK(cfg.networks.size() == 1 && cfg.networks[0].priority == 80);
 }
 
+// A node with three configuration SDOs; item 0 gets `policy`.
+std::string with_policy(const std::string &policy)
+{
+    return with(kValid, "\"sdo\": [{\"index\": 8448, \"subindex\": 0, \"data\": \"78563412\"}]",
+                "\"sdo\": [{\"index\": 8448, \"subindex\": 0, \"data\": \"78563412\"" + policy +
+                    "}, {\"index\": 8448, \"subindex\": 1, \"data\": \"01\"}, "
+                    "{\"index\": 8448, \"subindex\": 2, \"data\": \"02\"}]");
+}
+
+void test_sdo_policies()
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(with_policy(""), cfg, errors));
+    CHECK(cfg.networks[0].nodes[0].sdo[0].on_abort == OnAbort::Stop);
+    CHECK(parse_config(with_policy(", \"on_abort\": \"continue\""), cfg, errors));
+    CHECK(cfg.networks[0].nodes[0].sdo[0].on_abort == OnAbort::Continue);
+    CHECK(parse_config(with_policy(", \"on_abort\": \"jump\", \"jump_to\": 2"), cfg, errors));
+    CHECK(cfg.networks[0].nodes[0].sdo[0].on_abort == OnAbort::Jump);
+    CHECK(cfg.networks[0].nodes[0].sdo[0].jump_to == 2);
+    CHECK(errors.empty());
+
+    CHECK(refused_with(with_policy(", \"on_abort\": \"retry\""), "not one of stop, continue, jump"));
+    CHECK(refused_with(with_policy(", \"on_abort\": \"jump\""), "jump_to"));
+    CHECK(refused_with(with_policy(", \"on_abort\": \"jump\", \"jump_to\": 0"),
+                       "node 2 (io1): SDO 1"));
+    CHECK(refused_with(with_policy(", \"on_abort\": \"jump\", \"jump_to\": 3"), "later item"));
+    CHECK(refused_with(with_policy(", \"jump_to\": 2"), "only for"));
+}
+
+void test_dummy_entries()
+{
+    const std::string gap = "\"location\": \"%QB0\"}, {\"index\": 5, \"subindex\": 0, "
+                            "\"type\": \"UNSIGNED8\"}, {\"index\": 25088, \"subindex\": 2, "
+                            "\"type\": \"UNSIGNED8\", \"location\": \"%QB1\"";
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(with(kValid, "\"location\": \"%QB0\"", gap), cfg, errors));
+    CHECK(errors.empty());
+    const PdoConfig &rpdo = cfg.networks[0].nodes[0].rpdos[0];
+    CHECK(rpdo.entries.size() == 3 && rpdo.entries[1].dummy && !rpdo.entries[0].dummy);
+    CHECK(rpdo.bits() == 24);
+
+    CHECK(refused_with(with(kValid, ", \"location\": \"%QB0\"", ""),
+                       "RPDO 1 entry 1 0x6200:1: has no \"location\""));
+    CHECK(refused_with(with(kValid, "\"location\": \"%QB0\"",
+                            "\"location\": \"%QB0\"}, {\"index\": 6, \"subindex\": 0, "
+                            "\"type\": \"UNSIGNED8\""),
+                       "is a UNSIGNED16"));
+}
+
+void test_send_period()
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(with(kValid, "\"rpdos\": [{\"number\": 1,",
+                            "\"rpdos\": [{\"number\": 1, \"send_period_ms\": 50,"),
+                       cfg, errors));
+    CHECK(cfg.networks[0].nodes[0].rpdos[0].send_period_ms == 50);
+    CHECK(cfg.networks[0].nodes[0].tpdos[0].send_period_ms == 0);
+    CHECK(refused_with(with(kValid, "\"rpdos\": [{\"number\": 1,",
+                            "\"rpdos\": [{\"number\": 1, \"send_period_ms\": 0,"),
+                       "RPDO 1"));
+    CHECK(refused_with(with(kValid, "\"tpdos\": [{\"number\": 1,",
+                            "\"tpdos\": [{\"number\": 1, \"send_period_ms\": 10,"),
+                       "only for a node's RPDOs"));
+}
+
 } // namespace
 
 int main()
@@ -245,6 +314,9 @@ int main()
     test_receive_timeout();
     test_output_overlap_warns();
     test_priority();
+    test_sdo_policies();
+    test_dummy_entries();
+    test_send_period();
     CHECK(is_standard_bitrate(125000) && is_standard_bitrate(1000000));
     CHECK(!is_standard_bitrate(100000) && !is_standard_bitrate(0));
     return TEST_RESULT();

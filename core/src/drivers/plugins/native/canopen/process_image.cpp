@@ -44,17 +44,23 @@ bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout, i
     };
     in_locs_.clear();
     out_locs_.clear();
+    in_used_.clear();
+    out_used_.clear();
     for (const MasterPdo &m : layout.rpdos)
         for (const PdoEntry &e : m.pdo->entries)
         {
-            check(e.location);
+            if (!e.dummy)
+                check(e.location);
             in_locs_.push_back(e.location);
+            in_used_.push_back(e.dummy ? 0 : 1);
         }
     for (const MasterPdo &m : layout.tpdos)
         for (const PdoEntry &e : m.pdo->entries)
         {
-            check(e.location);
+            if (!e.dummy)
+                check(e.location);
             out_locs_.push_back(e.location);
+            out_used_.push_back(e.dummy ? 0 : 1);
         }
     has_state_.clear();
     state_locs_.clear();
@@ -91,7 +97,8 @@ void ProcessImage::copy_to_plc(const plugin_runtime_args_t &rt)
 {
     const uint64_t *in = in_.latest();
     for (size_t i = 0; i < in_locs_.size(); ++i)
-        image_write_input(rt, in_locs_[i], in[i]);
+        if (in_used_[i])
+            image_write_input(rt, in_locs_[i], in[i]);
     for (size_t k = 0; k < has_state_.size(); ++k)
         if (has_state_[k])
             image_write_input(rt, state_locs_[k], in[in_locs_.size() + k]);
@@ -101,7 +108,7 @@ void ProcessImage::copy_from_plc(const plugin_runtime_args_t &rt)
 {
     rt.image_lock();
     for (size_t i = 0; i < out_locs_.size(); ++i)
-        out_work_[i] = image_read_output(rt, out_locs_[i]);
+        out_work_[i] = out_used_[i] ? image_read_output(rt, out_locs_[i]) : 0;
     rt.image_unlock();
     publish(out_, out_work_);
     scans_.fetch_add(1, std::memory_order_acq_rel);

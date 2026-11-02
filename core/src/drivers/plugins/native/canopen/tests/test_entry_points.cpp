@@ -78,7 +78,7 @@ namespace
 
 // A missing interface: the bus threads start and wait for it.
 const char *kConfig = R"({
-  "version": 3,
+  "version": 4,
   "networks": [
     {"name": "a", "interface": "cotest-none0", "bitrate": 0, "heartbeat_producer_ms": 100,
      "sync": {"mode": "plc_cycle"},

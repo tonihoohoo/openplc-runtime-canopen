@@ -7,6 +7,7 @@
 #ifndef CANOPEN_CONFIG_H
 #define CANOPEN_CONFIG_H
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -16,14 +17,16 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 3;
+constexpr int kConfigVersion = 4;
 
-// One object mapped into a PDO, bound to one IEC location.
+// One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
+// location: its bits are skipped on receive and sent as zeros.
 struct PdoEntry
 {
     uint16_t index   = 0;
     uint8_t subindex = 0;
     CoType type      = CoType::UNSIGNED8;
+    bool dummy       = false;
     IecLocation location;
 };
 
@@ -35,8 +38,18 @@ struct PdoConfig
     uint32_t cob_id = 0; // 11-bit COB-ID
     // A node TPDO only: report the PDO late when no frame arrives for this long; 0 for never.
     unsigned receive_timeout_ms = 0;
+    // A node RPDO only: send it again when it has not been sent for this long; 0 for never.
+    unsigned send_period_ms = 0;
     std::vector<PdoEntry> entries;
     unsigned bits() const;
+};
+
+// What the boot does when the node refuses an SDO write.
+enum class OnAbort
+{
+    Stop,     // fail the node's boot
+    Continue, // go on with the next write
+    Jump      // go on with the write at jump_to
 };
 
 // An SDO download sent to the node while it is configured, in list order.
@@ -45,6 +58,8 @@ struct SdoWrite
     uint16_t index   = 0;
     uint8_t subindex = 0;
     std::vector<uint8_t> data; // little-endian value bytes
+    OnAbort on_abort = OnAbort::Stop;
+    size_t jump_to   = 0; // 0-based index of a later write of the same list, for OnAbort::Jump
 };
 
 enum class Supervision

@@ -501,6 +501,17 @@ bool Parser::parse_node(const cJSON *j, const NetworkConfig &net, NodeConfig &no
             SdoWrite w;
             if (parse_sdo(s, where + ": SDO " + std::to_string(++pos), w))
                 node.sdo.push_back(std::move(w));
+            else
+                node.sdo.push_back(SdoWrite()); // keeps jump_to indices aligned
+        }
+        for (size_t k = 0; k < node.sdo.size(); ++k)
+        {
+            const SdoWrite &w = node.sdo[k];
+            if (w.on_abort == OnAbort::Jump && (w.jump_to <= k || w.jump_to >= node.sdo.size()))
+                error(where + ": SDO " + std::to_string(k + 1),
+                      "\"jump_to\" " + std::to_string(w.jump_to) +
+                          " must be a later item of the node's list (" + std::to_string(k + 1) +
+                          " to " + std::to_string(node.sdo.size() - 1) + ")");
         }
     }
     if (!node.configure && !node.sdo.empty())
@@ -561,6 +572,34 @@ bool Parser::parse_sdo(const cJSON *j, const std::string &where, SdoWrite &sdo)
                  "byte first");
         return false;
     }
+    std::string policy;
+    if (get_string(j, "on_abort", w, policy, false) && !policy.empty())
+    {
+        if (policy == "stop")
+            sdo.on_abort = OnAbort::Stop;
+        else if (policy == "continue")
+            sdo.on_abort = OnAbort::Continue;
+        else if (policy == "jump")
+            sdo.on_abort = OnAbort::Jump;
+        else
+        {
+            error(w, "\"on_abort\" \"" + policy + "\" is not one of stop, continue, jump");
+            return false;
+        }
+    }
+    const cJSON *jump = cJSON_GetObjectItemCaseSensitive(j, "jump_to");
+    if (sdo.on_abort == OnAbort::Jump)
+    {
+        uint64_t to = 0;
+        if (!get_uint(j, "jump_to", w, 0, 0xFFFF, to))
+            return false;
+        sdo.jump_to = static_cast<size_t>(to);
+    }
+    else if (jump)
+    {
+        error(w, "\"jump_to\" is only for \"on_abort\": \"jump\"");
+        return false;
+    }
     return true;
 }
 
@@ -594,6 +633,17 @@ bool Parser::parse_pdo(const cJSON *j, const std::string &where, IecArea area, P
     {
         error(w, "\"receive_timeout_ms\" is only for a node's TPDOs");
     }
+    if (area == IecArea::Output)
+    {
+        uint64_t period = 0;
+        if (cJSON_GetObjectItemCaseSensitive(j, "send_period_ms") &&
+            get_uint(j, "send_period_ms", w, 1, 65535, period))
+            pdo.send_period_ms = static_cast<unsigned>(period);
+    }
+    else if (cJSON_GetObjectItemCaseSensitive(j, "send_period_ms"))
+    {
+        error(w, "\"send_period_ms\" is only for a node's RPDOs");
+    }
     const cJSON *entries = get_array(j, "entries", w, true);
     if (entries)
     {
@@ -611,17 +661,34 @@ bool Parser::parse_pdo(const cJSON *j, const std::string &where, IecArea area, P
             std::string type, loc;
             bool ok = get_uint(e, "index", ew, 1, 0xFFFF, index) &
                       get_uint(e, "subindex", ew, 0, 0xFF, sub) &
-                      get_string(e, "type", ew, type, true) &
-                      get_string(e, "location", ew, loc, true);
+                      get_string(e, "type", ew, type, true);
             if (!ok)
                 continue;
             PdoEntry entry;
             entry.index    = static_cast<uint16_t>(index);
             entry.subindex = static_cast<uint8_t>(sub);
             ew += " " + object_text(entry.index, entry.subindex);
+            const bool has_location = cJSON_GetObjectItemCaseSensitive(e, "location") != nullptr;
             std::string why;
             if (!parse_co_type(type, entry.type))
                 error(ew, "type \"" + type + "\" is not supported");
+            else if (!has_location)
+            {
+                CoType dummy_type = CoType::UNSIGNED8;
+                if (!dummy_object_type(entry.index, entry.subindex, dummy_type))
+                    error(ew, "has no \"location\"; only a dummy object (0x0001-0x0007, "
+                              "sub-index 0) may leave it out");
+                else if (dummy_type != entry.type)
+                    error(ew, std::string("dummy object ") + hex(entry.index, 4) + " is a " +
+                                  co_type_name(dummy_type) + ", not a " + type);
+                else
+                {
+                    entry.dummy = true;
+                    pdo.entries.push_back(entry);
+                }
+            }
+            else if (!get_string(e, "location", ew, loc, true))
+                continue;
             else if (!parse_iec_location(loc, entry.location, why))
                 error(ew, "location \"" + loc + "\": " + why);
             else if (entry.location.area != area)
@@ -691,7 +758,8 @@ void Parser::check_locations()
             for (int dir = 0; dir < 2; ++dir)
                 for (const auto &p : dir == 0 ? node.tpdos : node.rpdos)
                     for (const auto &e : p.entries)
-                        uses.push_back({e.location, prefix + (dir == 0 ? " TPDO " : " RPDO ") +
+                        if (!e.dummy)
+                            uses.push_back({e.location, prefix + (dir == 0 ? " TPDO " : " RPDO ") +
                                                         std::to_string(p.number) + " " +
                                                         object_text(e.index, e.subindex)});
         }

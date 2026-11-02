@@ -5,12 +5,14 @@
 //
 //   canopen_sim_slave --interface vcan0 [--node 2] [--steps 5] [--timeout 60]
 //                     [--expect-parameter 0x12345678] [--expect-master-loss 5] [--linger 10]
-//                     [--blocks 1]
+//                     [--blocks 1] [--parameter-read-only 1] [--expect-resends 10]
 //
 // It sets its digital inputs to 1, 2, ... and waits each time until its outputs follow. With
 // --expect-master-loss it then prints "watching the master" and waits up to that many seconds
 // for its master watch (0x1016) to put it in pre-operational. With --linger it stays on the bus
-// that many seconds more, so its status can be read. With --blocks 1 it then reads commands for
+// that many seconds more, so its status can be read. With --parameter-read-only 1 it refuses
+// writes to 0x2100. With --expect-resends N it then needs at least N writes of its unchanged
+// outputs within 2 s, sent by the master for an RPDO deadline. With --blocks 1 it then reads commands for
 // the PLC function block test program from stdin, one per line:
 //   run <n>   sets its inputs to 0x40 + n, sends an emergency 0x5000 every 500 ms and waits up to
 //             60 s for the program to write 0xC0DE0000 + n * 0x1000 + 0x1FF to 0x2100; prints
@@ -114,6 +116,7 @@ int main(int argc, char **argv)
     int master_loss_s   = 0;
     int linger_s        = 0;
     bool blocks         = false;
+    int resends         = 0;
     for (int i = 1; i + 1 < argc; i += 2)
     {
         std::string opt = argv[i];
@@ -130,6 +133,10 @@ int main(int argc, char **argv)
             linger_s = std::atoi(val);
         else if (opt == "--blocks")
             blocks = std::atoi(val) != 0;
+        else if (opt == "--parameter-read-only")
+            spec.parameter_read_only = std::atoi(val) != 0;
+        else if (opt == "--expect-resends")
+            resends = std::atoi(val);
         else if (opt == "--expect-master-loss")
             master_loss_s = std::atoi(val);
         else if (opt == "--expect-parameter")
@@ -176,6 +183,20 @@ int main(int argc, char **argv)
     {
         std::printf("FAIL: parameter 0x%08X, expected 0x%08lX\n", slave.parameter(), param);
         return 1;
+    }
+    if (resends > 0)
+    {
+        const unsigned before = slave.output_writes();
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        const unsigned got = slave.output_writes() - before;
+        if (got < static_cast<unsigned>(resends))
+        {
+            std::printf("FAIL: %u writes of the unchanged outputs in 2 s, expected %d\n", got,
+                        resends);
+            return 1;
+        }
+        std::printf("unchanged outputs written %u times in 2 s\n", got);
+        std::fflush(stdout);
     }
     if (master_loss_s > 0)
     {
