@@ -13,7 +13,7 @@
 > Releases: [GitHub Releases](https://github.com/tonihoohoo/openplc-runtime-canopen/releases) and
 > `ghcr.io/tonihoohoo/openplc-runtime`. Install and use: [docs/CANOPEN.md](docs/CANOPEN.md).
 
-OpenPLC Runtime v4 is a headless industrial Programmable Logic Controller (PLC) runtime that can run IEC 61131-3 programs on standard computing hardware. It is designed to be controlled by the [OpenPLC Editor v4](https://github.com/Autonomy-Logic/openplc-editor) desktop application via a REST API or via the [Autonomy Edge Cloud](https://autonomy-edge.com)
+OpenPLC Runtime v4 is a headless industrial Programmable Logic Controller (PLC) runtime that can run IEC 61131-3 programs on standard computing hardware. It is designed to be controlled by the [OpenPLC Editor v4](https://github.com/tonihoohoo/openplc-editor-canopen) (CANopen edition) desktop application via a REST API or via the [Autonomy Edge Cloud](https://autonomy-edge.com)
 
 ## OpenPLC Runtime Components
 
@@ -31,7 +31,7 @@ The runtime executes programs created in the OpenPLC Editor, supporting IEC 6113
 The fastest way to get started:
 
 ```bash
-docker pull ghcr.io/autonomy-logic/openplc-runtime:latest
+docker pull ghcr.io/tonihoohoo/openplc-runtime:latest
 
 docker run -d \
   --name openplc-runtime \
@@ -39,27 +39,28 @@ docker run -d \
   --cap-add=SYS_NICE \
   --cap-add=SYS_RESOURCE \
   -v openplc-runtime-data:/var/run/runtime \
-  ghcr.io/autonomy-logic/openplc-runtime:latest
+  ghcr.io/tonihoohoo/openplc-runtime:latest
 ```
 
 The runtime will start and listen on port 8443 for connections from the OpenPLC Editor. **Do not open https://localhost:8443 in a browser** - there is no web interface there as there was on the v3 runtime. Instead, open the OpenPLC Editor desktop application and configure the runtime IP address and credentials to connect.
 
-**Prebuilt Binaries:** amd64, arm64, armv7
+**Prebuilt images:** amd64, arm64
+
+The container above has no access to the host's CAN interfaces. For CANopen, install with the
+Docker installer below, which runs the runtime privileged on the host network (see
+[docs/CANOPEN.md](docs/CANOPEN.md)).
 
 ### Linux Installation
 
 #### Install (recommended)
 
 ```bash
-curl -fsSL https://runtime.getedge.me | sudo bash
+curl -fsSL https://raw.githubusercontent.com/tonihoohoo/openplc-runtime-canopen/canopen/scripts/install-docker.sh \
+  | sudo RUNTIME_REPOSITORY=ghcr.io/tonihoohoo/openplc-runtime bash
 ```
 
-`runtime.getedge.me` serves `scripts/install-docker.sh` verbatim. Until that
-host is published, the same one-liner works against GitHub directly:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Autonomy-Logic/openplc-runtime/main/scripts/install-docker.sh | sudo bash
-```
+`RUNTIME_REPOSITORY` points the installer at this fork's image; without it the installer installs
+the upstream runtime, which has no CANopen. Add `-s -- --runtime-version <tag>` to pin a release.
 
 No checkout, no build toolchain, no dependencies to install first. The script
 installs Docker if it is missing, then starts the runtime and a small
@@ -74,7 +75,8 @@ project carry over.
 To remove it again:
 
 ```bash
-curl -fsSL https://runtime.getedge.me | sudo bash -s -- --uninstall --yes
+curl -fsSL https://raw.githubusercontent.com/tonihoohoo/openplc-runtime-canopen/canopen/scripts/install-docker.sh \
+  | sudo bash -s -- --uninstall --yes
 ```
 
 That removes the containers and images, puts back any systemd runtime it
@@ -87,9 +89,9 @@ For a native build -- MSYS2, or a target that cannot run containers:
 
 ```bash
 # Clone repository
-git clone https://github.com/Autonomy-Logic/openplc-runtime.git
-cd openplc-runtime
-git checkout development
+git clone https://github.com/tonihoohoo/openplc-runtime-canopen.git
+cd openplc-runtime-canopen
+git checkout canopen
 
 # Install dependencies and compile
 sudo ./install.sh --native
@@ -132,7 +134,7 @@ The runtime compiles uploaded programs into shared libraries and loads them dyna
 - **WebSocket Debug Interface** - Real-time variable inspection and forcing via Editor
 - **Plugin System** - Extensible I/O drivers for various hardware platforms
 - **Multi-Architecture** - Prebuilt binaries for x86_64, ARM64, and ARM32 platforms. Can run on virtually anything that can run Linux 
-- **Docker Support** - Official multi-arch container images
+- **Docker Support** - Multi-arch container images
 - **Security** - TLS encryption, JWT authentication, comprehensive file upload validation
 
 ## Architecture
@@ -227,14 +229,14 @@ socket.on('debug_response', (response) => {
 
 ```bash
 # Pull image
-docker pull ghcr.io/autonomy-logic/openplc-runtime:latest
+docker pull ghcr.io/tonihoohoo/openplc-runtime:latest
 
 # Run with persistent storage
 docker run -d \
   --name openplc-runtime \
   -p 8443:8443 \
   -v openplc-runtime-data:/var/run/runtime \
-  ghcr.io/autonomy-logic/openplc-runtime:latest
+  ghcr.io/tonihoohoo/openplc-runtime:latest
 
 # View logs
 docker logs -f openplc-runtime
@@ -252,7 +254,7 @@ version: '3.8'
 
 services:
   openplc-runtime:
-    image: ghcr.io/autonomy-logic/openplc-runtime:latest
+    image: ghcr.io/tonihoohoo/openplc-runtime:latest
     container_name: openplc-runtime
     ports:
       - "8443:8443"
@@ -288,9 +290,9 @@ sudo dnf install gcc gcc-c++ make cmake \
 
 ```bash
 # Clone repository
-git clone https://github.com/Autonomy-Logic/openplc-runtime.git
-cd openplc-runtime
-git checkout development
+git clone https://github.com/tonihoohoo/openplc-runtime-canopen.git
+cd openplc-runtime-canopen
+git checkout canopen
 
 # Run installation script
 sudo ./install.sh
@@ -442,9 +444,9 @@ ls -la /run/runtime/
 ### Setup Development Environment
 
 ```bash
-git clone https://github.com/Autonomy-Logic/openplc-runtime.git
-cd openplc-runtime
-git checkout development
+git clone https://github.com/tonihoohoo/openplc-runtime-canopen.git
+cd openplc-runtime-canopen
+git checkout canopen
 sudo ./install.sh
 ```
 
@@ -529,19 +531,23 @@ For deterministic real-time performance:
 
 ## License
 
-See LICENSE file for details.
+See LICENSE file for details. The CANopen plugin (`core/src/drivers/plugins/native/canopen/`) is
+Apache-2.0, see its own LICENSE file; it links Lely CANopen, also Apache-2.0.
 
 ## Support
 
-- **Issues:** https://github.com/Autonomy-Logic/openplc-runtime/issues
+- **Issues (this fork):** https://github.com/tonihoohoo/openplc-runtime-canopen/issues
 - **Documentation:** See `docs/` directory
-- **OpenPLC Editor:** https://github.com/Autonomy-Logic/openplc-editor
+- **OpenPLC Editor (CANopen edition):** https://github.com/tonihoohoo/openplc-editor-canopen
 
 ## Related Projects
 
-- [OpenPLC Editor v4](https://github.com/Autonomy-Logic/openplc-editor) - PLC programming environment
+- [OpenPLC Editor (CANopen edition)](https://github.com/tonihoohoo/openplc-editor-canopen) - PLC programming environment with the CANopen device type
+- [OpenPLC Runtime](https://github.com/Autonomy-Logic/openplc-runtime) - Upstream runtime this fork is based on
 - [OpenPLC v3](https://github.com/thiagoralves/OpenPLC_v3) - Previous version
 
 ## Acknowledgments
 
-OpenPLC Runtime v4 is developed and maintained by Autonomy Logic.
+OpenPLC Runtime v4 is developed and maintained by Autonomy Logic. The CANopen edition is an
+independent fork and is not affiliated with or endorsed by Autonomy Logic. CANopen is a registered trademark
+of CAN in Automation e.V.
