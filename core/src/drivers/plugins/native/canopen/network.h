@@ -140,6 +140,7 @@ class Network : public lely::canopen::BasicMaster
         bool held            = false; // lost and stopped until the next PLC start
         bool has_abort       = false; // a configuration SDO was refused in this boot
         bool manual          = false; // stopped or pre-operational by a client
+        bool seen_stopped    = false; // its last reported NMT state is stopped
         clock::time_point up_since{}; // when the node last came up
         Problem abort;
         uint8_t state      = 0;
@@ -162,6 +163,8 @@ class Network : public lely::canopen::BasicMaster
     void SendTime();
     // Sends NMT stop to a node held by on_node_error stop, from the executor.
     void StopHeld(uint8_t id);
+    // A stopped node answers no SDO: sends it NMT pre-operational before a boot or a poll.
+    void WakeStopped(NodeState &node, uint8_t id);
     void HandleLoss(uint8_t id, ProblemKind why);
     void HandleState(uint8_t id, lely::canopen::NmtState st);
     void HandleRpdo(int num, const uint8_t *data, std::size_t n);

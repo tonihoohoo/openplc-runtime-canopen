@@ -1627,6 +1627,27 @@ int main()
         std::chrono::seconds(10)));
     CHECK(node_status(status, 2).losses == 2);
 
+    // A node that stops itself answers no SDO: the master sends it NMT pre-operational before it
+    // boots it again.
+    scan_until(image, rt, [] { return false; }, std::chrono::milliseconds(400));
+    send_frame(vbus, wire, 0x000, {0x02, 2});
+    CHECK(scan_until(
+        image, rt,
+        [&status]
+        {
+            NodeStatus n = node_status(status, 2);
+            return n.state == NodeRun::Lost && n.problem.kind == ProblemKind::State;
+        },
+        std::chrono::seconds(2)));
+    CHECK(scan_until(
+        image, rt,
+        [&status, node] {
+            return node_status(status, 2).state == NodeRun::Operational &&
+                   node->last_command() == 1;
+        },
+        std::chrono::seconds(10)));
+    CHECK(node_status(status, 2).losses == 3);
+
     // The configured node that is not on the bus is reported once; the others are not.
     CHECK(scan_until(
         image, rt, [] { return warnings_with("node 9 (absent) has not answered") > 0; },

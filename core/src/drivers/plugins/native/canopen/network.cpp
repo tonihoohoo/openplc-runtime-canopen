@@ -556,6 +556,20 @@ void Network::HandleLoss(uint8_t id, ProblemKind kind)
     StopHeld(id);
 }
 
+void Network::WakeStopped(NodeState &node, uint8_t id)
+{
+    if (!node.seen_stopped)
+        return;
+    try
+    {
+        Command(NmtCommand::ENTER_PREOP, id);
+    }
+    catch (const std::exception &e)
+    {
+        log_warn("%s: cannot send NMT pre-operational: %s", node.cfg->label().c_str(), e.what());
+    }
+}
+
 void Network::StopHeld(uint8_t id)
 {
     Defer(
@@ -577,7 +591,8 @@ void Network::HandleState(uint8_t id, NmtState st)
     NodeState *n = Find(id);
     if (!n)
         return;
-    n->heard = true;
+    n->heard        = true;
+    n->seen_stopped = st == NmtState::STOP;
     switch (st)
     {
     case NmtState::BOOTUP:
@@ -881,11 +896,15 @@ void Network::OnTick()
             // Also a node heard only by its heartbeat: it missed the NMT reset (frames lost) and
             // sends no boot-up, so nothing else boots it.
             if (!n.polling && now >= n.next_poll)
+            {
+                WakeStopped(n, static_cast<uint8_t>(it.first));
                 Poll(n, static_cast<uint8_t>(it.first));
+            }
             continue;
         }
         if (now < n.retry_at)
             continue;
+        WakeStopped(n, static_cast<uint8_t>(it.first));
         if (Boot(static_cast<uint8_t>(it.first)))
         {
             n.retry_pending = false;
