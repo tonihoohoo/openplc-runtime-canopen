@@ -1287,6 +1287,35 @@ void check_plc_blocks(std::shared_ptr<lely::io::VirtualCanController> vbus, cons
 
 // A session that cannot start (here a missing master DCF) is retried every second and logged once;
 // its nodes wait meanwhile.
+// With no session (one that failed), every node reads down: state 0, and the inputs of a node set
+// to zero on loss are zeroed while those of a node that holds keep their value.
+void check_mark_all_down(const plugin_runtime_args_t &rt)
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(kConfig, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    // io1 holds (%IB0, %IW0), timed zeroes (%IB2).
+    for (size_t i = 0; i < layout.input_entries; ++i)
+        image.set_input(i, 0x55);
+    for (size_t slot = 0; slot < net.nodes.size(); ++slot)
+        image.set_node_state(slot, 5);
+    image.commit();
+    std::memset(g_byte_in, 0, sizeof g_byte_in);
+    image.copy_to_plc(rt);
+    CHECK(g_byte_in[0] == 0x55 && g_byte_in[2] == 0x55 && g_byte_in[10] == 5);
+    image.mark_all_down(net, layout);
+    image.copy_to_plc(rt);
+    CHECK(g_byte_in[0] == 0x55 && g_int_in[0] == 0x55);
+    CHECK(g_byte_in[2] == 0);
+    CHECK(g_byte_in[10] == 0 && g_byte_in[11] == 0 && g_byte_in[12] == 0);
+}
+
 void check_session_failure(std::shared_ptr<lely::io::VirtualCanController> vbus,
                            const std::string &wire, const std::string &dir)
 {
@@ -1793,6 +1822,7 @@ int main()
     check_plc_blocks(vbus, wire, dir, rt);
     check_boot_options(vbus, wire, dir, rt);
     check_session_failure(vbus, wire, dir);
+    check_mark_all_down(rt);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }

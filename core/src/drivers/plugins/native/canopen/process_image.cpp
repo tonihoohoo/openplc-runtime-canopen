@@ -86,6 +86,24 @@ bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout, i
     return errors.size() == failed;
 }
 
+void ProcessImage::mark_all_down(const NetworkConfig &net, const MasterLayout &layout)
+{
+    for (size_t slot = 0; slot < net.nodes.size() && in_locs_.size() + slot < in_work_.size();
+         ++slot)
+        set_node_state(slot, 0);
+    for (const MasterPdo &m : layout.rpdos)
+    {
+        bool zero = false;
+        for (const NodeConfig &n : net.nodes)
+            zero = zero || (n.node_id == m.node_id && n.on_loss == OnLoss::Zero);
+        if (!zero)
+            continue;
+        for (size_t k = 0; k < m.pdo->entries.size() && m.first_entry + k < in_locs_.size(); ++k)
+            set_input(m.first_entry + k, 0);
+    }
+    commit();
+}
+
 void ProcessImage::publish(TripleBuffer &buf, const std::vector<uint64_t> &work)
 {
     if (!work.empty())
