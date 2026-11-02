@@ -457,9 +457,8 @@ void Bus::run_session()
     {
         session_net_ = nullptr;
         set_sessions_running(false);
-        for (size_t slot = 0; slot < net_.nodes.size(); ++slot)
-            image_.set_node_state(slot, 0);
-        image_.commit();
+        // As at the end of a session: no node is up, and inputs follow each node's on_loss.
+        image_.mark_all_down(net_, layout_);
         status_.begin_session();
         // Retried every second: the same failure is logged once.
         if (session_failure_ != e.what())

@@ -62,6 +62,9 @@ class ProcessImage
     {
         publish(in_, in_work_);
     }
+    // Every node down without a session: state 0, inputs of nodes set to zero on loss zeroed,
+    // then published. `net` and `layout` are the ones build() was given.
+    void mark_all_down(const NetworkConfig &net, const MasterLayout &layout);
     const uint64_t *latest_outputs(bool *fresh = nullptr)
     {
         return out_.latest(fresh);

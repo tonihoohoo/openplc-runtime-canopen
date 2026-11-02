@@ -52,6 +52,8 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
   (`on_node_error: restart`), or sent NMT stop and left alone until the next PLC start
   (`on_node_error: stop`); a new bus session in the same PLC run (after a lost link) stops it again
   when it boots.
+  A lost link, or a bus session that fails with an error and is retried, takes every node down in
+  the same way.
 - **Node state.** `state_location` (a `%IB`) reads the node's NMT state (CiA 301: 5 operational,
   127 pre-operational, 4 stopped) while it is up, and 0 while it is not.
 - **Receive timeout.** A TPDO with `receive_timeout_ms` is late when no frame of it arrives for that
