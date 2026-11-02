@@ -46,7 +46,8 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
   by SDOs in `sdo`). Node guarding needs a CAN controller and driver that handle remote frames; use
   heartbeat when the node has it. A timeout, a boot-up message from a running node, or a running
   node that reports pre-operational or stopped without a command from the master or a client
-  (another device's NMT command, for example), means the node is lost: its state reads 0, its inputs hold their last values (`on_loss: hold`) or go to 0
+  (another device's NMT command, for example), means the node is lost (a stopped node is sent NMT
+  pre-operational before it is booted again, since it answers no SDO): its state reads 0, its inputs hold their last values (`on_loss: hold`) or go to 0
   (`on_loss: zero`), its outputs are no longer sent, and it is booted again
   (`on_node_error: restart`), or sent NMT stop and left alone until the next PLC start
   (`on_node_error: stop`); a new bus session in the same PLC run (after a lost link) stops it again
