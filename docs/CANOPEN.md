@@ -441,7 +441,8 @@ follow, so it checks a PLC program that copies one to the other.
 
 The CI workflow `.github/workflows/canopen.yml` runs these tests, the SocketCAN variant on a vcan
 link, and an end-to-end check: it installs the runtime from source, builds the OpenPLC Editor fork
-(the branch with this branch's name, else `canopen`), uploads its `e2e/fixtures/canopen-generic-io`
+(the branch with this branch's name, else `canopen`; without minification, source maps or module
+concatenation, which takes about a minute), uploads its `e2e/fixtures/canopen-generic-io`
 project with the editor's command line, and runs the simulated module against it on `vcan0`.
 It then uploads `e2e/fixtures/canopen-plc-blocks`, a program that calls every function block
 against the simulated module, and `.github/scripts/canopen_blocks_e2e.py` asks it for runs of its
