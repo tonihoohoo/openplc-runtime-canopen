@@ -130,6 +130,10 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 }
 ```
 
+The whole file is refused when any value is outside its range. The editor holds a copy of these
+ranges (`runtime-ranges.test.ts` in its CANopen tests) and refuses the same values before a build;
+change both together.
+
 | Field | Meaning |
 |---|---|
 | `version` | Format version, 4. Older files are refused; build the project again with a matching editor. |
@@ -285,8 +289,10 @@ read and write a node's objects, send NMT commands and read node states and emer
 runs. The editor's CANopen documentation describes the blocks; this is what the plugin does for them.
 
 - The plugin exports `canopen_plc_api(version)`, a table of C functions (`plc_api.h`, version 1).
-  The blocks find the loaded plugin by its SONAME `libcanopen_plugin.so` and keep nothing between
-  calls, since the runtime loads the plugin again at each PLC start while the program stays loaded.
+  The blocks find the loaded plugin by its SONAME `libcanopen_plugin.so`. The plugin is linked with
+  `-z nodelete`, so the runtime's reload at each PLC start never unmaps it, and the table's `flags`
+  say so (`CANOPEN_PLC_FLAG_PERMANENT`): the blocks then look the table up once and keep it. Without
+  that flag (an older plugin) they look it up on each call.
 - Nothing a block calls waits, locks or allocates. An SDO or NMT request goes into one of 16 slots
   of its network; the network's bus thread takes the oldest, one transfer at a time, taking turns
   with the online tools' requests, which have their own queue. A request with a timeout of 0 uses
@@ -433,7 +439,7 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
 | `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, a running node that missed the master's reset, emergencies, late PDOs, the status and its socket, the online tools (SDO reads and writes, a refused write,
 pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
-| `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, and old handles across PLC runs and reloads. |
+| `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, and a kept table that stays the same across reloads. |
 | `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states and the emergency ring, with no allocation on the scan's side. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 

@@ -5,6 +5,7 @@
 
 #include "can_link.h"
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -193,8 +194,8 @@ int transact(NlRequest &req, LinkInfo *info)
         return -errno;
     sockaddr_nl addr{};
     addr.nl_family      = AF_NETLINK;
-    static unsigned seq = 0;
-    req.nh()->nlmsg_seq = ++seq;
+    static std::atomic<unsigned> seq{0};
+    req.nh()->nlmsg_seq = seq.fetch_add(1, std::memory_order_relaxed) + 1;
     if (sendto(s.fd(), req.buf, req.nh()->nlmsg_len, 0, reinterpret_cast<sockaddr *>(&addr),
                sizeof(addr)) < 0)
         return -errno;

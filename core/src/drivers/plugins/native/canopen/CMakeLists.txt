@@ -116,6 +116,8 @@ set_target_properties(canopen_plugin PROPERTIES
 )
 # The function block library finds the loaded plugin by this name (plc_api.h).
 target_link_options(canopen_plugin PRIVATE "-Wl,-soname,libcanopen_plugin.so")
+# Never unmapped, so the blocks may keep the table across PLC runs (CANOPEN_PLC_FLAG_PERMANENT).
+target_link_options(canopen_plugin PRIVATE "-Wl,-z,nodelete")
 
 # Licence texts of the plugin and of the statically linked Lely, kept with the build.
 set(CANOPEN_LICENSE_DIR ${CMAKE_BINARY_DIR}/licenses)

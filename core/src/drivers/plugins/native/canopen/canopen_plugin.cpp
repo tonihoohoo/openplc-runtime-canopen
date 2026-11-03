@@ -12,6 +12,8 @@
 //   stop_loop:   sends each network's NMT command for a PLC stop and joins the bus threads
 //   cleanup:     closes service mode and the socket
 //   canopen_plc_api: the table the canopen function block library calls (plc_api.h)
+// The library is linked with -z nodelete, so it is never unmapped and its table stays valid for
+// the blocks; its globals live across a cleanup and a new init.
 // While the PLC is stopped, a client of the socket can open one network in service mode with the
 // settings it sends; it closes on request, at a PLC start, at cleanup and after kServiceIdle.
 // No exception leaves an entry point: the runtime calls them as C functions.
@@ -508,6 +510,7 @@ const canopen_plc_api_v1 kPlcApiV1 = {
     plc_local_node_id,
     plc_emcy_cursor,
     plc_emcy_next,
+    CANOPEN_PLC_FLAG_PERMANENT,
 };
 
 void report(const char *where, const char *what)
@@ -625,4 +628,5 @@ CANOPEN_EXPORT void cleanup(void)
     }
     stop_loop();
     set_log_sink(nullptr);
+    g_have_args = false;
 }

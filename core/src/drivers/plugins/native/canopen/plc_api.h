@@ -2,10 +2,11 @@
 //
 // plc_api.h - the C interface the canopen function block library calls from the PLC program.
 // The blocks find canopen_plc_api() in the loaded plugin (dlopen of the SONAME with RTLD_NOLOAD,
-// then dlsym) and keep nothing between calls, because the runtime loads the plugin again at each
-// PLC start while the program stays loaded; a handle from an earlier PLC run is answered as
-// ended by the restart. Every function returns at once and is safe to call
-// from the PLC scan: no allocation, no lock, no logging. Later versions only append to the table.
+// then dlsym). The runtime closes and opens the plugin again across PLC stops while the program
+// stays loaded, so the blocks keep the table only when its flags say it stays valid; otherwise they
+// look it up on each call. A handle from an earlier PLC run is answered as ended by the restart.
+// Every function returns at once and is safe to call from the PLC scan: no allocation, no lock,
+// no logging. Later versions only append to the table; `size` tells which fields are present.
 // The block library carries a copy of these declarations; keep both in step.
 
 #ifndef CANOPEN_PLC_API_H
@@ -15,6 +16,10 @@
 
 #define CANOPEN_PLC_API_VERSION 1u
 #define CANOPEN_PLC_MAX_DATA 256u
+
+// canopen_plc_api_v1.flags: the library is never unmapped, so the table and its functions stay
+// valid for the life of the process, across PLC stops, starts and reloads of the plugin.
+#define CANOPEN_PLC_FLAG_PERMANENT 0x1u
 
 // CANOPEN_KERNEL_ERROR of the block library, in its order.
 enum canopen_plc_error
@@ -121,6 +126,8 @@ typedef struct canopen_plc_api_v1
     // with `cursor` moved past it; 0 when there is none; a negative canopen_plc_error on a
     // failure.
     int (*emcy_next)(uint8_t network, uint8_t node, uint64_t *cursor, canopen_plc_emcy *out);
+    // CANOPEN_PLC_FLAG_*; present when `size` covers it.
+    uint32_t flags;
 } canopen_plc_api_v1;
 
 #ifdef __cplusplus
