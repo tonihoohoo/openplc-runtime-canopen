@@ -10,6 +10,7 @@ permissions:
 jobs:
   cla:
     name: CLA
+    if: github.repository == 'Autonomy-Logic/openplc-runtime'
     runs-on: ubuntu-latest
     steps:
       - name: Check the Contributor License Agreement checkbox
