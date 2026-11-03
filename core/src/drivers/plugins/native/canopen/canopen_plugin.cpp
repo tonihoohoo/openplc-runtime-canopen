@@ -10,7 +10,8 @@
 //   cycle_start: writes the newest inputs to %I through the journal
 //   cycle_end:   reads %Q under the image lock and hands it to the bus threads
 //   stop_loop:   sends each network's NMT command for a PLC stop and joins the bus threads
-//   cleanup:     closes service mode and the socket
+//   cleanup:     closes service mode; runs at every PLC stop, so the socket stays open for service
+//                mode while the PLC is stopped
 //   canopen_plc_api: the table the canopen function block library calls (plc_api.h)
 // The library is linked with -z nodelete, so it is never unmapped and its table stays valid for
 // the blocks; its globals live across a cleanup and a new init.
@@ -680,15 +681,10 @@ CANOPEN_EXPORT void cleanup(void)
 {
     try
     {
-        if (g_server)
-            g_server->stop();
-        g_server.reset();
         close_service("cleanup");
     }
     catch (...)
     {
     }
     stop_loop();
-    set_log_sink(nullptr);
-    g_have_args = false;
 }

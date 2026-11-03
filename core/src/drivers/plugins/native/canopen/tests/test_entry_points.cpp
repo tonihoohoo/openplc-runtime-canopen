@@ -3,7 +3,8 @@
 // The plugin's C entry points with an allocation failure injected at each point of start_loop: no
 // exception leaves them, a failed start leaves no network running and a later start works. Also:
 // service mode is refused while a start is under way (needs the plugin's socket; skipped without).
-// Also: with per-table sizes from the runtime, each location is checked against its own table.
+// Also: service mode opens after a cleanup, and with per-table sizes from the runtime each
+// location is checked against its own table.
 
 #include <cstdarg>
 #include <cstdio>
@@ -29,6 +30,7 @@ extern "C" int start_loop(void);
 extern "C" void stop_loop(void);
 extern "C" void cycle_start(void);
 extern "C" void cycle_end(void);
+extern "C" void cleanup(void);
 extern "C" int set_image_sizes(const uint32_t *sizes, uint32_t count);
 
 namespace
@@ -266,6 +268,12 @@ int main()
         CHECK(!after.empty() && after.find("plc_running") == std::string::npos);
         ask(R"({"op":"service_close"})");
         std::remove(fifo.c_str());
+
+        // The runtime cleans plugins up at every PLC stop: service mode still opens after it.
+        cleanup();
+        const std::string stopped = ask(kServiceOpen);
+        CHECK(!stopped.empty() && stopped.find("plc_running") == std::string::npos);
+        ask(R"({"op":"service_close"})");
     }
     // Per-table sizes: %QB0 needs a byte_output table, %IB0 and %IB1 a byte_input of two.
     std::snprintf(rt.plugin_specific_config_file_path, sizeof(rt.plugin_specific_config_file_path),
