@@ -540,8 +540,9 @@ If you are using OpenPLC Runtime in a commercial setting, you may need a commerc
 
 See [LICENSING.md](LICENSING.md) for the details and how to obtain a commercial licence. Contributions require agreeing to the [Contributor License Agreement](CLA.md) by ticking its checkbox on the pull request; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-See LICENSE file for details. The CANopen plugin (`core/src/drivers/plugins/native/canopen/`) is
-Apache-2.0, see its own LICENSE file; it links Lely CANopen, also Apache-2.0.
+The CANopen plugin's sources (`core/src/drivers/plugins/native/canopen/`) are Apache-2.0, see its
+own LICENSE file. The plugin links Lely CANopen, also Apache-2.0, and the runtime's GPL-3.0-only
+`plugin_image_sizes.c`.
 
 ## Support
 

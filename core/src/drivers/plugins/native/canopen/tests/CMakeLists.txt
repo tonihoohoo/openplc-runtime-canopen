@@ -14,7 +14,8 @@ endforeach()
 set_tests_properties(test_network PROPERTIES TIMEOUT 120)
 
 add_executable(test_entry_points ${CMAKE_CURRENT_SOURCE_DIR}/test_entry_points.cpp
-                                 ${CMAKE_CURRENT_SOURCE_DIR}/../canopen_plugin.cpp)
+                                 ${CMAKE_CURRENT_SOURCE_DIR}/../canopen_plugin.cpp
+                                 ${OPENPLC_ROOT}/core/src/drivers/plugins/native/plugin_image_sizes.c)
 target_compile_options(test_entry_points PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(test_entry_points PRIVATE canopen_core)
 add_test(NAME test_entry_points COMMAND test_entry_points)

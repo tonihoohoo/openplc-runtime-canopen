@@ -3,6 +3,7 @@
 // The plugin's C entry points with an allocation failure injected at each point of start_loop: no
 // exception leaves them, a failed start leaves no network running and a later start works. Also:
 // service mode is refused while a start is under way (needs the plugin's socket; skipped without).
+// Also: with per-table sizes from the runtime, each location is checked against its own table.
 
 #include <cstdarg>
 #include <cstdio>
@@ -19,6 +20,7 @@
 #include <unistd.h>
 
 #include "check.h"
+#include "plugin_image_sizes.h"
 #include "plugin_types.h"
 #include "status_server.h"
 
@@ -27,6 +29,7 @@ extern "C" int start_loop(void);
 extern "C" void stop_loop(void);
 extern "C" void cycle_start(void);
 extern "C" void cycle_end(void);
+extern "C" int set_image_sizes(const uint32_t *sizes, uint32_t count);
 
 namespace
 {
@@ -124,6 +127,7 @@ void lock() {}
 void unlock() {}
 
 int g_not_running = 0;
+int g_outside     = 0;
 
 void log_quiet(const char *, ...) {}
 
@@ -136,6 +140,8 @@ void log_error(const char *fmt, ...)
     va_end(ap);
     if (std::strstr(buf, "the CANopen master does not run"))
         ++g_not_running;
+    if (std::strstr(buf, "lies outside the runtime's I/O image"))
+        ++g_outside;
 }
 
 // One request over the plugin's socket, without the newline; "" when there is no socket.
@@ -261,6 +267,39 @@ int main()
         ask(R"({"op":"service_close"})");
         std::remove(fifo.c_str());
     }
+    // Per-table sizes: %QB0 needs a byte_output table, %IB0 and %IB1 a byte_input of two.
+    std::snprintf(rt.plugin_specific_config_file_path, sizeof(rt.plugin_specific_config_file_path),
+                  "%s", conf.c_str());
+    uint32_t sizes[IMAGE_TABLE_COUNT];
+    for (uint32_t &n : sizes)
+        n = kSize;
+    sizes[IMAGE_TABLE_BYTE_OUTPUT] = 0;
+    CHECK(set_image_sizes(sizes, IMAGE_TABLE_COUNT) == 0);
+    CHECK(init(&rt) == 0);
+    g_outside = 0;
+    CHECK(start_loop() != 0);
+    CHECK(g_outside == 1);
+    stop_loop();
+
+    sizes[IMAGE_TABLE_BYTE_OUTPUT] = 1;
+    sizes[IMAGE_TABLE_BYTE_INPUT]  = 1;
+    CHECK(set_image_sizes(sizes, IMAGE_TABLE_COUNT) == 0);
+    CHECK(init(&rt) == 0);
+    g_outside = 0;
+    CHECK(start_loop() != 0);
+    CHECK(g_outside == 1); // %IB1
+    stop_loop();
+
+    // A buffer_size of 0 does not matter once the tables are known.
+    sizes[IMAGE_TABLE_BYTE_INPUT] = 2;
+    CHECK(set_image_sizes(sizes, IMAGE_TABLE_COUNT) == 0);
+    rt.buffer_size = 0;
+    CHECK(init(&rt) == 0);
+    g_outside = 0;
+    CHECK(start_loop() == 0);
+    CHECK(g_outside == 0);
+    stop_loop();
+
     std::remove(conf.c_str());
     for (int i = 0; i < 2; ++i)
         std::remove((std::string(dir) + "/canopen_master_" + std::to_string(i) + ".dcf").c_str());

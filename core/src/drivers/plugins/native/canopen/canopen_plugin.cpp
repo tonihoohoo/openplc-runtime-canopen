@@ -33,6 +33,7 @@
 #include "master_dcf.h"
 #include "plc_api.h"
 #include "plc_port.h"
+#include "plugin_image_sizes.h"
 #include "plugin_types.h"
 #include "process_image.h"
 #include "requests.h"
@@ -147,7 +148,7 @@ std::string open_service(const ServiceRequest &req)
     run->layouts.push_back(master_layout(cfg));
     std::vector<std::string> errors;
     std::unique_ptr<ProcessImage> image(new ProcessImage);
-    if (!image->build(cfg, run->layouts.front(), 0, errors))
+    if (!image->build(cfg, run->layouts.front(), ImageSizes(), errors))
         return "error";
     run->images.push_back(std::move(image));
     std::string dir =
@@ -298,6 +299,28 @@ struct StartingGuard
     }
 };
 
+// The runtime's table lengths: per table when it sent them (set_image_sizes), else its one
+// buffer_size for every table.
+ImageSizes runtime_image_sizes()
+{
+    if (!plugin_image_sizes_known())
+        return ImageSizes::uniform(g_args.buffer_size);
+    static const image_table_id_t kInput[5]  = {IMAGE_TABLE_BOOL_INPUT, IMAGE_TABLE_BYTE_INPUT,
+                                                IMAGE_TABLE_INT_INPUT, IMAGE_TABLE_DINT_INPUT,
+                                                IMAGE_TABLE_LINT_INPUT};
+    static const image_table_id_t kOutput[5] = {IMAGE_TABLE_BOOL_OUTPUT, IMAGE_TABLE_BYTE_OUTPUT,
+                                                IMAGE_TABLE_INT_OUTPUT, IMAGE_TABLE_DINT_OUTPUT,
+                                                IMAGE_TABLE_LINT_OUTPUT};
+    ImageSizes sizes;
+    sizes.bounded = true;
+    for (size_t i = 0; i < 5; ++i)
+    {
+        sizes.input[i]  = plugin_image_table_capacity(kInput[i]);
+        sizes.output[i] = plugin_image_table_capacity(kOutput[i]);
+    }
+    return sizes;
+}
+
 int do_start_loop()
 {
     if (g_run)
@@ -332,7 +355,7 @@ int do_start_loop()
         const NetworkConfig &net = run->cfg.networks[i];
         run->layouts.push_back(master_layout(net));
         std::unique_ptr<ProcessImage> image(new ProcessImage);
-        if (!image->build(net, run->layouts.back(), g_args.buffer_size, errors))
+        if (!image->build(net, run->layouts.back(), runtime_image_sizes(), errors))
         {
             for (const auto &e : errors)
                 log_error("%s", e.c_str());

@@ -188,6 +188,10 @@ location, or a location outside the runtime's I/O image, an entry without a loca
 dummy, an unknown `on_abort`, or a `jump_to` that is missing or not a later item. Two entries on the same `%Q` location are
 a warning.
 
+The runtime tells the plugin how long each table of its I/O image is (`%IX`, `%IB`, ... `%QL`), sized
+from the `image.conf` the editor uploads and from the program's own located variables, and each
+location is checked against the table of its own size letter.
+
 ## Status
 
 While a CANopen program runs, the plugin keeps a live status of every network and serves it on
