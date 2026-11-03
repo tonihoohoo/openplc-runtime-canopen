@@ -1411,7 +1411,8 @@ void check_node_control(std::shared_ptr<lely::io::VirtualCanController> vbus,
     CHECK(scan_until(
         image, rt, [&] { return run_of(2) == CANOPEN_PLC_RUN_OPERATIONAL; },
         std::chrono::seconds(2)));
-    CHECK(waits.last_command() == 1);
+    CHECK(
+        scan_until(image, rt, [&] { return waits.last_command() == 1; }, std::chrono::seconds(2)));
     CHECK(port->device_state(2) == CANOPEN_PLC_OPERATIONAL);
     CHECK(scan_until(image, rt, [&] { return waits.outputs() == 0x3C; }, std::chrono::seconds(2)));
 
@@ -1465,6 +1466,63 @@ void check_node_control(std::shared_ptr<lely::io::VirtualCanController> vbus,
           json.find("node_off") != std::string::npos);
     bus.stop();
     waits.stop();
+}
+
+// A node turned on by the program before the bus starts boots on the first tick, shows as on
+// and logs node_on.
+void check_early_enable(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                        const std::string &wire, const std::string &dir,
+                        const plugin_runtime_args_t &rt)
+{
+    std::string text = kControlConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(text, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/control.dcf";
+    SimSlaveSpec spec2;
+    spec2.node_id = 2;
+    SimSlave waits(spec2, dir + "/control_node2.dcf", vbus, wire);
+    SimSlaveSpec spec3;
+    spec3.node_id = 3;
+    SimSlave option(spec3, dir + "/control_node3.dcf", vbus, wire);
+    waits.start();
+    option.start();
+
+    NetworkStatus status(net);
+    Bus bus(net, layout, image, status, dcf, vbus);
+    bus.enable_plc(0);
+    PlcPort *port = bus.plc();
+    CHECK(port != nullptr);
+    if (!port)
+        return;
+    port->request_enable(3, true);
+    bus.start();
+    canopen_plc_node_status ns{};
+    CHECK(scan_until(
+        image, rt,
+        [&]
+        {
+            port->node_status(3, ns);
+            return ns.run_state == CANOPEN_PLC_RUN_OPERATIONAL;
+        },
+        std::chrono::seconds(10)));
+    CHECK(ns.flags & CANOPEN_PLC_NODE_ENABLED);
+    CHECK(option.last_command() == 1);
+    CHECK(node_status(status, 3).enabled);
+    std::vector<NetworkSnapshot> snaps{status.snapshot()};
+    std::string json = status_json(snaps, 0);
+    CHECK(json.find("node_on") != std::string::npos);
+    bus.stop();
+    waits.stop();
+    option.stop();
 }
 
 // A session that cannot start (here a missing master DCF) is retried every second and logged once;
@@ -2002,6 +2060,7 @@ int main()
     check_service_mode(vbus, wire, dir, rt);
     check_plc_blocks(vbus, wire, dir, rt);
     check_node_control(vbus, wire, dir, rt);
+    check_early_enable(vbus, wire, dir, rt);
     check_boot_options(vbus, wire, dir, rt);
     check_session_failure(vbus, wire, dir);
     check_mark_all_down(rt);

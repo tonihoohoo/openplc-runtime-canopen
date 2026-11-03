@@ -87,7 +87,7 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
         s.cfg               = &n;
         s.slot              = slot;
         s.runs              = config_runs(n.sdo);
-        s.enabled           = plc_ ? plc_->wanted_on(n.node_id) : n.enabled;
+        s.enabled           = n.enabled; // a program request is applied on the first tick
     }
     for (const MasterPdo &m : layout_.rpdos)
         nodes_[m.node_id].in_pdos.push_back(&m);
