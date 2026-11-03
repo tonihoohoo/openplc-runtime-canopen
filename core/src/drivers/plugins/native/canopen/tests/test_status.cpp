@@ -565,6 +565,26 @@ void test_problem_text()
     CHECK(std::strlen(small) == 15);
 }
 
+// The events say who sent an NMT command and whether a booted node waits for the program.
+void test_event_sources()
+{
+    NetworkConfig net = two_nodes();
+    NetworkStatus st(net);
+    st.boot_ok(2, true);
+    st.boot_ok(3);
+    st.nmt_command(2, NmtRequest::Start, true);
+    st.nmt_command(0, NmtRequest::Stop);
+    std::string text = status_json({st.snapshot()}, 1);
+    CHECK(text.find("\"waits\":true") != std::string::npos);
+    size_t waits = 0;
+    for (size_t at = text.find("\"waits\""); at != std::string::npos;
+         at        = text.find("\"waits\"", at + 1))
+        ++waits;
+    CHECK(waits == 1);
+    CHECK(text.find("\"command\":\"start\",\"source\":\"program\"") != std::string::npos);
+    CHECK(text.find("\"command\":\"stop\",\"source\":\"client\"") != std::string::npos);
+}
+
 int main()
 {
     test_states_and_reasons();
@@ -574,6 +594,7 @@ int main()
     test_emcy_and_late();
     test_event_ring();
     test_json();
+    test_event_sources();
     test_requests();
     test_link_parsing_and_monitor();
     return TEST_RESULT();

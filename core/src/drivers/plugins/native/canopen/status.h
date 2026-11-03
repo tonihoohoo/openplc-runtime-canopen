@@ -159,7 +159,7 @@ enum class EventKind : uint8_t
     BusChange,
     BusReset,
     SdoWrite,   // a client's SDO write
-    NmtCommand, // a client's NMT command
+    NmtCommand, // an NMT command from a client or the PLC program
     Service,    // service mode opened or closed
     NodeOn,     // the PLC program turned a node on
     NodeOff     // the PLC program turned a node off
@@ -198,6 +198,8 @@ struct Event
     bool has_abort     = false;              // SdoWrite
     uint32_t abort     = 0;                  // SdoWrite
     NmtRequest command = NmtRequest::Start;  // NmtCommand
+    bool by_program    = false;              // NmtCommand: sent by the PLC program
+    bool waits         = false;              // BootOk: waits for the PLC program's start
     bool open          = false;              // Service
     OnAbort policy     = OnAbort::Stop;      // SdoAbort
 };
@@ -262,7 +264,7 @@ class NetworkStatus
     // Lost and left stopped until the next PLC start.
     void held(unsigned node);
     bool is_held(unsigned node);
-    void boot_ok(unsigned node);
+    void boot_ok(unsigned node, bool waits = false);
     void boot_failed(unsigned node, const Problem &p);
     // The found value of an identity failure, read after the failure.
     void identity_found(unsigned node, IdentityField field, uint32_t value);
@@ -291,8 +293,8 @@ class NetworkStatus
     // A client's SDO write and its outcome; the data is not kept.
     void client_write(unsigned node, uint16_t index, uint8_t subindex, bool ok, bool has_abort,
                       uint32_t abort);
-    // A client's NMT command to a node, or to every node (0).
-    void nmt_command(unsigned node, NmtRequest command);
+    // An NMT command from a client or the PLC program to a node, or to every node (0).
+    void nmt_command(unsigned node, NmtRequest command, bool by_program = false);
     // Service mode: every node in state Service, and an event for the open or the close.
     void set_service(bool open);
     // Booted and configured, waiting for the PLC program's start.

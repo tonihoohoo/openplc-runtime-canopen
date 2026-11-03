@@ -370,8 +370,8 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
         n->backoff       = kRetryMin;
         n->retry_pending = false;
         n->has_abort     = false;
-        status_.boot_ok(id);
         n->waiting = n->cfg->program_start;
+        status_.boot_ok(id, n->waiting);
         SetUp(*n, true);
         if (n->waiting)
         {
@@ -1824,7 +1824,7 @@ void Network::PlcNmt(const PlcJob &job)
         log_info("%s: NMT %s to %s from the PLC program", cfg_.label().c_str(),
                  nmt_request_name(cmd),
                  job.node ? ("node " + std::to_string(job.node)).c_str() : "every node");
-        status_.nmt_command(job.node, cmd);
+        status_.nmt_command(job.node, cmd, true);
     }
     plc_->finish(job.token, CANOPEN_PLC_NO_ERROR, CANOPEN_PLC_REASON_NONE, 0, nullptr, 0);
 }

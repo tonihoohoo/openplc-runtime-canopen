@@ -157,7 +157,7 @@ void NetworkStatus::held(unsigned node)
     }
 }
 
-void NetworkStatus::boot_ok(unsigned node)
+void NetworkStatus::boot_ok(unsigned node, bool waits)
 {
     std::lock_guard<PiMutex> lock(mutex_);
     NodeStatus *n = find(node);
@@ -170,7 +170,8 @@ void NetworkStatus::boot_ok(unsigned node)
     n->nmt = NmtSeen::Operational;
     Event e;
     e.node = node;
-    e.kind = EventKind::BootOk;
+    e.kind  = EventKind::BootOk;
+    e.waits = waits;
     push(e);
 }
 
@@ -419,13 +420,14 @@ void NetworkStatus::client_write(unsigned node, uint16_t index, uint8_t subindex
     push(e);
 }
 
-void NetworkStatus::nmt_command(unsigned node, NmtRequest command)
+void NetworkStatus::nmt_command(unsigned node, NmtRequest command, bool by_program)
 {
     std::lock_guard<PiMutex> lock(mutex_);
     Event e;
     e.node    = node;
-    e.kind    = EventKind::NmtCommand;
-    e.command = command;
+    e.kind       = EventKind::NmtCommand;
+    e.command    = command;
+    e.by_program = by_program;
     push(e);
 }
 
@@ -873,6 +875,11 @@ cJSON *event_json(const Event &ev)
         break;
     case EventKind::NmtCommand:
         cJSON_AddStringToObject(o, "command", nmt_request_name(ev.command));
+        cJSON_AddStringToObject(o, "source", ev.by_program ? "program" : "client");
+        break;
+    case EventKind::BootOk:
+        if (ev.waits)
+            cJSON_AddBoolToObject(o, "waits", true);
         break;
     case EventKind::Service:
         cJSON_AddBoolToObject(o, "open", ev.open);
