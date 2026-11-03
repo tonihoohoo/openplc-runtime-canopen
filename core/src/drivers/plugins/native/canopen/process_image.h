@@ -26,6 +26,21 @@
 namespace canopen_plugin
 {
 
+// Length of each %I and %Q table of the runtime's image, in its own unit (bytes for X, entries
+// otherwise), indexed by IecSize position X, B, W, D, L. Unbounded: no limit is checked.
+struct ImageSizes
+{
+    bool bounded       = false;
+    uint32_t input[5]  = {0, 0, 0, 0, 0};
+    uint32_t output[5] = {0, 0, 0, 0, 0};
+
+    // Every table `entries` long; 0 or less is unbounded.
+    static ImageSizes uniform(int entries);
+    uint32_t capacity(const IecLocation &loc) const;
+    // Whether `loc` lies inside its table.
+    bool contains(const IecLocation &loc) const;
+};
+
 class ProcessImage
 {
   public:
@@ -35,8 +50,8 @@ class ProcessImage
     ProcessImage &operator=(const ProcessImage &) = delete;
 
     // Builds the tables in master layout order. False, with a message per location, when a
-    // location lies outside an image of `image_size` entries per table (0: no limit).
-    bool build(const NetworkConfig &net, const MasterLayout &layout, int image_size,
+    // location lies outside its table of `sizes`.
+    bool build(const NetworkConfig &net, const MasterLayout &layout, const ImageSizes &sizes,
                std::vector<std::string> &errors);
 
     size_t inputs() const

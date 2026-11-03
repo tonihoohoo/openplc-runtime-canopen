@@ -102,7 +102,11 @@ if(NOT LELY_PREFIX)
     add_dependencies(canopen_core lely)
 endif()
 
-add_library(canopen_plugin SHARED ${CMAKE_CURRENT_SOURCE_DIR}/canopen_plugin.cpp)
+# plugin_image_sizes.c exports set_image_sizes, so the runtime sizes each image table on its own.
+add_library(canopen_plugin SHARED
+    ${CMAKE_CURRENT_SOURCE_DIR}/canopen_plugin.cpp
+    ${OPENPLC_ROOT}/core/src/drivers/plugins/native/plugin_image_sizes.c
+)
 target_compile_options(canopen_plugin PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(canopen_plugin PRIVATE canopen_core)
 # Only the entry points are exported, so the static Lely cannot clash with another plugin.
