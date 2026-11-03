@@ -3,10 +3,11 @@
 // The block interface of the built plugin, loaded as the runtime loads it (RTLD_LOCAL from its
 // path): the blocks' lookup by SONAME without loading it again, its cost per call, the answers
 // with no network running and with a network whose interface is missing, and a reload of the
-// plugin while the program (this test) keeps an old handle.
+// plugin while the program (this test) keeps an old handle and the table it took first.
 
 #include <chrono>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -100,6 +101,10 @@ int main()
         return TEST_RESULT();
     entry_t entry = reinterpret_cast<entry_t>(dlsym(plugin, "canopen_plc_api"));
     CHECK(entry && entry(2) == nullptr);
+    // The table says it stays valid, so a block may keep it across PLC runs.
+    CHECK(api->size >= offsetof(canopen_plc_api_v1, flags) + sizeof(api->flags));
+    CHECK((api->flags & CANOPEN_PLC_FLAG_PERMANENT) != 0);
+    const canopen_plc_api_v1 *kept = api;
 
     // The lookup's cost, as each block call pays it.
     constexpr int kCalls = 20000;
@@ -173,6 +178,8 @@ int main()
         CHECK(api != nullptr);
         if (!api)
             break;
+        // The library was never unmapped: the table a block kept is the current one.
+        CHECK(api == kept);
 
         // The interface is missing: requests are refused at once, the states say why.
         CHECK(api->start(&req, &res) == 0);
@@ -196,8 +203,11 @@ int main()
         stop();
         CHECK(api->start(&req, &res) == 0 && res.error == CANOPEN_PLC_NO_DRIVER);
         clean();
-        // The plugin may stay mapped after dlclose; the blocks do not rely on either.
+        // Between runs the kept table answers that no network runs.
+        CHECK(kept->node_state(1, 2, &state) == CANOPEN_PLC_NO_DRIVER);
         dlclose(plugin);
+        // Linked with -z nodelete: still mapped after the runtime's dlclose.
+        CHECK(lookup() == kept);
         plugin = dlopen(CANOPEN_PLUGIN_PATH, RTLD_LOCAL | RTLD_NOW);
         CHECK(plugin != nullptr);
         if (!plugin)
