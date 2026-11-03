@@ -66,6 +66,9 @@ PlcPort::PlcPort(uint32_t nonce, uint8_t net, uint8_t master_node_id, const unsi
 {
     for (auto &s : nmt_)
         s.store(0, std::memory_order_relaxed);
+    for (auto &r : runs_)
+        for (auto &c : r.text)
+            c.store(0, std::memory_order_relaxed);
     for (size_t i = 0; i < count; ++i)
         if (nodes[i] >= 1 && nodes[i] <= 127)
             known_[nodes[i]] = true;
@@ -348,6 +351,112 @@ int PlcPort::emcy_next(uint8_t node, uint64_t &cursor, canopen_plc_emcy &out) co
         out.data[4] = t;
         out.lost    = lost;
         return 1;
+    }
+}
+
+void PlcPort::set_node_info(unsigned node, bool optional, bool program_start, bool enabled)
+{
+    if (node < 1 || node > 127)
+        return;
+    NodeRunEntry &r = runs_[node];
+    uint8_t flags   = static_cast<uint8_t>((enabled ? CANOPEN_PLC_NODE_ENABLED : 0) |
+                                           (optional ? CANOPEN_PLC_NODE_OPTIONAL : 0) |
+                                           (program_start ? CANOPEN_PLC_NODE_PROGRAM_START : 0));
+    r.flags.store(flags, std::memory_order_relaxed);
+    r.run.store(enabled ? CANOPEN_PLC_RUN_NOT_FOUND : CANOPEN_PLC_RUN_DISABLED,
+                std::memory_order_relaxed);
+    r.wanted.store(enabled ? 1 : 0, std::memory_order_release);
+}
+
+bool PlcPort::wanted_on(unsigned node) const
+{
+    return known(node) && runs_[node].wanted.load(std::memory_order_acquire) != 0;
+}
+
+void PlcPort::request_enable(unsigned node, bool on)
+{
+    if (known(node))
+        runs_[node].wanted.store(on ? 1 : 0, std::memory_order_release);
+}
+
+void PlcPort::set_run(unsigned node, uint8_t run, bool enabled, bool silent, const char *problem)
+{
+    if (node < 1 || node > 127)
+        return;
+    NodeRunEntry &r = runs_[node];
+    uint32_t seq    = r.seq.load(std::memory_order_relaxed);
+    r.seq.store(seq + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    uint8_t keep = r.flags.load(std::memory_order_relaxed) &
+                   (CANOPEN_PLC_NODE_OPTIONAL | CANOPEN_PLC_NODE_PROGRAM_START);
+    uint8_t flags = static_cast<uint8_t>(keep | (enabled ? CANOPEN_PLC_NODE_ENABLED : 0) |
+                                         (silent ? CANOPEN_PLC_NODE_SILENT : 0));
+    r.run.store(run, std::memory_order_relaxed);
+    r.flags.store(flags, std::memory_order_relaxed);
+    size_t i = 0;
+    for (; problem && problem[i] && i + 1 < CANOPEN_PLC_TEXT; ++i)
+        r.text[i].store(problem[i], std::memory_order_relaxed);
+    r.text[i].store(0, std::memory_order_relaxed);
+    r.seq.store(seq + 2, std::memory_order_release);
+}
+
+void PlcPort::node_status(unsigned node, canopen_plc_node_status &out) const
+{
+    out = canopen_plc_node_status{};
+    if (!known(node))
+        return;
+    const NodeRunEntry &r = runs_[node];
+    // A writer that keeps changing the entry is not waited for: the last copy is kept.
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        uint32_t s1   = r.seq.load(std::memory_order_acquire);
+        out.run_state = r.run.load(std::memory_order_relaxed);
+        out.flags     = r.flags.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < CANOPEN_PLC_TEXT; ++i)
+            out.problem[i] = r.text[i].load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        uint32_t s2 = r.seq.load(std::memory_order_relaxed);
+        if (s1 == s2 && !(s1 & 1))
+            break;
+    }
+    out.problem[CANOPEN_PLC_TEXT - 1] = 0;
+}
+
+void PlcPort::network_status(canopen_plc_network_status &out) const
+{
+    out              = canopen_plc_network_status{};
+    out.mandatory_up = 1;
+    out.optional_up  = 1;
+    for (unsigned node = 1; node <= 127; ++node)
+    {
+        if (!known_[node])
+            continue;
+        const NodeRunEntry &r = runs_[node];
+        uint8_t run           = r.run.load(std::memory_order_acquire);
+        uint8_t flags         = r.flags.load(std::memory_order_acquire);
+        ++out.nodes;
+        if (!(flags & CANOPEN_PLC_NODE_ENABLED) || run == CANOPEN_PLC_RUN_DISABLED)
+        {
+            ++out.disabled;
+            continue;
+        }
+        const bool up = run == CANOPEN_PLC_RUN_OPERATIONAL || run == CANOPEN_PLC_RUN_WAITING_START;
+        if (!up)
+        {
+            if (flags & CANOPEN_PLC_NODE_OPTIONAL)
+                out.optional_up = 0;
+            else
+                out.mandatory_up = 0;
+        }
+        if (up || run == CANOPEN_PLC_RUN_MANUAL)
+            ++out.configured;
+        if (run == CANOPEN_PLC_RUN_OPERATIONAL)
+            ++out.operational;
+        if (run == CANOPEN_PLC_RUN_WAITING_START)
+            ++out.waiting;
+        if (run == CANOPEN_PLC_RUN_FAILED || run == CANOPEN_PLC_RUN_LOST ||
+            run == CANOPEN_PLC_RUN_HELD || (flags & CANOPEN_PLC_NODE_SILENT))
+            ++out.faulty;
     }
 }
 

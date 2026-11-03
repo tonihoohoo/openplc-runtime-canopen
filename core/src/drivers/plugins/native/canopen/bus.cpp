@@ -114,6 +114,8 @@ void Bus::enable_plc(uint8_t index)
         ids.push_back(n.node_id);
     plc_.reset(new PlcPort(new_nonce(), index, static_cast<uint8_t>(net_.master_node_id),
                            ids.data(), ids.size()));
+    for (const NodeConfig &n : net_.nodes)
+        plc_->set_node_info(n.node_id, n.optional, n.program_start, n.enabled);
 }
 
 void Bus::publish_bus(const BusStatus &bus)

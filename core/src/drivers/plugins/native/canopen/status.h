@@ -24,16 +24,18 @@ namespace canopen_plugin
 
 enum class NodeRun : uint8_t
 {
-    Waiting,     // the master started, the node has not reported back yet
-    Silent,      // mandatory, not booted within the boot-up timeout
-    Absent,      // optional, not booted within the boot-up timeout
-    Booting,     // the boot (identity check, configuration SDOs) is running
-    Failed,      // the last boot failed; retried in the background
-    Operational, // up and started
-    Lost,        // was up; retried in the background
-    Stopped,     // the PLC stopped
-    Manual,      // stopped or pre-operational by a client's NMT command
-    Service      // service mode: the master does not run the node
+    Waiting,      // the master started, the node has not reported back yet
+    Silent,       // mandatory, not booted within the boot-up timeout
+    Absent,       // optional, not booted within the boot-up timeout
+    Booting,      // the boot (identity check, configuration SDOs) is running
+    Failed,       // the last boot failed; retried in the background
+    Operational,  // up and started
+    Lost,         // was up; retried in the background
+    Stopped,      // the PLC stopped
+    Manual,       // stopped or pre-operational by a client's NMT command
+    Service,      // service mode: the master does not run the node
+    WaitingStart, // booted and configured, pre-operational until the PLC program starts it
+    Disabled      // off: not booted, supervised or reported
 };
 
 enum class NmtSeen : uint8_t
@@ -158,7 +160,9 @@ enum class EventKind : uint8_t
     BusReset,
     SdoWrite,   // a client's SDO write
     NmtCommand, // a client's NMT command
-    Service     // service mode opened or closed
+    Service,    // service mode opened or closed
+    NodeOn,     // the PLC program turned a node on
+    NodeOff     // the PLC program turned a node off
 };
 
 enum class ResetOutcome : uint8_t
@@ -202,12 +206,15 @@ struct NodeStatus
 {
     unsigned node_id = 0;
     std::string name;
-    bool optional  = false;
-    bool held      = false; // lost and not restarted until the next PLC start (on node error: stop)
-    NodeRun state  = NodeRun::Waiting;
-    NmtSeen nmt    = NmtSeen::Unknown;
-    int64_t since  = 0;
-    unsigned boots = 0; // finished boot attempts since the PLC started
+    bool optional = false;
+    bool held     = false; // lost and not restarted until the next PLC start (on node error: stop)
+    bool program_start   = false; // started by the PLC program
+    bool enabled         = true;  // on; false: off at PLC start or turned off by the program
+    bool off_by_program  = false; // turned off by the PLC program, not by the configuration
+    NodeRun state        = NodeRun::Waiting;
+    NmtSeen nmt          = NmtSeen::Unknown;
+    int64_t since        = 0;
+    unsigned boots       = 0; // finished boot attempts since the PLC started
     unsigned losses      = 0;
     bool silent_reported = false; // the silent or absent event was sent; cleared when it boots
     Problem problem;
@@ -228,7 +235,8 @@ struct NetworkSnapshot
     std::vector<NodeStatus> nodes;
     std::deque<Event> events; // newest first
 
-    // Every mandatory (optional) node is operational; true when there is none.
+    // Every mandatory (optional) node that is on is operational or waits for the program's start;
+    // true when there is none.
     bool all_up(bool optional) const;
 };
 
@@ -287,6 +295,15 @@ class NetworkStatus
     void nmt_command(unsigned node, NmtRequest command);
     // Service mode: every node in state Service, and an event for the open or the close.
     void set_service(bool open);
+    // Booted and configured, waiting for the PLC program's start.
+    void waiting_start(unsigned node);
+    // The node is turned on or off; `by_program` records an event, otherwise it is the
+    // configuration's setting at PLC start.
+    void set_enabled(unsigned node, bool on, bool by_program);
+    // Changes with every node's state or problem, for readers that copy only on a change.
+    uint64_t generation() const;
+    // The node's run state, hold and problem; false for an unknown node.
+    bool node_brief(unsigned node, NodeRun &state, bool &held, Problem &problem) const;
 
     NetworkSnapshot snapshot() const;
 
@@ -297,12 +314,15 @@ class NetworkStatus
 
     mutable PiMutex mutex_;
     NetworkSnapshot data_;
+    uint64_t gen_ = 0;
 };
 
 // The status of every network as the JSON answer of the status socket (version 1).
 std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t now);
 
 const char *node_run_name(NodeRun s);
+// The node's problem in words for the PLC blocks ("" for none), cut to fit `size`.
+void problem_text(const Problem &p, char *out, size_t size);
 const char *bus_state_name(BusState s);
 
 } // namespace canopen_plugin

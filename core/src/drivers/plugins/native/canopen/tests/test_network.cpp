@@ -75,13 +75,13 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 4,
+  "version": 5,
   "networks": [{
     "name": "test", "interface": "vcan-test", "bitrate": 0,
     "sync": {"mode": "plc_cycle"},
     "sdo_timeout_ms": 500,
     "nodes": [
-      {"node_id": 2, "name": "io1",
+      {"node_id": 2, "start": "master", "enabled": true, "name": "io1",
        "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
        "supervision": {"type": "heartbeat", "consumer_ms": 300},
        "on_loss": "hold",
@@ -103,18 +103,19 @@ const char *kConfig = R"({
          {"index": 25601, "subindex": 1, "type": "INTEGER16", "location": "%IW0"}]}],
        "rpdos": [{"number": 1, "cob_id": 514, "entries": [
          {"index": 25088, "subindex": 1, "type": "UNSIGNED8", "location": "%QB0"}]}]},
-      {"node_id": 3, "name": "wrong",
+      {"node_id": 3, "start": "master", "enabled": true, "name": "wrong",
        "identity": {"vendor_id": 153},
        "state_location": "%IB11",
        "tpdos": [{"number": 1, "cob_id": 387, "entries": [
          {"index": 24576, "subindex": 1, "type": "UNSIGNED8", "location": "%IB1"}]}]},
-      {"node_id": 9, "name": "absent", "state_location": "%IB12"},
-      {"node_id": 5, "name": "timed",
+      {"node_id": 9, "start": "master", "enabled": true,
+       "name": "absent", "state_location": "%IB12"},
+      {"node_id": 5, "start": "master", "enabled": true, "name": "timed",
        "supervision": {"type": "heartbeat", "consumer_ms": 300},
        "on_loss": "zero",
        "tpdos": [{"number": 1, "cob_id": 389, "receive_timeout_ms": 150, "entries": [
          {"index": 24576, "subindex": 1, "type": "UNSIGNED8", "location": "%IB2"}]}]},
-      {"node_id": 6, "name": "refuses",
+      {"node_id": 6, "start": "master", "enabled": true, "name": "refuses",
        "sdo": [{"index": 8448, "subindex": 0, "data": "01000000"}]}
     ]
   }]
@@ -364,13 +365,13 @@ NodeStatus node_status(const NetworkStatus &status, unsigned id)
 }
 
 const char *kWatchConfig = R"({
-  "version": 4,
+  "version": 5,
   "networks": [{
     "name": "watch", "interface": "vcan-test", "bitrate": 0,
     "heartbeat_producer_ms": 50,
     "on_plc_stop": "none",
     "nodes": [
-      {"node_id": 2, "name": "io1",
+      {"node_id": 2, "start": "master", "enabled": true, "name": "io1",
        "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
        "supervision": {"type": "heartbeat", "consumer_ms": 300},
        "state_location": "%IB10",
@@ -422,24 +423,26 @@ void check_master_watch(std::shared_ptr<lely::io::VirtualCanController> vbus,
 }
 
 const char *kOptionsConfig = R"({
-  "version": 4,
+  "version": 5,
   "networks": [{
     "name": "options", "interface": "vcan-test", "bitrate": 0,
     "on_node_error": "stop", "boot_timeout_ms": 1000, "sdo_timeout_ms": 500,
     "time": {"cob_id": 256, "period_ms": 100},
     "nodes": [
-      {"node_id": 2, "name": "restored", "restore_defaults": 1,
+      {"node_id": 2, "start": "master", "enabled": true, "name": "restored", "restore_defaults": 1,
        "supervision": {"type": "guarding", "guard_time_ms": 100, "life_time_factor": 3},
        "state_location": "%IB10",
        "sdo": [{"index": 8448, "subindex": 0, "data": "78563412"},
                {"index": 4119, "subindex": 0, "data": "0000"},
                {"index": 4108, "subindex": 0, "data": "6400"},
                {"index": 4109, "subindex": 0, "data": "03"}]},
-      {"node_id": 3, "name": "as-is", "configure": false,
+      {"node_id": 3, "start": "master", "enabled": true, "name": "as-is", "configure": false,
        "supervision": {"type": "heartbeat", "consumer_ms": 300},
        "state_location": "%IB11"},
-      {"node_id": 4, "name": "maybe", "optional": true, "state_location": "%IB12"},
-      {"node_id": 7, "name": "keeps", "restore_defaults": 3, "state_location": "%IB13"}
+      {"node_id": 4, "start": "master", "enabled": true,
+       "name": "maybe", "optional": true, "state_location": "%IB12"},
+      {"node_id": 7, "start": "master", "enabled": true,
+       "name": "keeps", "restore_defaults": 3, "state_location": "%IB13"}
     ]
   }]
 })";
@@ -1118,16 +1121,16 @@ std::string nmt_request(unsigned node, const char *command)
 }
 
 const char *kPlcConfig = R"({
-  "version": 4,
+  "version": 5,
   "networks": [{
     "name": "plc", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
     "nodes": [
-      {"node_id": 2, "name": "io1",
+      {"node_id": 2, "start": "master", "enabled": true, "name": "io1",
        "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
        "supervision": {"type": "heartbeat", "consumer_ms": 300},
        "state_location": "%IB10"},
-      {"node_id": 9, "name": "absent", "optional": true}
+      {"node_id": 9, "start": "master", "enabled": true, "name": "absent", "optional": true}
     ]
   }]
 })";
@@ -1285,6 +1288,243 @@ void check_plc_blocks(std::shared_ptr<lely::io::VirtualCanController> vbus, cons
     io.stop();
 }
 
+const char *kControlConfig = R"({
+  "version": 5,
+  "networks": [{
+    "name": "control", "interface": "vcan-test", "bitrate": 0,
+    "sdo_timeout_ms": 300,
+    "nodes": [
+      {"node_id": 2, "start": "program", "enabled": true, "name": "waits",
+       "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
+       "supervision": {"type": "heartbeat", "consumer_ms": 300},
+       "sdo": [{"index": 8448, "subindex": 0, "data": "78563412"},
+               {"index": 5120, "subindex": 1, "data": "02020080"},
+               {"index": 5632, "subindex": 0, "data": "00"},
+               {"index": 5632, "subindex": 1, "data": "08010062"},
+               {"index": 5632, "subindex": 0, "data": "01"},
+               {"index": 5120, "subindex": 1, "data": "02020000"}],
+       "rpdos": [{"number": 1, "cob_id": 514, "entries": [
+         {"index": 25088, "subindex": 1, "type": "UNSIGNED8", "location": "%QB0"}]}],
+       "state_location": "%IB10"},
+      {"node_id": 3, "start": "master", "enabled": false, "name": "option",
+       "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
+       "supervision": {"type": "heartbeat", "consumer_ms": 300},
+       "state_location": "%IB11"}
+    ]
+  }]
+})";
+
+// Node control from the PLC program: a node started by the program waits pre-operational after its
+// configuration and starts on NMT start, also after a reset; a node off at PLC start is left alone,
+// boots when turned on and is stopped, without a loss, when turned off and pulled.
+void check_node_control(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                        const std::string &wire, const std::string &dir,
+                        const plugin_runtime_args_t &rt)
+{
+    std::string text = kControlConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(text, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/control.dcf";
+    {
+        FILE *f       = std::fopen(dcf.c_str(), "w");
+        std::string t = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+    }
+    SimSlaveSpec spec2;
+    spec2.node_id = 2;
+    SimSlave waits(spec2, dir + "/control_node2.dcf", vbus, wire);
+    SimSlaveSpec spec3;
+    spec3.node_id = 3;
+    std::unique_ptr<SimSlave> option(new SimSlave(spec3, dir + "/control_node3.dcf", vbus, wire));
+    waits.start();
+    option->start();
+
+    NetworkStatus status(net);
+    Bus bus(net, layout, image, status, dcf, vbus);
+    bus.enable_plc(0);
+    PlcPort *port = bus.plc();
+    CHECK(port != nullptr);
+    if (!port)
+        return;
+    bus.start();
+    canopen_plc_node_status ns{};
+    canopen_plc_network_status nets{};
+    auto run_of = [&](unsigned node)
+    {
+        port->node_status(node, ns);
+        return ns.run_state;
+    };
+
+    // Configured, then pre-operational until the program starts it; GET_STATE sees pre-op.
+    CHECK(scan_until(
+        image, rt, [&] { return run_of(2) == CANOPEN_PLC_RUN_WAITING_START; },
+        std::chrono::seconds(10)));
+    CHECK(waits.parameter() == 0x12345678);
+    CHECK(port->device_state(2) == CANOPEN_PLC_PRE_OPERATIONAL);
+    CHECK(g_byte_in[10] == 0x7F);
+    CHECK(node_status(status, 2).state == NodeRun::WaitingStart);
+    CHECK(waits.last_command() != 1);
+    // Node 3 is off: no SDO, no start, no warning.
+    CHECK(run_of(3) == CANOPEN_PLC_RUN_DISABLED && !(ns.flags & CANOPEN_PLC_NODE_ENABLED));
+    CHECK(node_status(status, 3).state == NodeRun::Disabled);
+    port->network_status(nets);
+    CHECK(nets.mandatory_up && nets.waiting == 1 && nets.disabled == 1 && nets.operational == 0);
+
+    // Waiting is not a loss and nothing starts it.
+    g_byte_out[0] = 0x3C;
+    scan_until(image, rt, [] { return false; }, std::chrono::milliseconds(800));
+    CHECK(run_of(2) == CANOPEN_PLC_RUN_WAITING_START);
+    CHECK(node_status(status, 2).losses == 0);
+    CHECK(waits.last_command() != 1);
+    CHECK(waits.outputs() == 0); // no PDO before the start
+    CHECK(node_status(status, 3).state == NodeRun::Disabled);
+    CHECK(warnings_with("option") == 0);
+
+    canopen_plc_result res{};
+    auto nmt = [&](uint8_t node, uint8_t cs)
+    {
+        canopen_plc_request r{};
+        r.network  = 1;
+        r.kind     = CANOPEN_PLC_NMT;
+        r.node     = node;
+        r.command  = cs;
+        uint64_t h = port->start(r, res);
+        if (!h)
+            return false;
+        return scan_until(
+            image, rt, [&] { return port->poll(h, res, nullptr, 0) != 0; },
+            std::chrono::seconds(2));
+    };
+
+    // Started by the program: operational, PDOs run.
+    CHECK(nmt(2, 1));
+    CHECK(scan_until(
+        image, rt, [&] { return run_of(2) == CANOPEN_PLC_RUN_OPERATIONAL; },
+        std::chrono::seconds(2)));
+    CHECK(
+        scan_until(image, rt, [&] { return waits.last_command() == 1; }, std::chrono::seconds(2)));
+    CHECK(port->device_state(2) == CANOPEN_PLC_OPERATIONAL);
+    CHECK(scan_until(image, rt, [&] { return waits.outputs() == 0x3C; }, std::chrono::seconds(2)));
+
+    // Turned on: booted and started by the master.
+    long allocs = t_allocs;
+    port->request_enable(3, true);
+    CHECK(t_allocs == allocs);
+    CHECK(scan_until(
+        image, rt, [&] { return run_of(3) == CANOPEN_PLC_RUN_OPERATIONAL; },
+        std::chrono::seconds(5)));
+    CHECK(ns.flags & CANOPEN_PLC_NODE_ENABLED);
+    CHECK(option->last_command() == 1);
+    CHECK(node_status(status, 3).state == NodeRun::Operational);
+
+    // NMT to every node: a node that is off is skipped.
+    port->request_enable(3, false);
+    CHECK(scan_until(
+        image, rt, [&] { return run_of(3) == CANOPEN_PLC_RUN_DISABLED; }, std::chrono::seconds(2)));
+    CHECK(scan_until(
+        image, rt, [&] { return option->last_command() == 2; }, std::chrono::seconds(2)));
+    CHECK(g_byte_in[11] == 0);
+    CHECK(nmt(0, 0x80));
+    CHECK(scan_until(
+        image, rt, [&] { return waits.last_command() == 0x80; }, std::chrono::seconds(2)));
+    CHECK(option->last_command() == 2);
+    CHECK(nmt(0, 1));
+
+    // Pulled while off: no loss is reported.
+    option->stop();
+    option.reset();
+    scan_until(image, rt, [] { return false; }, std::chrono::milliseconds(800));
+    CHECK(node_status(status, 3).state == NodeRun::Disabled);
+    CHECK(node_status(status, 3).losses == 0);
+    port->network_status(nets);
+    CHECK(nets.mandatory_up && nets.disabled == 1 && nets.faulty == 0);
+
+    // A reset node boots again and waits again for the program.
+    CHECK(nmt(2, 0x81));
+    CHECK(scan_until(
+        image, rt, [&] { return run_of(2) == CANOPEN_PLC_RUN_WAITING_START; },
+        std::chrono::seconds(10)));
+    CHECK(node_status(status, 2).losses == 0);
+
+    // Status JSON carries the settings.
+    std::vector<NetworkSnapshot> snaps{status.snapshot()};
+    std::string json = status_json(snaps, 0);
+    CHECK(json.find("\"state\":\"waiting_start\"") != std::string::npos);
+    CHECK(json.find("\"start\":\"program\"") != std::string::npos);
+    CHECK(json.find("\"off_by\":\"program\"") != std::string::npos);
+    CHECK(json.find("\"kind\":\"node_off\"") != std::string::npos ||
+          json.find("node_off") != std::string::npos);
+    bus.stop();
+    waits.stop();
+}
+
+// A node turned on by the program before the bus starts boots on the first tick, shows as on
+// and logs node_on.
+void check_early_enable(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                        const std::string &wire, const std::string &dir,
+                        const plugin_runtime_args_t &rt)
+{
+    std::string text = kControlConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(text, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, kSize, errors));
+    std::string dcf = dir + "/control.dcf";
+    SimSlaveSpec spec2;
+    spec2.node_id = 2;
+    SimSlave waits(spec2, dir + "/control_node2.dcf", vbus, wire);
+    SimSlaveSpec spec3;
+    spec3.node_id = 3;
+    SimSlave option(spec3, dir + "/control_node3.dcf", vbus, wire);
+    waits.start();
+    option.start();
+
+    NetworkStatus status(net);
+    Bus bus(net, layout, image, status, dcf, vbus);
+    bus.enable_plc(0);
+    PlcPort *port = bus.plc();
+    CHECK(port != nullptr);
+    if (!port)
+        return;
+    port->request_enable(3, true);
+    bus.start();
+    canopen_plc_node_status ns{};
+    CHECK(scan_until(
+        image, rt,
+        [&]
+        {
+            port->node_status(3, ns);
+            return ns.run_state == CANOPEN_PLC_RUN_OPERATIONAL;
+        },
+        std::chrono::seconds(10)));
+    CHECK(ns.flags & CANOPEN_PLC_NODE_ENABLED);
+    CHECK(option.last_command() == 1);
+    CHECK(node_status(status, 3).enabled);
+    std::vector<NetworkSnapshot> snaps{status.snapshot()};
+    std::string json = status_json(snaps, 0);
+    CHECK(json.find("node_on") != std::string::npos);
+    bus.stop();
+    waits.stop();
+    option.stop();
+}
+
 // A session that cannot start (here a missing master DCF) is retried every second and logged once;
 // its nodes wait meanwhile.
 // With no session (one that failed), every node reads down: state 0, and the inputs of a node set
@@ -1342,12 +1582,12 @@ void check_session_failure(std::shared_ptr<lely::io::VirtualCanController> vbus,
 }
 
 const char *kBootConfig = R"({
-  "version": 4,
+  "version": 5,
   "networks": [{
     "name": "boot", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
     "nodes": [
-      {"node_id": 2, "name": "io1",
+      {"node_id": 2, "start": "master", "enabled": true, "name": "io1",
        "supervision": {"type": "heartbeat", "consumer_ms": 300},
        "state_location": "%IB10",
        "sdo": [{"index": 8448, "subindex": 0, "data": "01000000", "on_abort": "continue"},
@@ -1430,8 +1670,7 @@ void check_boot_options(std::shared_ptr<lely::io::VirtualCanController> vbus,
           std::string::npos);
 
     // Input gap: the 8-bit inputs are skipped, the analogue input lands in %IW0.
-    CHECK(scan_until(
-        image, rt, [] { return g_int_in[0] == 1234; }, std::chrono::seconds(2)));
+    CHECK(scan_until(image, rt, [] { return g_int_in[0] == 1234; }, std::chrono::seconds(2)));
     CHECK(g_byte_in[0] == 0);
 
     // Output gap: the node maps a dummy byte first, then its outputs.
@@ -1820,6 +2059,8 @@ int main()
     check_node_options(vbus, wire, dir, rt);
     check_service_mode(vbus, wire, dir, rt);
     check_plc_blocks(vbus, wire, dir, rt);
+    check_node_control(vbus, wire, dir, rt);
+    check_early_enable(vbus, wire, dir, rt);
     check_boot_options(vbus, wire, dir, rt);
     check_session_failure(vbus, wire, dir);
     check_mark_all_down(rt);

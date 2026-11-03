@@ -216,8 +216,9 @@ std::string master_dcf(const NetworkConfig &net, const MasterLayout &layout)
     mirror_pdos(w, layout.rpdos, true);
     mirror_pdos(w, layout.tpdos, false);
 
-    // NMT master that starts its slaves one by one once each is booted (CiA 302-2).
-    w.var(0x1F80, "NMT startup", CoType::UNSIGNED32, "rw", 0x00000001);
+    // NMT master (bit 0) that does not start the slaves itself (bit 3, CiA 302-2): the plugin
+    // starts each booted node, unless the PLC program starts it.
+    w.var(0x1F80, "NMT startup", CoType::UNSIGNED32, "rw", 0x00000009);
     struct Array
     {
         uint16_t index;

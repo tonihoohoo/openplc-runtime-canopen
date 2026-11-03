@@ -56,6 +56,9 @@ class PlcPort
     }
     uint64_t emcy_cursor() const;
     int emcy_next(uint8_t node, uint64_t &cursor, canopen_plc_emcy &out) const;
+    void node_status(unsigned node, canopen_plc_node_status &out) const;
+    void network_status(canopen_plc_network_status &out) const;
+    void request_enable(unsigned node, bool on);
 
     // Bus thread.
     // A session runs (true) or ended (false); ending fails every request not finished.
@@ -70,6 +73,13 @@ class PlcPort
     // canopen_plc_error of the bus state.
     void set_kernel(uint8_t error);
     void push_emcy(uint8_t node, uint16_t code, uint8_t reg, const uint8_t data[5]);
+    // The node's options, before the first session; `enabled` is also the first wanted state.
+    void set_node_info(unsigned node, bool optional, bool program_start, bool enabled);
+    // Whether the program wants the node on (the configured setting until it asks).
+    bool wanted_on(unsigned node) const;
+    // The node's run state (canopen_plc_run_state), whether it is on and not answering, and its
+    // problem in words ("" for none).
+    void set_run(unsigned node, uint8_t run, bool enabled, bool silent, const char *problem);
 
     // Handle layout: nonce, slot generation, network index, slot.
     static uint64_t make_handle(uint32_t nonce, uint16_t gen, uint8_t net, uint8_t slot)
@@ -115,6 +125,15 @@ class PlcPort
     const uint8_t master_;
     bool known_[128] = {};
     std::atomic<uint8_t> nmt_[128];
+    struct NodeRunEntry
+    {
+        std::atomic<uint32_t> seq{0}; // odd while written
+        std::atomic<uint8_t> run{CANOPEN_PLC_RUN_NOT_FOUND};
+        std::atomic<uint8_t> flags{0};
+        std::atomic<char> text[CANOPEN_PLC_TEXT];
+        std::atomic<uint8_t> wanted{1};
+    };
+    NodeRunEntry runs_[128];
     std::atomic<uint8_t> kernel_{CANOPEN_PLC_NO_ERROR};
     std::atomic<bool> running_{false};
     std::atomic<uint64_t> next_seq_{1};

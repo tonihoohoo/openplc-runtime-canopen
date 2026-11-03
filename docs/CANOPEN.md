@@ -35,6 +35,19 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
   booted `boot_timeout_ms` after the start is reported once: as not answering (a warning) when it is
   mandatory, as absent (information) when it is `optional`. Mandatory and optional differ only in
   that report: no node, mandatory or not, holds back the others.
+- **Start by the PLC program.** A node with `start: program` is booted and configured as any
+  other, then left pre-operational: its status is `waiting_start`, its heartbeat or guarding is
+  supervised and SDOs reach it, but no PDO is exchanged and it is not counted as lost. The PLC
+  program (the `NMT` block) or a client starts it with NMT start; a node that started itself is
+  sent NMT pre-operational. It waits again after every new boot (after a loss, a reset or the next
+  PLC start). Other nodes are started by the plugin once booted (the master's 0x1F80 has bit 3
+  set, so Lely itself starts none).
+- **Nodes off.** A node with `enabled: false` is off at PLC start: it is out of the master's
+  network list (0x1F81 bit 0), so it is not looked for, booted, supervised or reported, gets no
+  PDOs, and NMT to every node skips it. The PLC program turns a node on or off while the PLC runs
+  (`CANOPEN_NODE_ENABLE`): off sends a node that is up NMT stop and holds or zeroes its inputs
+  as `on_loss` says, without a loss; on looks for the node again and boots it like a node that
+  appears. The program's choice lasts until the PLC stops.
 - **Exchange.** Each TPDO of a node is received into its `%I` locations; each RPDO of a node is
   sent from its `%Q` locations right after the PLC cycle that changed a value, and in full when the
   node comes up.
@@ -75,7 +88,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 
 ```json
 {
-  "version": 4,
+  "version": 5,
   "networks": [
     {
       "name": "CANopen 1",
@@ -94,6 +107,8 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
         {
           "node_id": 2,
           "name": "io1",
+          "start": "master",
+          "enabled": true,
           "optional": false,
           "configure": true,
           "restore_defaults": 0,
@@ -136,7 +151,7 @@ change both together.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 4. Older files are refused; build the project again with a matching editor. |
+| `version` | Format version, 5. Older files are refused; build the project again with a matching editor. |
 | `interface` | SocketCAN interface, unique per network. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
 | `master_node_id` | 1-127, default 127. |
@@ -148,6 +163,8 @@ change both together.
 | `boot_timeout_ms` | 100-60000, default 2000: a node not booted this long after the start is reported as not answering (mandatory) or absent (optional). |
 | `on_node_error` | `restart` (default): boot a lost node again; `stop`: send it NMT stop and leave it until the next PLC start. |
 | `time` | Absent or `null` for no TIME; else `cob_id` (default 256, 0x100) and `period_ms` (10-65535, default 1000). |
+| `start` | Required. `master`: started once booted; `program`: left pre-operational until the PLC program or a client starts it. |
+| `enabled` | Required. `false`: the node is off at PLC start until the PLC program turns it on. |
 | `optional` | `true`: an absent node is not an error. Default `false`. |
 | `configure` | `false`: no identity check, restore or configuration SDOs (`sdo` must be empty); the node is only started. Default `true`. |
 | `restore_defaults` | 0x1011 sub-index to restore before the configuration, 1-127; 0 or absent for none. Not with `configure: false`. |
@@ -216,8 +233,9 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `now`, `since`, `time` | Wall-clock milliseconds since the epoch. |
 | `bus.state` | `error_active`, `error_warning`, `error_passive`, `bus_off`, `stopped`, `down` (interface down), `missing` (no such interface), `unknown`. A vcan link is `error_active`. |
 | `bus.*` | Error counters, bus-off count, frame counts since the PLC started and an estimated bus load in percent (standard frames, without bit stuffing). Each is left out when the driver does not report it. `rx_dropped` and `tx_dropped` count dropped receive and transmit frames. `link_resets` counts the times the master reset a CAN link. |
-| `all_mandatory_up`, `all_optional_up` | Every mandatory (optional) node is operational; `true` when there is none. |
-| `nodes[].state` | `waiting` (master started, not heard yet), `silent` (mandatory, not booted `boot_timeout_ms` after the start), `absent` (optional, not booted by then), `booting` (also while it restores its defaults), `failed` (the last boot failed; retried in the background), `operational`, `lost` (retried in the background unless `held`), `stopped` (PLC stop), `manual` (stopped or pre-operational by a client's NMT command), `service` (service mode: nobody manages the node). |
+| `all_mandatory_up`, `all_optional_up` | Every mandatory (optional) node that is on is operational or waits for the program's start; `true` when there is none. |
+| `nodes[].start`, `nodes[].enabled`, `nodes[].off_by` | `master` or `program`; whether the node is on; for a node that is off, `configuration` or `program`. |
+| `nodes[].state` | `waiting` (master started, not heard yet), `silent` (mandatory, not booted `boot_timeout_ms` after the start), `absent` (optional, not booted by then), `booting` (also while it restores its defaults), `failed` (the last boot failed; retried in the background), `operational`, `lost` (retried in the background unless `held`), `stopped` (PLC stop), `manual` (stopped or pre-operational by a client's NMT command), `service` (service mode: nobody manages the node), `waiting_start` (configured, pre-operational until the program starts it), `disabled` (off). |
 | `nodes[].held` | Present and `true` when the node was lost with `on_node_error: stop` and stays stopped until the next PLC start. |
 | `nodes[].nmt` | Last NMT state seen: `pre_operational` (also after a boot-up), `operational`, `stopped`, `unknown`. In service mode it follows the NMT commands sent and the nodes' heartbeats and boot-ups; a reset makes it `unknown` until the node is heard again. |
 | `networks[].mode` | `service` while [service mode](#service-mode) is open; left out otherwise. |
@@ -226,7 +244,7 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `nodes[].emcy` | The last 8 emergencies, newest first; an emergency with code 0 (error reset) marks them inactive. |
 | `nodes[].late_pdos` | TPDOs with a receive timeout whose frames are late. |
 | `nodes[].sdo_skipped` | Configuration SDOs the node refused in its current boot that had `on_abort` `continue` or `jump`, with `index`, `subindex` and `abort_code`. |
-| `events` | The last 64 events of the network, newest first: `boot_ok`, `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort` (with `policy` `stop`, `continue` or `jump`), `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link, with `outcome` `done`, `not_permitted` or `failed`, and `cause` `bus_off`, `bit_rate` or `tx_stalled`), `sdo_write` (a client's SDO write, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `nmt_command` (a client's NMT command, with `command`), `service` (service mode opened or closed, with `open`). |
+| `events` | The last 64 events of the network, newest first: `boot_ok`, `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort` (with `policy` `stop`, `continue` or `jump`), `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link, with `outcome` `done`, `not_permitted` or `failed`, and `cause` `bus_off`, `bit_rate` or `tx_stalled`), `sdo_write` (a client's SDO write, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `nmt_command` (a client's NMT command, with `command`), `service` (service mode opened or closed, with `open`), `node_on` and `node_off` (the PLC program turned the node on or off). |
 
 Counters and lists start again when the PLC starts. The status thread never blocks the PLC scan
 or the bus: each answer is built from a copy taken under a short lock.
@@ -284,15 +302,17 @@ as `service` events.
 
 The OpenPLC Editor's `canopen` block library (CiA 405 names: `SDO_READ4`, `SDO_WRITE4`,
 `SDO_READ_DATA`, `SDO_WRITE_DATA`, `SDO_READ_STRING`, `SDO_WRITE_STRING`, `NMT`, `GET_STATE`,
-`RECV_EMCY`, `RECV_EMCY_DEV`, `GET_LOCAL_NODE_ID`, `GET_CANOPEN_KERNEL_STATE`) lets a PLC program
-read and write a node's objects, send NMT commands and read node states and emergencies while it
-runs. The editor's CANopen documentation describes the blocks; this is what the plugin does for them.
+`RECV_EMCY`, `RECV_EMCY_DEV`, `GET_LOCAL_NODE_ID`, `GET_CANOPEN_KERNEL_STATE`, and the library's
+own `CANOPEN_NODE_ENABLE`, `CANOPEN_NODE_STATUS`, `CANOPEN_NETWORK_STATE`) lets a PLC program
+read and write a node's objects, send NMT commands, turn nodes on and off, and read node and
+network states and emergencies while it runs. The editor's CANopen documentation describes the blocks; this is what the plugin does for them.
 
-- The plugin exports `canopen_plc_api(version)`, a table of C functions (`plc_api.h`, version 1).
-  The blocks find the loaded plugin by its SONAME `libcanopen_plugin.so`. The plugin is linked with
-  `-z nodelete`, so the runtime's reload at each PLC start never unmaps it, and the table's `flags`
-  say so (`CANOPEN_PLC_FLAG_PERMANENT`): the blocks then look the table up once and keep it. Without
-  that flag (an older plugin) they look it up on each call.
+- The plugin exports `canopen_plc_api(version)`, a table of C functions (`plc_api.h`, version 2;
+  version 1 callers get the same table, which starts with version 1's functions). The blocks find
+  the loaded plugin by its SONAME `libcanopen_plugin.so`. The plugin is linked with `-z nodelete`,
+  so the runtime's reload at each PLC start never unmaps it, and the table's `flags` say so
+  (`CANOPEN_PLC_FLAG_PERMANENT`): the blocks then look the table up once and keep it. Without that
+  flag (an older plugin) they look it up on each call.
 - Nothing a block calls waits, locks or allocates. An SDO or NMT request goes into one of 16 slots
   of its network; the network's bus thread takes the oldest, one transfer at a time, taking turns
   with the online tools' requests, which have their own queue. A request with a timeout of 0 uses
@@ -309,6 +329,11 @@ runs. The editor's CANopen documentation describes the blocks; this is what the 
   up), `GET_CANOPEN_KERNEL_STATE` the CAN controller state, and both answer in the same scan. Each
   network keeps its last 32 emergencies for `RECV_EMCY`; a reader that falls behind continues with
   the oldest and is told how many it missed.
+- `CANOPEN_NODE_STATUS` reads the node's run state as the master runs it (not found, booting,
+  failed, waiting for the program's start, operational, manual, lost, held, off, PLC stopped), its
+  options, and for a failed, lost or held node the problem in words; `CANOPEN_NETWORK_STATE` the
+  network's all-up flags and node counts. `CANOPEN_NODE_ENABLE` only records the wanted state;
+  the bus thread applies it on its next tick (10 ms) and the node status shows it applied.
 - NMT from a block is handled as from the online tools (a manual stop or pre-operational is not a
   loss). Block writes and NMT commands are logged and recorded as `sdo_write` and `nmt_command`
   events, at most once a second per node and object.
@@ -438,9 +463,9 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 | `test_link_stall` | When a link counts as stalled: no frame sent for 3 s with drops or failing writes, never while quiet, error-passive or bus-off. |
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
 | `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, a running node that missed the master's reset, emergencies, late PDOs, the status and its socket, the online tools (SDO reads and writes, a refused write,
-pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
-| `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, and a kept table that stays the same across reloads. |
-| `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states and the emergency ring, with no allocation on the scan's side. |
+pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), a node started by the program (waiting, started, waiting again after a reset) and a node turned on and off (booted, stopped, pulled without a loss, skipped by NMT to every node), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
+| `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, a kept table that stays the same across reloads, and version 2's table serving version 1. |
+| `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states, the emergency ring, and the node control (wanted states, run states, network counts), with no allocation on the scan's side. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O

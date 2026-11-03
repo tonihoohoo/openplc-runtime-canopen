@@ -23,6 +23,10 @@
 // stop or pre-operational from a client is a manual state, not a loss: no boot retries, no late-PDO
 // warnings, inputs held or zeroed, heartbeat still supervised. Start or a reset hands the node back
 // to the master, which boots it again (also a held node).
+// Node control from the PLC program: Lely starts no node (0x1F80 bit 3); the plugin starts each
+// booted node, except one started by the program, which waits pre-operational for an NMT start. A
+// node that is off is out of Lely's network list (0x1F81 bit 0): not booted, polled, supervised or
+// reported; turning it off stops it, turning it on looks for it again.
 // Service mode (PLC stopped): the master is never started, so it sends nothing of its own; client
 // SDOs use a client SDO of their own per node and NMT commands are sent as plain frames.
 // With a TIME producer, the TIME object carries the host's clock at the configured period.
@@ -135,13 +139,16 @@ class Network : public lely::canopen::BasicMaster
         bool booting          = false; // a Lely boot of the node is running
         bool polling          = false; // a read of 0x1000 is running
         clock::time_point next_poll{};
-        bool restored        = false; // the defaults were restored in this bring-up
-        bool restore_pending = false; // waiting for the reset that follows the restore
-        bool held            = false; // lost and stopped until the next PLC start
-        bool has_abort       = false; // a configuration SDO was refused in this boot
-        bool manual          = false; // stopped or pre-operational by a client
-        bool seen_stopped    = false; // its last reported NMT state is stopped
-        clock::time_point up_since{}; // when the node last came up
+        bool restored        = false;     // the defaults were restored in this bring-up
+        bool restore_pending = false;     // waiting for the reset that follows the restore
+        bool held            = false;     // lost and stopped until the next PLC start
+        bool has_abort       = false;     // a configuration SDO was refused in this boot
+        bool manual          = false;     // stopped or pre-operational by a client
+        bool seen_stopped    = false;     // its last reported NMT state is stopped
+        bool enabled         = true;      // on; off: not booted, supervised or reported
+        bool waiting         = false;     // up and pre-operational until the PLC program starts it
+        clock::time_point looked_since{}; // the boot-up timeout runs from here (start or turn-on)
+        clock::time_point up_since{};     // when the node last came up
         Problem abort;
         uint8_t state      = 0;
         bool retry_pending = false;
@@ -204,6 +211,14 @@ class Network : public lely::canopen::BasicMaster
     void WatchServiceHeartbeats();
     static int OnServiceHeartbeat(const can_msg *msg, void *data) noexcept;
     void SendNmt(NmtRequest cmd, uint8_t id);
+    // Takes the PLC program's on and off requests and publishes the node states to the blocks.
+    void ServeNodeControl();
+    void TurnOn(NodeState &node, uint8_t id);
+    void TurnOff(NodeState &node, uint8_t id);
+    // Writes the node's slave assignment (0x1F81) with bit 0 (in the network list) set or clear.
+    void SetListed(const NodeState &node, uint8_t id, bool listed);
+    // Starts an up node that waits for the program's start.
+    void StartWaiting(NodeState &node, uint8_t id);
     // NMT from a client or the PLC: one node, or with 0 every node of the network.
     void RunNmt(unsigned node, NmtRequest cmd);
     void FinishSdo(uint64_t job, std::error_code ec, std::vector<uint8_t> data);
@@ -230,10 +245,10 @@ class Network : public lely::canopen::BasicMaster
     std::map<unsigned, NodeState> nodes_;
     std::vector<uint64_t> last_out_;
     std::vector<bool> out_valid_;
-    std::vector<bool> resend_;         // per master TPDO: send in full at the next tick
+    std::vector<bool> resend_;                 // per master TPDO: send in full at the next tick
     std::vector<clock::time_point> last_sent_; // per master TPDO: when it was last sent
     bool periodic_ = false;                    // some master TPDO has a send period
-    std::vector<uint16_t> rpdo_error_; // per master RPDO: the last error logged
+    std::vector<uint16_t> rpdo_error_;         // per master RPDO: the last error logged
     uint64_t synced_scans_ = 0;
     uint64_t merged_scans_ = 0;
     WriteFailures write_failures_;
@@ -248,6 +263,7 @@ class Network : public lely::canopen::BasicMaster
     // Service mode: receivers of the nodes' boot-up and heartbeat frames, for their NMT state.
     std::vector<::__can_recv *> service_recv_;
     clock::time_point started_{};
+    uint64_t published_gen_ = ~uint64_t{0}; // the status generation last published to the blocks
     clock::time_point next_time_{};
 };
 

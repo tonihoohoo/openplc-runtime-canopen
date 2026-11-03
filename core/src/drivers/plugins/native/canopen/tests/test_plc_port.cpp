@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -256,6 +257,46 @@ void check_emcy()
 
 } // namespace
 
+// Node control: the options and the wanted state, the run states, the network counts.
+void check_node_control()
+{
+    PlcPort port(1, 0, 127, kNodes, 2);
+    port.set_node_info(kNodes[0], false, true, true);
+    port.set_node_info(kNodes[1], true, false, false);
+    canopen_plc_node_status ns{};
+    port.node_status(kNodes[0], ns);
+    CHECK(ns.run_state == CANOPEN_PLC_RUN_NOT_FOUND);
+    CHECK(ns.flags == (CANOPEN_PLC_NODE_ENABLED | CANOPEN_PLC_NODE_PROGRAM_START));
+    port.node_status(kNodes[1], ns);
+    CHECK(ns.run_state == CANOPEN_PLC_RUN_DISABLED && ns.flags == CANOPEN_PLC_NODE_OPTIONAL);
+    CHECK(port.wanted_on(kNodes[0]) && !port.wanted_on(kNodes[1]));
+    port.request_enable(kNodes[1], true);
+    port.request_enable(99, false); // unknown: ignored
+    CHECK(port.wanted_on(kNodes[1]) && !port.wanted_on(99));
+
+    canopen_plc_network_status net{};
+    port.network_status(net);
+    CHECK(net.nodes == 2 && !net.mandatory_up && net.optional_up && net.disabled == 1);
+    port.set_run(kNodes[0], CANOPEN_PLC_RUN_WAITING_START, true, false, "");
+    port.network_status(net);
+    CHECK(net.mandatory_up && net.waiting == 1 && net.configured == 1 && net.operational == 0);
+    port.set_run(kNodes[1], CANOPEN_PLC_RUN_FAILED, true, false, "did not answer the boot");
+    port.node_status(kNodes[1], ns);
+    CHECK(ns.run_state == CANOPEN_PLC_RUN_FAILED &&
+          std::string(ns.problem) == "did not answer the boot");
+    CHECK(ns.flags == (CANOPEN_PLC_NODE_ENABLED | CANOPEN_PLC_NODE_OPTIONAL));
+    port.network_status(net);
+    CHECK(net.mandatory_up && !net.optional_up && net.faulty == 1 && net.disabled == 0);
+    port.set_run(kNodes[0], CANOPEN_PLC_RUN_NOT_FOUND, true, true, nullptr);
+    port.network_status(net);
+    CHECK(!net.mandatory_up && net.faulty == 2);
+    // A long text is cut and ends with a zero.
+    std::string longer(200, 'y');
+    port.set_run(kNodes[1], CANOPEN_PLC_RUN_LOST, true, false, longer.c_str());
+    port.node_status(kNodes[1], ns);
+    CHECK(std::strlen(ns.problem) == CANOPEN_PLC_TEXT - 1);
+}
+
 int main()
 {
     check_round_trip();
@@ -264,6 +305,7 @@ int main()
     check_stale_handles();
     check_states();
     check_emcy();
+    check_node_control();
     CHECK(new_nonce() != 0 && new_nonce() != new_nonce());
     return TEST_RESULT();
 }
