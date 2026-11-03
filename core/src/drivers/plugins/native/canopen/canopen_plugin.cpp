@@ -499,18 +499,57 @@ int plc_emcy_next(uint8_t network, uint8_t node, uint64_t *cursor, canopen_plc_e
     return port->emcy_next(node, *cursor, *out);
 }
 
-const canopen_plc_api_v1 kPlcApiV1 = {
-    sizeof(canopen_plc_api_v1),
-    1u,
-    plc_start,
-    plc_poll,
-    plc_cancel,
-    plc_node_state,
-    plc_kernel_state,
-    plc_local_node_id,
-    plc_emcy_cursor,
-    plc_emcy_next,
-    CANOPEN_PLC_FLAG_PERMANENT,
+int plc_node_status(uint8_t network, uint8_t node, canopen_plc_node_status *out)
+{
+    int error;
+    PlcPort *port = plc_port(network, error);
+    if (!port || !out)
+        return port ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    if (!port->known(node))
+        return CANOPEN_PLC_NODE_ID_UNKNOWN;
+    port->node_status(node, *out);
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int plc_network_status(uint8_t network, canopen_plc_network_status *out)
+{
+    int error;
+    PlcPort *port = plc_port(network, error);
+    if (!port || !out)
+        return port ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    port->network_status(*out);
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int plc_node_enable(uint8_t network, uint8_t node, uint8_t on)
+{
+    int error;
+    PlcPort *port = plc_port(network, error);
+    if (!port)
+        return error;
+    if (!port->known(node))
+        return CANOPEN_PLC_NODE_ID_UNKNOWN;
+    port->request_enable(node, on != 0);
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+const canopen_plc_api_v2 kPlcApi = {
+    {
+        sizeof(canopen_plc_api_v2),
+        CANOPEN_PLC_API_VERSION,
+        plc_start,
+        plc_poll,
+        plc_cancel,
+        plc_node_state,
+        plc_kernel_state,
+        plc_local_node_id,
+        plc_emcy_cursor,
+        plc_emcy_next,
+        CANOPEN_PLC_FLAG_PERMANENT,
+    },
+    plc_node_status,
+    plc_network_status,
+    plc_node_enable,
 };
 
 void report(const char *where, const char *what)
@@ -611,7 +650,7 @@ CANOPEN_EXPORT void cycle_end(void)
 
 CANOPEN_EXPORT const void *canopen_plc_api(uint32_t version)
 {
-    return version == 1u ? &kPlcApiV1 : nullptr;
+    return version == 1u || version == 2u ? &kPlcApi : nullptr;
 }
 
 CANOPEN_EXPORT void cleanup(void)

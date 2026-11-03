@@ -398,6 +398,20 @@ bool Parser::parse_node(const cJSON *j, const NetworkConfig &net, NodeConfig &no
 
     get_bool(j, "optional", where, node.optional);
     get_bool(j, "configure", where, node.configure);
+    std::string start;
+    if (get_string(j, "start", where, start, true))
+    {
+        if (start == "master")
+            node.program_start = false;
+        else if (start == "program")
+            node.program_start = true;
+        else
+            error(where, "\"start\" \"" + start + "\" is not one of master, program");
+    }
+    if (!cJSON_GetObjectItemCaseSensitive(j, "enabled"))
+        error(where, "missing \"enabled\"");
+    else
+        get_bool(j, "enabled", where, node.enabled);
     const uint64_t zero_restore = 0;
     if (get_uint(j, "restore_defaults", where, 0, 127, v, &zero_restore))
         node.restore_defaults = static_cast<unsigned>(v);
@@ -760,8 +774,8 @@ void Parser::check_locations()
                     for (const auto &e : p.entries)
                         if (!e.dummy)
                             uses.push_back({e.location, prefix + (dir == 0 ? " TPDO " : " RPDO ") +
-                                                        std::to_string(p.number) + " " +
-                                                        object_text(e.index, e.subindex)});
+                                                            std::to_string(p.number) + " " +
+                                                            object_text(e.index, e.subindex)});
         }
     }
     for (size_t a = 0; a < uses.size(); ++a)

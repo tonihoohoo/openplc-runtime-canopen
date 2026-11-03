@@ -37,7 +37,8 @@ bool NodeStatus::warning() const
 bool NetworkSnapshot::all_up(bool optional) const
 {
     for (const NodeStatus &n : nodes)
-        if (n.optional == optional && n.state != NodeRun::Operational)
+        if (n.enabled && n.optional == optional && n.state != NodeRun::Operational &&
+            n.state != NodeRun::WaitingStart)
             return false;
     return true;
 }
@@ -56,10 +57,12 @@ NetworkStatus::NetworkStatus(const NetworkConfig &cfg)
     for (const NodeConfig &n : cfg.nodes)
     {
         NodeStatus s;
-        s.node_id  = n.node_id;
-        s.name     = n.name;
-        s.optional = n.optional;
-        s.since    = now;
+        s.node_id       = n.node_id;
+        s.name          = n.name;
+        s.optional      = n.optional;
+        s.program_start = n.program_start;
+        s.enabled       = n.enabled;
+        s.since         = now;
         data_.nodes.push_back(s);
     }
 }
@@ -74,6 +77,7 @@ NodeStatus *NetworkStatus::find(unsigned node)
 
 void NetworkStatus::change(NodeStatus &n, NodeRun state)
 {
+    ++gen_;
     if (n.state == state)
         return;
     n.state = state;
@@ -96,6 +100,8 @@ void NetworkStatus::begin_session()
         // A held node stays lost and stopped across sessions until the next PLC start.
         if (data_.service)
             change(n, NodeRun::Service);
+        else if (!n.enabled)
+            change(n, NodeRun::Disabled);
         else if (!n.held)
             change(n, NodeRun::Waiting);
         n.nmt = NmtSeen::Unknown;
@@ -145,7 +151,10 @@ void NetworkStatus::held(unsigned node)
 {
     std::lock_guard<PiMutex> lock(mutex_);
     if (NodeStatus *n = find(node))
+    {
         n->held = true;
+        ++gen_;
+    }
 }
 
 void NetworkStatus::boot_ok(unsigned node)
@@ -189,6 +198,7 @@ void NetworkStatus::identity_found(unsigned node, IdentityField field, uint32_t 
         return;
     n->problem.has_found = true;
     n->problem.found     = value;
+    ++gen_;
     // The failure's event gets the value too.
     for (Event &e : data_.events)
     {
@@ -442,6 +452,63 @@ void NetworkStatus::stop_all()
     }
 }
 
+void NetworkStatus::waiting_start(unsigned node)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    NodeStatus *n = find(node);
+    if (!n)
+        return;
+    change(*n, NodeRun::WaitingStart);
+    n->nmt = NmtSeen::PreOperational;
+}
+
+void NetworkStatus::set_enabled(unsigned node, bool on, bool by_program)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    NodeStatus *n = find(node);
+    if (!n)
+        return;
+    n->enabled        = on;
+    n->off_by_program = !on && by_program;
+    if (on)
+    {
+        n->held = false;
+        change(*n, NodeRun::Waiting);
+    }
+    else
+    {
+        n->held = false;
+        n->late.clear();
+        change(*n, NodeRun::Disabled);
+    }
+    if (!by_program)
+        return;
+    Event e;
+    e.node = node;
+    e.kind = on ? EventKind::NodeOn : EventKind::NodeOff;
+    push(e);
+}
+
+uint64_t NetworkStatus::generation() const
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    return gen_;
+}
+
+bool NetworkStatus::node_brief(unsigned node, NodeRun &state, bool &held, Problem &problem) const
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    for (const NodeStatus &n : data_.nodes)
+        if (n.node_id == node)
+        {
+            state   = n.state;
+            held    = n.held;
+            problem = n.problem;
+            return true;
+        }
+    return false;
+}
+
 NetworkSnapshot NetworkStatus::snapshot() const
 {
     std::lock_guard<PiMutex> lock(mutex_);
@@ -470,6 +537,10 @@ const char *node_run_name(NodeRun s)
         return "stopped";
     case NodeRun::Manual:
         return "manual";
+    case NodeRun::WaitingStart:
+        return "waiting_start";
+    case NodeRun::Disabled:
+        return "disabled";
     case NodeRun::Service:
         return "service";
     }
@@ -627,6 +698,10 @@ const char *event_name(EventKind k)
         return "nmt_command";
     case EventKind::Service:
         return "service";
+    case EventKind::NodeOn:
+        return "node_on";
+    case EventKind::NodeOff:
+        return "node_off";
     }
     return "boot_ok";
 }
@@ -704,6 +779,10 @@ cJSON *node_json(const NodeStatus &n)
     cJSON_AddStringToObject(o, "state", node_run_name(n.state));
     if (n.held)
         cJSON_AddBoolToObject(o, "held", true);
+    cJSON_AddStringToObject(o, "start", n.program_start ? "program" : "master");
+    cJSON_AddBoolToObject(o, "enabled", n.enabled);
+    if (!n.enabled)
+        cJSON_AddStringToObject(o, "off_by", n.off_by_program ? "program" : "configuration");
     cJSON_AddStringToObject(o, "nmt", nmt_name(n.nmt));
     cJSON_AddNumberToObject(o, "since", static_cast<double>(n.since));
     add_uint(o, "boot_attempts", n.boots);
@@ -805,6 +884,58 @@ cJSON *event_json(const Event &ev)
 }
 
 } // namespace
+
+void problem_text(const Problem &p, char *out, size_t size)
+{
+    if (!out || size == 0)
+        return;
+    out[0] = 0;
+    switch (p.kind)
+    {
+    case ProblemKind::None:
+        return;
+    case ProblemKind::NoResponse:
+        std::snprintf(out, size, "did not answer the boot");
+        return;
+    case ProblemKind::Identity:
+    {
+        const char *what = p.field == IdentityField::DeviceType    ? "device type"
+                           : p.field == IdentityField::VendorId    ? "vendor ID"
+                           : p.field == IdentityField::ProductCode ? "product code"
+                           : p.field == IdentityField::Revision    ? "revision"
+                                                                   : "serial number";
+        if (p.has_found)
+            std::snprintf(out, size, "%s is 0x%X where 0x%X was expected", what,
+                          static_cast<unsigned>(p.found), static_cast<unsigned>(p.expected));
+        else
+            std::snprintf(out, size, "%s is not 0x%X as expected", what,
+                          static_cast<unsigned>(p.expected));
+        return;
+    }
+    case ProblemKind::SdoAbort:
+        std::snprintf(out, size, "refused the write to 0x%04X:%u (abort 0x%08X)", p.index,
+                      static_cast<unsigned>(p.subindex), static_cast<unsigned>(p.abort_code));
+        return;
+    case ProblemKind::Heartbeat:
+        std::snprintf(out, size, "missed its heartbeat");
+        return;
+    case ProblemKind::Guarding:
+        std::snprintf(out, size, "did not answer node guarding");
+        return;
+    case ProblemKind::Reset:
+        std::snprintf(out, size, "restarted while running");
+        return;
+    case ProblemKind::State:
+        std::snprintf(out, size, "left operational by itself");
+        return;
+    case ProblemKind::BootError:
+        if (p.boot_status)
+            std::snprintf(out, size, "boot error %c: %s", p.boot_status, p.text.c_str());
+        else
+            std::snprintf(out, size, "boot error: %s", p.text.c_str());
+        return;
+    }
+}
 
 std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t now)
 {

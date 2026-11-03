@@ -19,6 +19,7 @@
 #include "can_link.h"
 #include "check.h"
 #include "config.h"
+#include "plc_api.h"
 #include "requests.h"
 #include "status.h"
 #include "status_server.h"
@@ -495,10 +496,81 @@ void test_link_parsing_and_monitor()
 
 } // namespace
 
+void test_waiting_and_off()
+{
+    NetworkConfig net          = two_nodes();
+    net.nodes[0].program_start = true;
+    net.nodes[1].enabled       = false;
+    NetworkStatus st(net);
+    st.begin_session();
+    NetworkSnapshot s = st.snapshot();
+    CHECK(node(s, 3).state == NodeRun::Disabled && !node(s, 3).enabled);
+    CHECK(!node(s, 3).off_by_program);
+    // A node that waits for the program's start counts as up; a node that is off does not count.
+    uint64_t gen = st.generation();
+    st.boot_ok(2);
+    st.waiting_start(2);
+    CHECK(st.generation() != gen);
+    s = st.snapshot();
+    CHECK(node(s, 2).state == NodeRun::WaitingStart && node(s, 2).nmt == NmtSeen::PreOperational);
+    CHECK(s.all_up(false));
+    // Turned on by the program: looked for again, and an event.
+    st.set_enabled(3, true, true);
+    s = st.snapshot();
+    CHECK(node(s, 3).state == NodeRun::Waiting && !s.all_up(false));
+    CHECK(s.events.front().kind == EventKind::NodeOn);
+    st.set_enabled(3, false, true);
+    s = st.snapshot();
+    CHECK(node(s, 3).off_by_program && s.all_up(false));
+    // Off survives a new session.
+    st.begin_session();
+    CHECK(node(st.snapshot(), 3).state == NodeRun::Disabled);
+    std::vector<NetworkSnapshot> snaps{st.snapshot()};
+    std::string json = status_json(snaps, 0);
+    CHECK(json.find("\"off_by\":\"program\"") != std::string::npos);
+    CHECK(json.find("\"start\":\"program\"") != std::string::npos);
+    CHECK(json.find("\"node_off\"") != std::string::npos);
+    NodeRun run;
+    bool held = true;
+    Problem p;
+    CHECK(st.node_brief(3, run, held, p) && run == NodeRun::Disabled && !held);
+    CHECK(!st.node_brief(9, run, held, p));
+}
+
+void test_problem_text()
+{
+    char text[CANOPEN_PLC_TEXT];
+    Problem p;
+    problem_text(p, text, sizeof text);
+    CHECK(text[0] == 0);
+    p.kind      = ProblemKind::Identity;
+    p.field     = IdentityField::ProductCode;
+    p.expected  = 0x42;
+    p.has_found = true;
+    p.found     = 0x43;
+    problem_text(p, text, sizeof text);
+    CHECK(std::string(text) == "product code is 0x43 where 0x42 was expected");
+    p            = Problem();
+    p.kind       = ProblemKind::SdoAbort;
+    p.index      = 0x1017;
+    p.subindex   = 0;
+    p.abort_code = 0x06090030;
+    problem_text(p, text, sizeof text);
+    CHECK(std::string(text) == "refused the write to 0x1017:0 (abort 0x06090030)");
+    p      = Problem();
+    p.kind = ProblemKind::BootError;
+    p.text = std::string(200, 'x');
+    char small[16];
+    problem_text(p, small, sizeof small);
+    CHECK(std::strlen(small) == 15);
+}
+
 int main()
 {
     test_states_and_reasons();
     test_optional_and_held();
+    test_waiting_and_off();
+    test_problem_text();
     test_emcy_and_late();
     test_event_ring();
     test_json();

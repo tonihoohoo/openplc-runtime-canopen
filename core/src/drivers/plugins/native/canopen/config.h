@@ -17,7 +17,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 4;
+constexpr int kConfigVersion = 5;
 
 // One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
 // location: its bits are skipped on receive and sent as zeros.
@@ -88,6 +88,10 @@ struct NodeConfig
     bool optional = false;
     // false: no identity check, restore or configuration SDOs; the node is only started.
     bool configure = true;
+    // true: after its boot the node stays pre-operational until the PLC program starts it.
+    bool program_start = false;
+    // false: the node is off at PLC start (not booted, supervised or reported) until turned on.
+    bool enabled = true;
     // 0x1011 sub-index written with "load" before the configuration SDOs; 0 for none.
     unsigned restore_defaults      = 0;
     Supervision supervision        = Supervision::None;

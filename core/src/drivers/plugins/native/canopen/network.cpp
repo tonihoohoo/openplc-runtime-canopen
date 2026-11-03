@@ -87,6 +87,7 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
         s.cfg               = &n;
         s.slot              = slot;
         s.runs              = config_runs(n.sdo);
+        s.enabled           = plc_ ? plc_->wanted_on(n.node_id) : n.enabled;
     }
     for (const MasterPdo &m : layout_.rpdos)
         nodes_[m.node_id].in_pdos.push_back(&m);
@@ -139,8 +140,9 @@ void Network::Start()
     next_time_    = started_;
     for (auto &it : nodes_)
     {
-        it.second.next_poll = started_ + kPollEvery; // after the boot-ups of the reset
-        it.second.held      = status_.is_held(it.first);
+        it.second.next_poll    = started_ + kPollEvery; // after the boot-ups of the reset
+        it.second.looked_since = started_;
+        it.second.held         = status_.is_held(it.first);
     }
     status_.begin_session();
     // Lely's boot SDOs (identity check, configuration) otherwise wait 100 ms per attempt.
@@ -148,8 +150,12 @@ void Network::Start()
     log_info("%s: starting, %zu node(s), %zu input and %zu output PDO(s)", cfg_.label().c_str(),
              nodes_.size(), layout_.rpdos.size(), layout_.tpdos.size());
     Reset();
+    // The reset restored 0x1F81 from the DCF; the boot-ups it causes are handled after this.
     for (auto &it : nodes_)
-        if (it.second.held)
+        if (!it.second.enabled)
+            SetListed(it.second, static_cast<uint8_t>(it.first), false);
+    for (auto &it : nodes_)
+        if (it.second.held && it.second.enabled)
             StopHeld(it.first);
     tick_.settime(kTick, kTick);
     tick_.submit_wait(tick_wait_);
@@ -213,6 +219,8 @@ void Network::StopNodes()
     // not manage.
     for (const auto &it : nodes_)
     {
+        if (!it.second.enabled)
+            continue; // stopped when it was turned off
         try
         {
             Command(cmd, static_cast<uint8_t>(it.first));
@@ -330,8 +338,12 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
 {
     (void)st;
     NodeState *n = Find(id);
-    if (!n || n->stopped || n->held)
+    if (!n || n->stopped || n->held || !n->enabled)
+    {
+        if (n)
+            n->booting = false;
         return;
+    }
     n->booting = false;
     if (n->restore_pending)
     {
@@ -359,10 +371,29 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
         n->retry_pending = false;
         n->has_abort     = false;
         status_.boot_ok(id);
+        n->waiting = n->cfg->program_start;
         SetUp(*n, true);
-        if (!n->cfg->configure)
+        if (n->waiting)
         {
-            // Lely boots such a node without starting it.
+            status_.waiting_start(id);
+            log_info("%s waits for the PLC program's start", n->cfg->label().c_str());
+            // A node that started itself goes back to pre-operational.
+            Defer(
+                [this, id]
+                {
+                    try
+                    {
+                        Command(NmtCommand::ENTER_PREOP, id);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        log_warn("node %u: cannot send NMT pre-operational: %s", id, e.what());
+                    }
+                });
+        }
+        else
+        {
+            // Lely starts no node (0x1F80 bit 3).
             Defer(
                 [this, id]
                 {
@@ -561,7 +592,7 @@ void Network::HandleRestore(uint8_t id)
 void Network::HandleLoss(uint8_t id, ProblemKind kind)
 {
     NodeState *n = Find(id);
-    if (!n || !n->up || n->stopped || n->held)
+    if (!n || !n->up || n->stopped || n->held || !n->enabled)
         return;
     n->manual       = false;
     const char *why = kind == ProblemKind::Heartbeat  ? "heartbeat timeout"
@@ -642,7 +673,7 @@ void Network::HandleState(uint8_t id, NmtState st)
         break;
     }
     // Service mode runs no boot and no supervision; the node only reports its NMT state.
-    if (service_)
+    if (service_ || !n->enabled)
         return;
     if (n->held && st == NmtState::BOOTUP)
     {
@@ -664,6 +695,28 @@ void Network::HandleState(uint8_t id, NmtState st)
     {
         HandleLoss(id, ProblemKind::Reset);
         return;
+    }
+    if (n->waiting && !n->manual && !n->stopped)
+    {
+        if (st == NmtState::START)
+        {
+            // Started by itself: back to pre-operational until the program starts it.
+            Defer(
+                [this, id]
+                {
+                    try
+                    {
+                        Command(NmtCommand::ENTER_PREOP, id);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        log_warn("node %u: cannot send NMT pre-operational: %s", id, e.what());
+                    }
+                });
+            return;
+        }
+        if (st == NmtState::PREOP)
+            return;
     }
     if ((st == NmtState::PREOP || st == NmtState::STOP) && !n->manual && !n->stopped)
     {
@@ -727,7 +780,7 @@ void Network::HandleRpdoError(int num, uint16_t eec)
     uint16_t &last     = rpdo_error_[static_cast<size_t>(num - 1)];
     NodeState *node    = Find(static_cast<uint8_t>(m.node_id));
     // A deadline missed while the node is not running says nothing about the PDO.
-    if (eec == 0x8250 && (!node || !node->up || node->manual))
+    if (eec == 0x8250 && (!node || !node->up || node->manual || node->waiting))
         return;
     if (last == eec)
         return;
@@ -778,13 +831,19 @@ void Network::SetUp(NodeState &node, bool up)
     if (up)
     {
         node.up_since = clock::now();
-        SetState(node, static_cast<uint8_t>(NmtState::START));
-        // Send the node's outputs in full.
-        for (const MasterPdo *m : node.out_pdos)
-            resend_[m->master_number - 1] = true;
+        if (node.waiting)
+            SetState(node, static_cast<uint8_t>(NmtState::PREOP));
+        else
+        {
+            SetState(node, static_cast<uint8_t>(NmtState::START));
+            // Send the node's outputs in full.
+            for (const MasterPdo *m : node.out_pdos)
+                resend_[m->master_number - 1] = true;
+        }
     }
     else
     {
+        node.waiting = false;
         SetState(node, 0);
         if (node.cfg->on_loss == OnLoss::Zero)
             ZeroInputs(node);
@@ -902,12 +961,15 @@ void Network::OnTick()
     ServeClient();
     if (!running_)
         return;
+    ServeNodeControl();
     auto now = clock::now();
     for (auto &it : nodes_)
     {
         NodeState &n = it.second;
+        if (!n.enabled)
+            continue;
         if (!n.heard && !n.silent_logged &&
-            now - started_ >= std::chrono::milliseconds(cfg_.boot_timeout_ms))
+            now - n.looked_since >= std::chrono::milliseconds(cfg_.boot_timeout_ms))
         {
             // Lely waits for a node that never answers without reporting it.
             n.silent_logged = true;
@@ -1061,7 +1123,7 @@ void Network::WriteOutputs(bool all)
     {
         size_t num            = m.master_number - 1;
         const NodeState &node = nodes_[m.node_id];
-        if (!node.up)
+        if (!node.up || node.waiting)
             continue;
         bool send = all || resend_[num];
         for (size_t k = 0; k < m.pdo->entries.size(); ++k)
@@ -1369,6 +1431,9 @@ void Network::ManualNmt(uint8_t id, NmtRequest cmd)
         log_warn("%s: cannot send the NMT command: %s", n->cfg->label().c_str(), e.what());
         return;
     }
+    // A node that is off only gets the command; the master does not run it.
+    if (!n->enabled)
+        return;
     // `wait`: the node's boot-up message starts the boot; the retry is only a fallback.
     auto boot_again = [this, n, id](std::chrono::milliseconds wait)
     {
@@ -1387,7 +1452,8 @@ void Network::ManualNmt(uint8_t id, NmtRequest cmd)
     {
     case NmtRequest::Stop:
     case NmtRequest::PreOperational:
-        n->manual = true;
+        n->manual  = true;
+        n->waiting = false;
         status_.manual(id);
         if (n->up && n->cfg->on_loss == OnLoss::Zero)
         {
@@ -1405,6 +1471,8 @@ void Network::ManualNmt(uint8_t id, NmtRequest cmd)
         else if (n->up)
         {
             n->manual = false;
+            if (n->waiting)
+                StartWaiting(*n, id);
             status_.set_state(id, NodeRun::Operational);
         }
         else
@@ -1440,10 +1508,143 @@ void Network::RunNmt(unsigned node, NmtRequest cmd)
         }
         else
             for (const auto &it : nodes_)
-                ManualNmt(static_cast<uint8_t>(it.first), cmd);
+                if (it.second.enabled)
+                    ManualNmt(static_cast<uint8_t>(it.first), cmd);
     }
     else
         ManualNmt(static_cast<uint8_t>(node), cmd);
+}
+
+void Network::StartWaiting(NodeState &node, uint8_t id)
+{
+    (void)id;
+    node.waiting  = false;
+    node.up_since = clock::now(); // a late pre-operational heartbeat is answered with a start
+    SetState(node, static_cast<uint8_t>(NmtState::START));
+    for (const MasterPdo *m : node.out_pdos)
+        resend_[m->master_number - 1] = true;
+    image_.commit();
+}
+
+void Network::SetListed(const NodeState &node, uint8_t id, bool listed)
+{
+    uint32_t value = slave_assignment(*node.cfg);
+    if (!listed)
+        value &= ~0x01u;
+    std::error_code ec;
+    Write<uint32_t>(0x1F81, id, value, ec);
+    if (ec)
+        log_warn("%s: cannot change the master's network list: %s", node.cfg->label().c_str(),
+                 ec.message().c_str());
+}
+
+void Network::TurnOff(NodeState &n, uint8_t id)
+{
+    n.enabled       = false;
+    n.manual        = false;
+    n.held          = false;
+    n.retry_pending = false;
+    n.booting       = false;
+    n.silent_logged = false;
+    SetListed(n, id, false);
+    if (n.up || n.heard)
+    {
+        try
+        {
+            Command(NmtCommand::STOP, id);
+            n.seen_stopped = true; // woken with pre-operational when it is turned on again
+        }
+        catch (const std::exception &e)
+        {
+            log_warn("%s: cannot send NMT stop: %s", n.cfg->label().c_str(), e.what());
+        }
+    }
+    if (n.up)
+        SetUp(n, false);
+    status_.set_enabled(id, false, true);
+    log_info("%s turned off by the PLC program", n.cfg->label().c_str());
+}
+
+void Network::TurnOn(NodeState &n, uint8_t id)
+{
+    n.enabled       = true;
+    n.heard         = false;
+    n.silent_logged = false;
+    n.retry_pending = false;
+    n.backoff       = kRetryMin;
+    n.next_poll     = clock::now();
+    n.looked_since  = n.next_poll;
+    SetListed(n, id, true);
+    status_.set_enabled(id, true, true);
+    log_info("%s turned on by the PLC program", n.cfg->label().c_str());
+}
+
+void Network::ServeNodeControl()
+{
+    if (!plc_)
+        return;
+    for (auto &it : nodes_)
+    {
+        NodeState &n = it.second;
+        bool want    = plc_->wanted_on(it.first);
+        if (want == n.enabled)
+            continue;
+        if (want)
+            TurnOn(n, static_cast<uint8_t>(it.first));
+        else
+            TurnOff(n, static_cast<uint8_t>(it.first));
+    }
+    uint64_t gen = status_.generation();
+    if (gen == published_gen_)
+        return;
+    published_gen_ = gen;
+    for (const auto &it : nodes_)
+    {
+        NodeRun run;
+        bool held;
+        Problem problem;
+        if (!status_.node_brief(it.first, run, held, problem))
+            continue;
+        uint8_t code = CANOPEN_PLC_RUN_NOT_FOUND;
+        switch (run)
+        {
+        case NodeRun::Waiting:
+        case NodeRun::Silent:
+        case NodeRun::Absent:
+            code = CANOPEN_PLC_RUN_NOT_FOUND;
+            break;
+        case NodeRun::Booting:
+            code = CANOPEN_PLC_RUN_BOOTING;
+            break;
+        case NodeRun::Failed:
+            code = CANOPEN_PLC_RUN_FAILED;
+            break;
+        case NodeRun::WaitingStart:
+            code = CANOPEN_PLC_RUN_WAITING_START;
+            break;
+        case NodeRun::Operational:
+            code = CANOPEN_PLC_RUN_OPERATIONAL;
+            break;
+        case NodeRun::Manual:
+            code = CANOPEN_PLC_RUN_MANUAL;
+            break;
+        case NodeRun::Lost:
+            code = held ? CANOPEN_PLC_RUN_HELD : CANOPEN_PLC_RUN_LOST;
+            break;
+        case NodeRun::Disabled:
+            code = CANOPEN_PLC_RUN_DISABLED;
+            break;
+        case NodeRun::Stopped:
+        case NodeRun::Service:
+            code = CANOPEN_PLC_RUN_STOPPED;
+            break;
+        }
+        char text[CANOPEN_PLC_TEXT] = {};
+        if (code == CANOPEN_PLC_RUN_FAILED || code == CANOPEN_PLC_RUN_LOST ||
+            code == CANOPEN_PLC_RUN_HELD)
+            problem_text(problem, text, sizeof(text));
+        plc_->set_run(it.first, code, it.second.enabled, run == NodeRun::Silent, text);
+    }
 }
 
 void Network::ClientNmt(const ClientJob &job)

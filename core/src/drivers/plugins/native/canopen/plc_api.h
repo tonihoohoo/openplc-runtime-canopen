@@ -14,7 +14,7 @@
 
 #include <stdint.h>
 
-#define CANOPEN_PLC_API_VERSION 1u
+#define CANOPEN_PLC_API_VERSION 2u
 #define CANOPEN_PLC_MAX_DATA 256u
 
 // canopen_plc_api_v1.flags: the library is never unmapped, so the table and its functions stay
@@ -71,6 +71,49 @@ enum canopen_plc_device_state
     CANOPEN_PLC_UNKNOWN         = 6,
     CANOPEN_PLC_NOT_AVAIL       = 7
 };
+
+// CANOPEN_RUN_STATE of the block library, in its order: the node's state as the master runs it.
+enum canopen_plc_run_state
+{
+    CANOPEN_PLC_RUN_NOT_FOUND     = 0, // not booted yet (waiting, not answering or absent)
+    CANOPEN_PLC_RUN_BOOTING       = 1,
+    CANOPEN_PLC_RUN_FAILED        = 2, // the last boot failed; retried in the background
+    CANOPEN_PLC_RUN_WAITING_START = 3, // configured, pre-operational until the program starts it
+    CANOPEN_PLC_RUN_OPERATIONAL   = 4,
+    CANOPEN_PLC_RUN_MANUAL        = 5, // stopped or pre-operational by the program or a client
+    CANOPEN_PLC_RUN_LOST          = 6, // was up; booted again in the background
+    CANOPEN_PLC_RUN_HELD          = 7, // lost and stopped until the next PLC start
+    CANOPEN_PLC_RUN_DISABLED      = 8, // off
+    CANOPEN_PLC_RUN_STOPPED       = 9  // the PLC stopped
+};
+
+// canopen_plc_node_status.flags
+#define CANOPEN_PLC_NODE_ENABLED 0x01u       // on, as the master runs it
+#define CANOPEN_PLC_NODE_OPTIONAL 0x02u      // optional
+#define CANOPEN_PLC_NODE_PROGRAM_START 0x04u // started by the PLC program
+#define CANOPEN_PLC_NODE_SILENT 0x08u        // mandatory and not answering
+
+#define CANOPEN_PLC_TEXT 80u
+
+typedef struct canopen_plc_node_status
+{
+    uint8_t run_state; // canopen_plc_run_state
+    uint8_t flags;     // CANOPEN_PLC_NODE_*
+    uint8_t reserved[2];
+    char problem[CANOPEN_PLC_TEXT]; // the boot problem or loss in words while failed, lost or held
+} canopen_plc_node_status;
+
+typedef struct canopen_plc_network_status
+{
+    uint8_t mandatory_up; // every mandatory node that is on is operational or waits for its start
+    uint8_t optional_up;  // the same for the optional nodes
+    uint8_t configured;   // nodes operational, waiting for their start, or set by hand
+    uint8_t operational;
+    uint8_t waiting;  // waiting for the program's start
+    uint8_t disabled; // off
+    uint8_t faulty;   // failed, lost, held, or mandatory and not answering
+    uint8_t nodes;    // configured in the network
+} canopen_plc_network_status;
 
 typedef struct canopen_plc_request
 {
@@ -130,13 +173,25 @@ typedef struct canopen_plc_api_v1
     uint32_t flags;
 } canopen_plc_api_v1;
 
+// Version 2 appends the node control: the table starts with version 1's.
+typedef struct canopen_plc_api_v2
+{
+    canopen_plc_api_v1 v1;
+    int (*node_status)(uint8_t network, uint8_t node, canopen_plc_node_status *out);
+    int (*network_status)(uint8_t network, canopen_plc_network_status *out);
+    // Asks the master to turn the node on (1) or off (0); it applies the request on its next tick
+    // and reports it in node_status's CANOPEN_PLC_NODE_ENABLED. Lasts until the PLC stops.
+    int (*node_enable)(uint8_t network, uint8_t node, uint8_t on);
+} canopen_plc_api_v2;
+
 #ifdef __cplusplus
 #define CANOPEN_PLC_EXTERN_C extern "C"
 #else
 #define CANOPEN_PLC_EXTERN_C
 #endif
 
-// Exported by the plugin. Returns the table of `version`, or NULL when it has none.
+// Exported by the plugin. Returns the table of `version` (1 or 2; version 2's table serves
+// version 1 too), or NULL when it has none.
 CANOPEN_PLC_EXTERN_C const void *canopen_plc_api(uint32_t version);
 
 #endif // CANOPEN_PLC_API_H

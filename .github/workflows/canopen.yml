@@ -169,7 +169,7 @@ jobs:
       - name: The runtime reports CANopen support
         run: |
           curl -ks https://127.0.0.1:8443/api/capabilities | tee /dev/stderr \
-            | python3 -c 'import json, sys; c = json.load(sys.stdin)["canopen"]; assert 4 in c["configVersions"] and {"status", "sdo", "nmt", "service"} <= set(c["features"])'
+            | python3 -c 'import json, sys; c = json.load(sys.stdin)["canopen"]; assert 5 in c["configVersions"] and {"status", "sdo", "nmt", "service"} <= set(c["features"])'
 
       - name: Upload the project with the editor CLI
         working-directory: editor
@@ -289,6 +289,71 @@ jobs:
             exit 1
           fi
           exit "$status"
+
+      - name: Upload the node control project with the editor CLI
+        id: control
+        working-directory: editor
+        env:
+          OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
+        run: |
+          # An editor branch without node control has no such project; the check is skipped.
+          if [ ! -d ./e2e/fixtures/canopen-node-control/project ]; then
+            echo "::notice::The editor branch has no node control project; skipped"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli upload \
+            ./e2e/fixtures/canopen-node-control/project --host 127.0.0.1 --yes \
+            --user-data "$RUNNER_TEMP/editor-data" --json
+          sudo cat ../build/plugins/canopen.json
+
+      - name: The program turns a node on, waits for the mandatory nodes and starts a node
+        if: steps.control.outputs.present == 'true'
+        run: |
+          # Node 3 is off at PLC start and node 2 waits for the program's start: the program turns
+          # node 3 on, and once every mandatory node is up starts node 2 and copies its inputs to
+          # its outputs, which the simulated node 2 checks.
+          "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 3 --steps 0 \
+            --timeout 180 --linger 90 > "$RUNNER_TEMP/sim-control3.log" 2>&1 &
+          sim3=$!
+          "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 3 \
+            --timeout 180 --linger 30 > "$RUNNER_TEMP/sim-control2.log" 2>&1 &
+          sim2=$!
+          token=$(curl -ks -X POST https://127.0.0.1:8443/api/login -H 'Content-Type: application/json' \
+            -d '{"username": "ci", "password": "ci-canopen-e2e"}' \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
+          seen=
+          for _ in $(seq 1 90); do
+            if curl -ks -H "Authorization: Bearer $token" https://127.0.0.1:8443/api/canopen/status \
+              | tee /tmp/canopen-control-status.json \
+              | python3 -c 'import json, sys; n = json.load(sys.stdin)["networks"][0]; s = {x["node_id"]: x for x in n["nodes"]}; assert s[2]["start"] == "program" and s[2]["state"] == "operational" and s[3]["enabled"] and s[3]["state"] == "operational" and n["all_mandatory_up"] and any(e["kind"] == "node_on" and e["node"] == 3 for e in n["events"])' 2>/dev/null; then
+              seen=1
+              break
+            fi
+            sleep 1
+          done
+          cat /tmp/canopen-control-status.json
+          status=0
+          wait "$sim2" || status=$?
+          kill "$sim3" 2>/dev/null || true
+          wait "$sim3" 2>/dev/null || true
+          cat "$RUNNER_TEMP/sim-control2.log" "$RUNNER_TEMP/sim-control3.log"
+          if [ -z "$seen" ]; then
+            echo "::error::/api/canopen/status never reported node 3 turned on and node 2 started by the program"
+            exit 1
+          fi
+          exit "$status"
+
+      - name: Upload the first project again
+        if: steps.control.outputs.present == 'true'
+        working-directory: editor
+        env:
+          OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
+        run: |
+          # The next check needs the first project's watch of the master's heartbeat.
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli upload \
+            ./e2e/fixtures/canopen-generic-io/project --host 127.0.0.1 --yes \
+            --user-data "$RUNNER_TEMP/editor-data" --json
 
       - name: The node goes pre-operational when the runtime dies
         run: |

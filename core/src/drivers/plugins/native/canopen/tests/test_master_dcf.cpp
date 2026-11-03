@@ -20,13 +20,14 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 4,
+  "version": 5,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 250000, "master_node_id": 1,
     "heartbeat_producer_ms": 200,
     "sync": {"mode": "period", "period_us": 10000},
     "nodes": [
-      {"node_id": 2, "identity": {"vendor_id": 1, "product_code": 2},
+      {"node_id": 2, "start": "master", "enabled": true,
+       "identity": {"vendor_id": 1, "product_code": 2},
        "supervision": {"type": "heartbeat", "consumer_ms": 500},
        "sdo": [{"index": 8448, "subindex": 0, "data": "78563412"},
                {"index": 4119, "subindex": 0, "data": "6400"}],
@@ -35,7 +36,8 @@ const char *kConfig = R"({
          {"index": 25601, "subindex": 1, "type": "INTEGER16", "location": "%IW0"}]}],
        "rpdos": [{"number": 1, "cob_id": 514, "entries": [
          {"index": 25088, "subindex": 1, "type": "UNSIGNED8", "location": "%QB0"}]}]},
-      {"node_id": 5, "configure": false, "emcy": {"enabled": false},
+      {"node_id": 5, "start": "master", "enabled": true,
+       "configure": false, "emcy": {"enabled": false},
        "supervision": {"type": "guarding", "guard_time_ms": 100, "life_time_factor": 3},
        "tpdos": [{"number": 2, "cob_id": 645, "receive_timeout_ms": 250, "entries": [
          {"index": 24832, "subindex": 1, "type": "BOOLEAN", "location": "%IX4.0"},
@@ -72,7 +74,7 @@ void test_layout_and_dcf()
         return;
     }
     CHECK(co_dev_get_id(dev) == 1);
-    CHECK(u32(dev, 0x1F80, 0) == 0x1);
+    CHECK(u32(dev, 0x1F80, 0) == 0x9);
     // Never mandatory (bit 3); node 5 is not booted (bit 2) and is guarded (100 ms, factor 3).
     CHECK(u32(dev, 0x1F81, 2) == 0x05);
     CHECK(u32(dev, 0x1F81, 5) == (100u << 16 | 3u << 8 | 0x01));

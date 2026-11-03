@@ -24,10 +24,11 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 4,
+  "version": 5,
   "networks": [
     {"name": "a", "interface": "cotest-none0", "bitrate": 0, "master_node_id": 100,
-     "nodes": [{"node_id": 2, "name": "io2", "state_location": "%IB0"}]}
+     "nodes": [{"node_id": 2, "start": "master", "enabled": true,
+                "name": "io2", "state_location": "%IB0"}]}
   ]
 })";
 
@@ -100,7 +101,11 @@ int main()
     if (!api)
         return TEST_RESULT();
     entry_t entry = reinterpret_cast<entry_t>(dlsym(plugin, "canopen_plc_api"));
-    CHECK(entry && entry(2) == nullptr);
+    CHECK(entry && entry(3) == nullptr);
+    // Version 1 callers get the same table, which starts with version 1's functions.
+    CHECK(entry && entry(1) == api);
+    const canopen_plc_api_v2 *api2 = static_cast<const canopen_plc_api_v2 *>(entry(2));
+    CHECK(api2 && api2->v1.size >= sizeof(canopen_plc_api_v2) && api2->v1.version == 2);
     // The table says it stays valid, so a block may keep it across PLC runs.
     CHECK(api->size >= offsetof(canopen_plc_api_v1, flags) + sizeof(api->flags));
     CHECK((api->flags & CANOPEN_PLC_FLAG_PERMANENT) != 0);
@@ -195,6 +200,19 @@ int main()
         CHECK(api->emcy_cursor(1, &cursor) == CANOPEN_PLC_NO_ERROR);
         CHECK(api->emcy_next(1, 0, &cursor, &e) == 0);
         CHECK(api->emcy_next(1, 3, &cursor, &e) == -CANOPEN_PLC_NODE_ID_UNKNOWN);
+        // Node control: the request is taken without waiting, its state comes back later.
+        canopen_plc_node_status ns{};
+        canopen_plc_network_status nets{};
+        const canopen_plc_api_v2 *v2 = reinterpret_cast<const canopen_plc_api_v2 *>(api);
+        CHECK(v2->node_status(1, 2, &ns) == CANOPEN_PLC_NO_ERROR);
+        CHECK(ns.run_state == CANOPEN_PLC_RUN_NOT_FOUND && (ns.flags & CANOPEN_PLC_NODE_ENABLED));
+        CHECK(v2->node_status(1, 3, &ns) == CANOPEN_PLC_NODE_ID_UNKNOWN);
+        CHECK(v2->node_status(1, 2, nullptr) == CANOPEN_PLC_WRONG_PARAMETER);
+        CHECK(v2->network_status(1, &nets) == CANOPEN_PLC_NO_ERROR && nets.nodes == 1 &&
+              !nets.mandatory_up && nets.optional_up);
+        CHECK(v2->network_status(2, &nets) == CANOPEN_PLC_NET_ID_UNKNOWN);
+        CHECK(v2->node_enable(1, 3, 0) == CANOPEN_PLC_NODE_ID_UNKNOWN);
+        CHECK(v2->node_enable(1, 2, 0) == CANOPEN_PLC_NO_ERROR);
         // A handle of an earlier load is never another request's.
         CHECK(api->poll(0x1234567800010000ull, &res, nullptr, 0) == 2 &&
               res.error == CANOPEN_PLC_NO_DRIVER && res.reason == CANOPEN_PLC_REASON_RESTART);

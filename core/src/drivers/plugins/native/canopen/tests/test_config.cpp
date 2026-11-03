@@ -14,13 +14,13 @@ namespace
 {
 
 const char *kValid = R"({
-  "version": 4,
+  "version": 5,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 500000,
     "heartbeat_producer_ms": 100,
     "sync": {"mode": "plc_cycle"},
     "nodes": [{
-      "node_id": 2, "name": "io1",
+      "node_id": 2, "start": "master", "enabled": true, "name": "io1",
       "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
       "supervision": {"type": "heartbeat", "consumer_ms": 300},
       "on_loss": "zero",
@@ -108,19 +108,34 @@ void test_valid()
     CHECK(n.emcy_enabled && n.emcy_cob_id == 0x82);
     CHECK(net.boot_timeout_ms == 2000 && net.on_node_error == OnNodeError::Restart);
     CHECK(!net.time_producer);
+    CHECK(!n.program_start && n.enabled);
+}
+
+void test_start_and_enabled()
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    std::string text = with(kValid, "\"start\": \"master\", \"enabled\": true",
+                            "\"start\": \"program\", \"enabled\": false");
+    CHECK(parse_config(text, cfg, errors));
+    CHECK(errors.empty());
+    const NodeConfig &n = cfg.networks[0].nodes[0];
+    CHECK(n.program_start && !n.enabled);
+    CHECK(refused_with(with(kValid, "\"enabled\": true", "\"enabled\": 1"), "true or false"));
 }
 
 void test_node_options()
 {
     Config cfg;
     std::vector<std::string> errors;
-    std::string text =
-        with(with(kValid, "\"node_id\": 2, \"name\": \"io1\",",
-                  "\"node_id\": 2, \"name\": \"io1\", \"optional\": true, "
-                  "\"restore_defaults\": 2, \"emcy\": {\"enabled\": true, \"cob_id\": 242},"),
-             "\"supervision\": {\"type\": \"heartbeat\", \"consumer_ms\": 300}",
-             "\"supervision\": {\"type\": \"guarding\", \"guard_time_ms\": 100, "
-             "\"life_time_factor\": 3}");
+    std::string text = with(
+        with(kValid, "\"node_id\": 2, \"start\": \"master\", \"enabled\": true, \"name\": \"io1\",",
+             "\"node_id\": 2, \"start\": \"master\", \"enabled\": true, \"name\": \"io1\", "
+             "\"optional\": true, "
+             "\"restore_defaults\": 2, \"emcy\": {\"enabled\": true, \"cob_id\": 242},"),
+        "\"supervision\": {\"type\": \"heartbeat\", \"consumer_ms\": 300}",
+        "\"supervision\": {\"type\": \"guarding\", \"guard_time_ms\": 100, "
+        "\"life_time_factor\": 3}");
     text = with(text, "\"bitrate\": 500000,",
                 "\"bitrate\": 500000, \"boot_timeout_ms\": 5000, \"on_node_error\": \"stop\", "
                 "\"time\": {\"cob_id\": 256, \"period_ms\": 500},");
@@ -135,27 +150,33 @@ void test_node_options()
     CHECK(net.time_producer && net.time_cob_id == 0x100 && net.time_period_ms == 500);
 
     // Not initialized: no restore and no configuration SDOs.
-    std::string no_init = with(kValid, "\"node_id\": 2, \"name\": \"io1\",",
-                               "\"node_id\": 2, \"name\": \"io1\", \"configure\": false, "
-                               "\"restore_defaults\": 1,");
+    std::string no_init =
+        with(kValid, "\"node_id\": 2, \"start\": \"master\", \"enabled\": true, \"name\": \"io1\",",
+             "\"node_id\": 2, \"start\": \"master\", \"enabled\": true, \"name\": \"io1\", "
+             "\"configure\": false, "
+             "\"restore_defaults\": 1,");
     CHECK(refused_with(no_init, "restore defaults needs"));
     CHECK(refused_with(no_init, "has configuration SDOs but is not initialized"));
     CHECK(refused_with(with(kValid, "\"type\": \"heartbeat\", \"consumer_ms\": 300",
                             "\"type\": \"guarding\", \"guard_time_ms\": 0, "
                             "\"life_time_factor\": 3"),
                        "guard_time_ms"));
-    CHECK(refused_with(with(kValid, "\"node_id\": 2, \"name\": \"io1\",",
-                            "\"node_id\": 2, \"name\": \"io1\", \"emcy\": {\"cob_id\": 386},"),
-                       "same COB-ID"));
+    CHECK(refused_with(
+        with(kValid, "\"node_id\": 2, \"start\": \"master\", \"enabled\": true, \"name\": \"io1\",",
+             "\"node_id\": 2, \"start\": \"master\", \"enabled\": true, \"name\": \"io1\", "
+             "\"emcy\": {\"cob_id\": 386},"),
+        "same COB-ID"));
     CHECK(refused_with(
         with(kValid, "\"bitrate\": 500000,", "\"bitrate\": 500000, \"on_node_error\": \"reboot\","),
         "on_node_error"));
     CHECK(refused_with(
         with(kValid, "\"bitrate\": 500000,", "\"bitrate\": 500000, \"time\": {\"cob_id\": 1793},"),
         "reserved"));
-    CHECK(refused_with(with(kValid, "\"node_id\": 2, \"name\": \"io1\",",
-                            "\"node_id\": 2, \"name\": \"io1\", \"optional\": 1,"),
-                       "true or false"));
+    CHECK(refused_with(
+        with(kValid, "\"node_id\": 2, \"start\": \"master\", \"enabled\": true, \"name\": \"io1\",",
+             "\"node_id\": 2, \"start\": \"master\", \"enabled\": true, \"name\": \"io1\", "
+             "\"optional\": 1,"),
+        "true or false"));
 }
 
 void test_receive_timeout()
@@ -172,8 +193,13 @@ void test_receive_timeout()
 void test_refusals()
 {
     CHECK(refused_with("{", "not valid JSON"));
-    CHECK(refused_with(with(kValid, "\"version\": 4", "\"version\": 3"),
-                       "version 3 is not supported (this runtime reads version 4)"));
+    CHECK(refused_with(with(kValid, "\"version\": 5", "\"version\": 4"),
+                       "version 4 is not supported (this runtime reads version 5)"));
+    CHECK(refused_with(with(kValid, "\"start\": \"master\", ", ""), "missing \"start\""));
+    CHECK(refused_with(with(kValid, "\"start\": \"master\"", "\"start\": \"plc\""),
+                       "\"start\" \"plc\" is not one of master, program"));
+    CHECK(refused_with(with(kValid, "\"enabled\": true, \"name\"", "\"name\""),
+                       "missing \"enabled\""));
     CHECK(refused_with(with(kValid, "\"tpdos\": [{\"number\": 1,",
                             "\"tpdos\": [{\"number\": 1, \"receive_timeout_ms\": 70000,"),
                        "receive_timeout_ms"));
@@ -258,7 +284,8 @@ void test_sdo_policies()
     CHECK(cfg.networks[0].nodes[0].sdo[0].jump_to == 2);
     CHECK(errors.empty());
 
-    CHECK(refused_with(with_policy(", \"on_abort\": \"retry\""), "not one of stop, continue, jump"));
+    CHECK(
+        refused_with(with_policy(", \"on_abort\": \"retry\""), "not one of stop, continue, jump"));
     CHECK(refused_with(with_policy(", \"on_abort\": \"jump\""), "jump_to"));
     CHECK(refused_with(with_policy(", \"on_abort\": \"jump\", \"jump_to\": 0"),
                        "node 2 (io1): SDO 1"));
@@ -311,6 +338,7 @@ int main()
     test_valid();
     test_refusals();
     test_node_options();
+    test_start_and_enabled();
     test_receive_timeout();
     test_output_overlap_warns();
     test_priority();
