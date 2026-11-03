@@ -397,7 +397,7 @@ void check_master_watch(std::shared_ptr<lely::io::VirtualCanController> vbus,
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/watch.dcf";
     {
         FILE *f       = std::fopen(dcf.c_str(), "w");
@@ -464,7 +464,7 @@ void check_node_options(std::shared_ptr<lely::io::VirtualCanController> vbus,
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/options.dcf";
     {
         FILE *f       = std::fopen(dcf.c_str(), "w");
@@ -661,7 +661,7 @@ void check_bus_off_reset(std::shared_ptr<lely::io::VirtualCanController> vbus,
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/busoff.dcf";
     {
         FILE *f       = std::fopen(dcf.c_str(), "w");
@@ -738,7 +738,7 @@ void check_link_fault_reset(std::shared_ptr<lely::io::VirtualCanController> vbus
         const NetworkConfig &net = cfg.networks[0];
         MasterLayout layout      = master_layout(net);
         ProcessImage image;
-        CHECK(image.build(net, layout, kSize, errors));
+        CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
         std::string dcf = dir + "/linkfault.dcf";
         {
             FILE *f       = std::fopen(dcf.c_str(), "w");
@@ -880,7 +880,7 @@ void check_boot_after_lost_reset(const std::string &dir, const plugin_runtime_ar
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/lostreset.dcf";
     {
         FILE *f       = std::fopen(dcf.c_str(), "w");
@@ -946,7 +946,7 @@ void check_service_mode(std::shared_ptr<lely::io::VirtualCanController> vbus,
     MasterLayout layout     = master_layout(net);
     ProcessImage image;
     std::vector<std::string> errors;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/service.dcf";
     {
         FILE *f       = std::fopen(dcf.c_str(), "w");
@@ -1152,7 +1152,7 @@ void check_plc_blocks(std::shared_ptr<lely::io::VirtualCanController> vbus, cons
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/plc.dcf";
     {
         FILE *f       = std::fopen(dcf.c_str(), "w");
@@ -1332,7 +1332,7 @@ void check_node_control(std::shared_ptr<lely::io::VirtualCanController> vbus,
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/control.dcf";
     {
         FILE *f       = std::fopen(dcf.c_str(), "w");
@@ -1485,7 +1485,7 @@ void check_early_enable(std::shared_ptr<lely::io::VirtualCanController> vbus,
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/control.dcf";
     SimSlaveSpec spec2;
     spec2.node_id = 2;
@@ -1539,7 +1539,7 @@ void check_mark_all_down(const plugin_runtime_args_t &rt)
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     // io1 holds (%IB0, %IW0), timed zeroes (%IB2).
     for (size_t i = 0; i < layout.input_entries; ++i)
         image.set_input(i, 0x55);
@@ -1570,7 +1570,7 @@ void check_session_failure(std::shared_ptr<lely::io::VirtualCanController> vbus,
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     NetworkStatus status(net);
     const size_t before = errors_with("CANopen session failed");
     Bus bus(net, layout, image, status, dir + "/missing.dcf", vbus);
@@ -1630,7 +1630,7 @@ void check_boot_options(std::shared_ptr<lely::io::VirtualCanController> vbus,
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/boot.dcf";
     {
         FILE *f       = std::fopen(dcf.c_str(), "w");
@@ -1708,7 +1708,7 @@ int main()
     const NetworkConfig &net = cfg.networks[0];
     MasterLayout layout      = master_layout(net);
     ProcessImage image;
-    CHECK(image.build(net, layout, kSize, errors));
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
     std::string dcf = dir + "/master.dcf";
     {
         FILE *f          = std::fopen(dcf.c_str(), "w");

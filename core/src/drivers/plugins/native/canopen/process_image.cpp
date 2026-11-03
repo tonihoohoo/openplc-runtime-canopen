@@ -31,16 +31,62 @@ void ProcessImage::drain_wake()
         ignore_result(read(wake_fd_, &n, sizeof(n)));
 }
 
-bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout, int image_size,
-                         std::vector<std::string> &errors)
+namespace
+{
+
+size_t size_slot(IecSize size)
+{
+    switch (size)
+    {
+    case IecSize::X:
+        return 0;
+    case IecSize::B:
+        return 1;
+    case IecSize::W:
+        return 2;
+    case IecSize::D:
+        return 3;
+    case IecSize::L:
+        return 4;
+    }
+    return 0;
+}
+
+} // namespace
+
+ImageSizes ImageSizes::uniform(int entries)
+{
+    ImageSizes sizes;
+    sizes.bounded = entries > 0;
+    for (size_t i = 0; i < 5; ++i)
+    {
+        sizes.input[i]  = entries > 0 ? static_cast<uint32_t>(entries) : 0;
+        sizes.output[i] = sizes.input[i];
+    }
+    return sizes;
+}
+
+uint32_t ImageSizes::capacity(const IecLocation &loc) const
+{
+    const size_t slot = size_slot(loc.size);
+    return loc.area == IecArea::Input ? input[slot] : output[slot];
+}
+
+bool ImageSizes::contains(const IecLocation &loc) const
+{
+    return !bounded || loc.index < capacity(loc);
+}
+
+bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,
+                         const ImageSizes &sizes, std::vector<std::string> &errors)
 {
     size_t failed = errors.size();
     auto check    = [&](const IecLocation &loc)
     {
-        if (image_size > 0 && loc.index >= static_cast<uint32_t>(image_size))
+        if (!sizes.contains(loc))
             errors.push_back(net.label() + ": location " + loc.str() +
                              " lies outside the runtime's I/O image (" +
-                             std::to_string(image_size) + " entries)");
+                             std::to_string(sizes.capacity(loc)) + " entries in its table)");
     };
     in_locs_.clear();
     out_locs_.clear();

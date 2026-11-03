@@ -100,6 +100,8 @@ int main()
     CHECK(api != nullptr);
     if (!api)
         return TEST_RESULT();
+    // Its presence tells the runtime the plugin takes per-table image sizes.
+    CHECK(dlsym(plugin, "set_image_sizes") != nullptr);
     entry_t entry = reinterpret_cast<entry_t>(dlsym(plugin, "canopen_plc_api"));
     CHECK(entry && entry(3) == nullptr);
     // Version 1 callers get the same table, which starts with version 1's functions.
