@@ -253,6 +253,27 @@ jobs:
             echo "== sim-lss-$f"; cat "$RUNNER_TEMP/sim-lss-$f.log" 2>/dev/null || true
           done
           exit "$status"
+      - name: LSS search ended by a device answering out of turn
+        run: |
+          sim="$PLUGIN_DIR/build-sim/tests/canopen_sim_slave"
+          "$sim" --interface vcan0 --node 2 --steps 1 --timeout 120 --linger 200 \
+            > "$RUNNER_TEMP/sim-oot-node2.log" 2>&1 &
+          node2=$!
+          python3 .github/scripts/lss_out_of_turn_device.py --interface vcan0 --serial 0x1234 \
+            --seconds 200 > "$RUNNER_TEMP/sim-oot-device.log" 2>&1 &
+          device=$!
+          "$sim" --interface vcan0 --node 255 --lss-serial 0x5679 --steps 0 --linger 200 \
+            > "$RUNNER_TEMP/sim-oot-other.log" 2>&1 &
+          other=$!
+          status=0
+          python3 .github/scripts/canopen_lss_out_of_turn_e2e.py --user ci \
+            --password ci-canopen-e2e || status=$?
+          kill "$node2" "$device" "$other" 2>/dev/null || true
+          wait 2>/dev/null || true
+          for f in node2 device other; do
+            echo "== sim-oot-$f"; cat "$RUNNER_TEMP/sim-oot-$f.log" 2>/dev/null || true
+          done
+          exit "$status"
 
       - name: Upload the PLC function block project with the editor CLI
         id: blocks
