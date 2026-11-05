@@ -144,6 +144,8 @@ class Parser
     bool parse_device(const cJSON *j, size_t pos, DeviceConfig &dev);
     void parse_slave_lss(const cJSON *j, const std::string &where, SlaveLss &lss);
     bool parse_object(const cJSON *j, const std::string &where, SlaveObject &obj);
+    void parse_packed_bits(const cJSON *j, const cJSON *bits, const std::string &w, IecArea area,
+                           SlaveObject &obj);
     bool parse_value(const cJSON *v, const std::string &where, const char *key, CoType type,
                      uint64_t &out);
     void parse_slave_pdos(const cJSON *j, const char *key, const std::string &where, bool tpdo,
@@ -861,8 +863,15 @@ void Parser::check_locations()
     }
     for (const auto &dev : cfg_.devices)
         for (const auto &o : dev.objects)
-            if (o.exch != SlaveExchange::Constant)
-                uses.push_back({o.location, dev.label() + " " + object_text(o.index, o.subindex)});
+        {
+            if (o.exch == SlaveExchange::Constant)
+                continue;
+            const std::string what = dev.label() + " " + object_text(o.index, o.subindex);
+            if (!o.packed())
+                uses.push_back({o.location, what});
+            for (size_t k = 0; k < o.bits.size(); ++k)
+                uses.push_back({o.bits[k], what + " bit " + std::to_string(k)});
+        }
     for (size_t a = 0; a < uses.size(); ++a)
     {
         for (size_t b = a + 1; b < uses.size(); ++b)
@@ -1011,6 +1020,8 @@ bool Parser::parse_object(const cJSON *j, const std::string &where, SlaveObject 
         if (cJSON_GetObjectItemCaseSensitive(j, "min") ||
             cJSON_GetObjectItemCaseSensitive(j, "max"))
             error(w, "a constant has no \"min\" or \"max\"");
+        if (cJSON_GetObjectItemCaseSensitive(j, "bits"))
+            error(w, "a constant has no \"bits\"");
         return errors_.size() == failed;
     }
     if (obj.string)
@@ -1020,6 +1031,11 @@ bool Parser::parse_object(const cJSON *j, const std::string &where, SlaveObject 
     }
     std::string text, why;
     const IecArea area = obj.dir == SlaveDirection::FromMaster ? IecArea::Input : IecArea::Output;
+    if (const cJSON *bits = cJSON_GetObjectItemCaseSensitive(j, "bits"))
+    {
+        parse_packed_bits(j, bits, w, area, obj);
+        return errors_.size() == failed;
+    }
     if (!get_string(j, "location", w, text, true))
         return false;
     if (!parse_iec_location(text, obj.location, why))
@@ -1049,6 +1065,50 @@ bool Parser::parse_object(const cJSON *j, const std::string &where, SlaveObject 
             error(w, "the default is outside \"min\" to \"max\"");
     }
     return errors_.size() == failed;
+}
+
+void Parser::parse_packed_bits(const cJSON *j, const cJSON *bits, const std::string &w,
+                               IecArea area, SlaveObject &obj)
+{
+    if (obj.type != CoType::UNSIGNED8)
+        error(w, std::string("\"bits\" needs type UNSIGNED8, not ") + co_type_name(obj.type));
+    if (cJSON_GetObjectItemCaseSensitive(j, "location"))
+        error(w, "an object with \"bits\" has no \"location\"");
+    if (cJSON_GetObjectItemCaseSensitive(j, "min") || cJSON_GetObjectItemCaseSensitive(j, "max"))
+        error(w, "an object with \"bits\" has no \"min\" or \"max\"");
+    if (!cJSON_IsArray(bits) || cJSON_GetArraySize(bits) != 8)
+    {
+        error(w, "\"bits\" must list 8 locations");
+        return;
+    }
+    const char *want = area == IecArea::Input ? "%IX" : "%QX";
+    const cJSON *b   = nullptr;
+    cJSON_ArrayForEach(b, bits)
+    {
+        IecLocation loc;
+        std::string why;
+        if (!cJSON_IsString(b))
+        {
+            error(w, "\"bits\" must list 8 locations");
+            return;
+        }
+        const std::string text = b->valuestring;
+        if (!parse_iec_location(text, loc, why))
+            error(w, "bit location \"" + text + "\": " + why);
+        else if (loc.area != area || loc.size != IecSize::X)
+            error(w, "bit location " + text + " must be a " + want + " location");
+        else
+        {
+            for (const auto &other : obj.bits)
+                if (other.overlaps(loc))
+                    error(w, "bit location " + text + " is given twice");
+            obj.bits.push_back(loc);
+        }
+    }
+    if (obj.bits.size() != 8)
+        obj.bits.clear();
+    if (const cJSON *def = cJSON_GetObjectItemCaseSensitive(j, "default"))
+        parse_value(def, w, "default", obj.type, obj.value);
 }
 
 void Parser::parse_slave_pdos(const cJSON *j, const char *key, const std::string &where, bool tpdo,

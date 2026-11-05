@@ -2,9 +2,10 @@
 """End-to-end check of the CANopen slave through a raw SocketCAN master.
 
 Needs the slave e2e project running in the runtime: node 5 on the interface, a program that copies
-0x2000:1 (from the master) to 0x2100:1 and the parameter 0x2000:3 to 0x2100:2, RPDO1 0x205 and an
-event TPDO1 0x185, a heartbeat of 100 ms and a watch of master node 127. This script plays the
-master: SDO reads and writes with range checks, NMT start, an RPDO in and the TPDO back, the master
+0x2000:1 (from the master) to 0x2100:1, the parameter 0x2000:3 to 0x2100:2 and the eight bits of the
+packed 0x2000:4 to those of the packed 0x2100:3, RPDO1 0x205 and an event TPDO1 0x185, a heartbeat
+of 100 ms and a watch of master node 127. This script plays the master: SDO reads and writes with
+range checks, NMT start, an RPDO in and the TPDO back (packed bits included), the master
 heartbeat lost and back, the PLC stopped and started, and the slave in /api/canopen/status with its
 NMT source, SDO writes, PDO counts, values and active EMCY codes.
 
@@ -224,15 +225,24 @@ def main() -> None:
         True,
     )
     start = bus.mark()
-    bus.send(0x200 + NODE, struct.pack("<hB", 0x1234, 7))
+    bus.send(0x200 + NODE, struct.pack("<hBB", 0x1234, 7, 0xA5))
     expect(
-        "TPDO carries the RPDO value and the parameter back through the program",
+        "TPDO carries the RPDO value, the parameter and the packed bits back through the program",
         bus.wait(
             start,
-            lambda f: f[0] == 0x180 + NODE and f[1][:4] == struct.pack("<hH", 0x1234, 1234),
+            lambda f: f[0] == 0x180 + NODE and f[1][:5] == struct.pack("<hHB", 0x1234, 1234, 0xA5),
             5,
         )
         is not None,
+        True,
+    )
+    expect("packed bits from the master by SDO", sdo_read(bus, 0x2000, 4), (0, 0xA5))
+    expect("packed bits to the master by SDO", sdo_read(bus, 0x2100, 3), (0, 0xA5))
+    start = bus.mark()
+    expect("packed bits written by SDO", sdo_write(bus, 0x2000, 4, 0x3C, 1), 0)
+    expect(
+        "TPDO carries the bits the master wrote by SDO",
+        bus.wait(start, lambda f: f[0] == 0x180 + NODE and f[1][4:5] == b"\x3c", 5) is not None,
         True,
     )
     wait_status(
