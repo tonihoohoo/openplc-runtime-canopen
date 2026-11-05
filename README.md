@@ -13,8 +13,9 @@
 > runtime a CANopen slave whose objects the program reads and writes (a byte can also be packed as 8
 > separate bits), with its state and what the
 > master changed reported to the editor ([CANopen slave](docs/CANOPEN.md#canopen-slave)), and which an
-> LSS master can give its node ID and bit rate ([LSS in the slave](docs/CANOPEN.md#lss-in-the-slave)).
-> The configuration is made in the
+> LSS master can give its node ID and bit rate ([LSS in the slave](docs/CANOPEN.md#lss-in-the-slave)); the
+> program can read the slave's state, change its NMT state, raise its own emergencies and see each
+> write of the master ([PLC function blocks](docs/CANOPEN.md#plc-function-blocks)). The configuration is made in the
 > [OpenPLC Editor (CANopen edition)](https://github.com/tonihoohoo/openplc-editor-canopen); everything
 > else works as in upstream OpenPLC Runtime.
 >

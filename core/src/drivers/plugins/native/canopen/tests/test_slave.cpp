@@ -8,7 +8,9 @@
 // from the configuration the slave's EDS would give and exchanges PDOs with it. Last, LSS: an LSS
 // master on raw frames finds an unconfigured slave by fastscan, gives it a node ID and a bit rate
 // and stores them; selective switch, inquire, a node ID change on a configured slave, store
-// failure, bit rate refused, forget and LSS off.
+// failure, bit rate refused, forget and LSS off. The PLC block side (plc_api.h
+// version 3): status, local NMT, program emergencies, write counters and the NMT state on PLC
+// stop.
 
 #include <algorithm>
 #include <atomic>
@@ -45,7 +47,7 @@ namespace
 {
 
 const char *const kConfig = R"({
-  "version": 10,
+  "version": 11,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "vcan-slave", "bitrate": 0, "node_id": 5,
@@ -55,6 +57,7 @@ const char *const kConfig = R"({
     "master_watch": {"node_id": 127, "time_ms": 300},
     "on_master_lost": "pre_operational",
     "on_plc_stop": "hold",
+    "on_plc_stop_state": "none",
     "objects": [
       {"index": 8192, "subindex": 1, "name": "Setpoint", "type": "INTEGER16",
        "direction": "from_master", "exchange": "pdo", "location": "%IW0", "default": 0},
@@ -825,7 +828,7 @@ void check_bus_off(const DeviceConfig &dev)
 
 // Our master boots the slave and exchanges PDOs with it.
 const char *const kMasterConfig = R"({
-  "version": 10,
+  "version": 11,
   "networks": [{
     "name": "line", "interface": "vcan-master", "bitrate": 0, "master_node_id": 127,
     "heartbeat_producer_ms": 100,
@@ -904,13 +907,14 @@ constexpr uint32_t kLssMaster = 0x7E5;
 constexpr uint32_t kLssSlave  = 0x7E4;
 
 const char *const kLssConfig = R"({
-  "version": 10,
+  "version": 11,
   "networks": [],
   "devices": [{
     "name": "lss", "interface": "vcan-lss", "bitrate": 500000, "node_id": 5,
     "identity": {"device_name": "test-node", "vendor_id": 4660, "product_code": 1,
                  "revision": 65536},
     "heartbeat_ms": 100,
+    "on_plc_stop_state": "none",
     "lss": {"enabled": true, "wait_for_master": true, "serial": 23},
     "objects": [
       {"index": 8448, "subindex": 1, "name": "Status", "type": "UNSIGNED16",
@@ -1143,16 +1147,227 @@ void check_lss(const plugin_runtime_args_t &rt, const std::string &dir)
     }
 }
 
+// The slave's side of the PLC blocks, as the scan calls it.
+void check_program(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
+{
+    auto vbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
+    Probe p(vbus);
+    size_t m = p.mark();
+    Slave slave(dev, virtual_slave_link(vbus));
+    std::string problem;
+    CHECK(slave.start(problem));
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x7F; }, milliseconds(1000)));
+    auto status_until = [&](std::function<bool(const canopen_plc_slave_status &)> ok)
+    {
+        auto end = Clock::now() + milliseconds(500);
+        for (;;)
+        {
+            canopen_plc_slave_status st{};
+            slave.plc_status(st);
+            if (ok(st))
+                return true;
+            if (Clock::now() >= end)
+                return false;
+            std::this_thread::sleep_for(milliseconds(5));
+        }
+    };
+    CHECK(status_until(
+        [](const canopen_plc_slave_status &st)
+        {
+            return st.state == CANOPEN_PLC_PRE_OPERATIONAL && st.node_id == kNode &&
+                   (st.flags & CANOPEN_PLC_SLAVE_ON_BUS) &&
+                   (st.flags & CANOPEN_PLC_SLAVE_MASTER_WATCHED) &&
+                   !(st.flags & CANOPEN_PLC_SLAVE_MASTER_SEEN) &&
+                   st.bus_state == CANOPEN_PLC_BUS_ERROR_ACTIVE;
+        }));
+
+    // Local NMT: operational, pre-operational, refused resets.
+    bool done = true;
+    CHECK(slave.plc_nmt(0x81) == CANOPEN_PLC_WRONG_PARAMETER);
+    CHECK(slave.plc_nmt(0x82) == CANOPEN_PLC_WRONG_PARAMETER);
+    CHECK(slave.plc_nmt_done(0x01, done) == CANOPEN_PLC_NO_ERROR && !done);
+    m = p.mark();
+    CHECK(slave.plc_nmt(0x01) == CANOPEN_PLC_NO_ERROR);
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x05; }, milliseconds(500)));
+    CHECK(status_until([](const canopen_plc_slave_status &st)
+                       { return st.state == CANOPEN_PLC_OPERATIONAL; }));
+    CHECK(slave.plc_nmt_done(0x01, done) == CANOPEN_PLC_NO_ERROR && done);
+    const auto t0 = Clock::now();
+    CHECK(slave.plc_nmt(0x80) == CANOPEN_PLC_NO_ERROR);
+    CHECK(status_until([](const canopen_plc_slave_status &st)
+                       { return st.state == CANOPEN_PLC_PRE_OPERATIONAL; }));
+    CHECK(Clock::now() - t0 < milliseconds(50));
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            return s.nmt == 127 && s.nmt_by == SlaveNmtBy::Program &&
+                   find_event(
+                       s, [](const SlaveEvent &e)
+                       { return e.kind == SlaveEventKind::Nmt && e.by == SlaveNmtBy::Program; });
+        },
+        milliseconds(500)));
+    p.send(0x000, {0x01, kNode});
+    CHECK(status_until([](const canopen_plc_slave_status &st)
+                       { return st.state == CANOPEN_PLC_OPERATIONAL; }));
+
+    // Program emergencies: a temperature alarm with its info, then a manufacturer one.
+    uint32_t a = 0, b = 0;
+    CHECK(slave.plc_emcy_claim(a) == CANOPEN_PLC_NO_ERROR);
+    CHECK(slave.plc_emcy_claim(b) == CANOPEN_PLC_NO_ERROR && a != b);
+    CHECK(slave.plc_emcy(a, true, 0x6200, 0) == CANOPEN_PLC_WRONG_PARAMETER);
+    CHECK(slave.plc_emcy(a, true, 0x8130, 0) == CANOPEN_PLC_WRONG_PARAMETER);
+    CHECK(slave.plc_emcy(a, true, 0x0000, 0) == CANOPEN_PLC_WRONG_PARAMETER);
+    CHECK(slave.plc_emcy(0x12345678, true, 0x4210, 0) == CANOPEN_PLC_REQUEST_ERROR);
+    Frame f;
+    m = p.mark();
+    CHECK(slave.plc_emcy(a, true, 0x4210, 865) == CANOPEN_PLC_NO_ERROR);
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x4210); }, milliseconds(500), &f));
+    CHECK(f.data[2] == 0x09 && le32(f.data + 4) == 865);
+    CHECK(slave.plc_emcy(a, true, 0x4210, 865) == CANOPEN_PLC_NO_ERROR); // unchanged: no frame
+    std::this_thread::sleep_for(milliseconds(30));
+    CHECK(p.count(m, 0x80 + kNode) == 1);
+    m = p.mark();
+    CHECK(slave.plc_emcy(a, true, 0x4210, 870) == CANOPEN_PLC_NO_ERROR); // new info: one EMCY
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x4210); }, milliseconds(500), &f));
+    CHECK(le32(f.data + 4) == 870);
+    std::this_thread::sleep_for(milliseconds(30));
+    CHECK(p.count(m, 0x80 + kNode) == 1);
+    m = p.mark();
+    CHECK(slave.plc_emcy(b, true, 0xFF01, 0) == CANOPEN_PLC_NO_ERROR);
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0xFF01); }, milliseconds(500), &f));
+    CHECK(f.data[2] == 0x89);
+    CHECK(status_until([](const canopen_plc_slave_status &st)
+                       { return st.error_register == 0x89 && st.emcy_active == 2; }));
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            return s.emcy_program.size() == 2 &&
+                   find_event(
+                       s, [](const SlaveEvent &e)
+                       { return e.kind == SlaveEventKind::Emcy && e.code == 0xFF01 && e.program; });
+        },
+        milliseconds(500)));
+    m = p.mark();
+    CHECK(slave.plc_emcy(a, false, 0, 0) == CANOPEN_PLC_NO_ERROR);
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(500), &f));
+    CHECK(f.data[2] == 0x81);
+    m = p.mark();
+    CHECK(slave.plc_emcy(b, false, 0, 0) == CANOPEN_PLC_NO_ERROR);
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(500), &f));
+    CHECK(f.data[2] == 0x00);
+
+    // Write counters: SDO writes with the same value, RPDOs, unknown objects.
+    uint32_t c0 = 0, c1 = 0;
+    CHECK(slave.plc_written(0x2000, 9, c0) == CANOPEN_PLC_WRONG_PARAMETER);
+    CHECK(slave.plc_written(0x2000, 4, c0) == CANOPEN_PLC_NO_ERROR);
+    CHECK(sdo_write(p, 0x2000, 4, 500, 2) == 0);
+    CHECK(sdo_write(p, 0x2000, 4, 500, 2) == 0);
+    CHECK(sdo_write(p, 0x2000, 4, 50, 2) == 0x06090032); // refused writes do not count
+    CHECK(slave.plc_written(0x2000, 4, c1) == CANOPEN_PLC_NO_ERROR && c1 == c0 + 2);
+    CHECK(slave.plc_written(0x2000, 1, c0) == CANOPEN_PLC_NO_ERROR);
+    m = p.mark();
+    for (int i = 0; i < 3; ++i)
+    {
+        p.send(0x205, {0x10, 0x00, 0x01});
+        std::this_thread::sleep_for(milliseconds(10));
+    }
+    std::this_thread::sleep_for(milliseconds(30));
+    CHECK(slave.plc_written(0x2000, 1, c1) == CANOPEN_PLC_NO_ERROR && c1 == c0 + 3);
+    CHECK(slave.plc_written(0x2100, 1, c1) == CANOPEN_PLC_NO_ERROR && c1 == 0); // to the master
+
+    // PLC stop with an alarm active and 0x1029 sub 2 set to pre-operational by the master.
+    uint32_t v = 0;
+    CHECK(sdo_read(p, 0x1029, 0, v) && v == 2);
+    CHECK(sdo_read(p, 0x1029, 2, v) && v == 1);
+    CHECK(sdo_write(p, 0x1029, 2, 3, 1) == 0x06090030);
+    CHECK(sdo_write(p, 0x1029, 2, 0, 1) == 0);
+    CHECK(slave.plc_emcy(a, true, 0x4210, 1) == CANOPEN_PLC_NO_ERROR);
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x4210); }, milliseconds(500)));
+    std::this_thread::sleep_for(milliseconds(20));
+    m = p.mark();
+    slave.set_plc_running(false);
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x6200); }, milliseconds(500)));
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x7F; }, milliseconds(500)));
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            return s.nmt == 127 && s.nmt_by == SlaveNmtBy::PlcStop && s.emcy_program.empty() &&
+                   s.on_plc_stop_state == 0 && s.emcy_active.size() == 1 &&
+                   s.emcy_active[0] == 0x6200;
+        },
+        milliseconds(500)));
+    // A PLC start keeps the state; handles of the earlier run are refused.
+    m = p.mark();
+    slave.set_plc_running(true);
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(500)));
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x7F; }, milliseconds(300)));
+    CHECK(slave.plc_emcy(a, true, 0x4210, 1) == CANOPEN_PLC_REQUEST_ERROR);
+    uint32_t again = 0;
+    CHECK(slave.plc_emcy_claim(again) == CANOPEN_PLC_NO_ERROR && again != a);
+    // All slots in use.
+    uint32_t h  = 0;
+    int claimed = 1;
+    while (slave.plc_emcy_claim(h) == CANOPEN_PLC_NO_ERROR)
+        ++claimed;
+    CHECK(claimed == static_cast<int>(CANOPEN_PLC_SLAVE_EMCY_SLOTS));
+    (void)rt;
+
+    slave.stop();
+    canopen_plc_slave_status st{};
+    slave.plc_status(st);
+    CHECK(st.state == CANOPEN_PLC_NOT_AVAIL && !(st.flags & CANOPEN_PLC_SLAVE_ON_BUS));
+}
+
+// The PLC stop NMT state in the configuration.
+void check_stop_state_config()
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    std::string text        = kConfig;
+    const std::string field = "\"on_plc_stop_state\": \"none\",";
+    const size_t at         = text.find(field);
+    CHECK(at != std::string::npos);
+    std::string missing = text;
+    missing.erase(at, field.size());
+    CHECK(!parse_config(missing, cfg, errors));
+    bool named = false;
+    for (const auto &e : errors)
+        named = named || e.find("missing \"on_plc_stop_state\"") != std::string::npos;
+    CHECK(named);
+    std::string wrong = text;
+    wrong.replace(at, field.size(), "\"on_plc_stop_state\": \"reset\",");
+    errors.clear();
+    CHECK(!parse_config(wrong, cfg, errors));
+    named = false;
+    for (const auto &e : errors)
+        named =
+            named || e.find("is not one of none, pre_operational, stopped") != std::string::npos;
+    CHECK(named);
+    std::string stopped = text;
+    stopped.replace(at, field.size(), "\"on_plc_stop_state\": \"stopped\",");
+    Config ok;
+    errors.clear();
+    CHECK(parse_config(stopped, ok, errors) && ok.devices.size() == 1 &&
+          ok.devices[0].on_plc_stop_state == SlaveStopState::Stopped);
+}
+
 } // namespace
 
 const char *const kPackedConfig = R"({
-  "version": 10,
+  "version": 11,
   "networks": [],
   "devices": [{
     "name": "bits", "interface": "vcan-packed", "bitrate": 0, "node_id": 5,
     "identity": {"device_name": "bits", "vendor_id": 1, "product_code": 1, "revision": 1},
     "heartbeat_ms": 1000, "master_watch": null, "on_master_lost": "pre_operational",
-    "on_plc_stop": "zero",
+    "on_plc_stop": "zero", "on_plc_stop_state": "none",
     "objects": [
       {"index": 8192, "subindex": 1, "name": "Valves", "type": "UNSIGNED8",
        "direction": "from_master", "exchange": "pdo", "default": 129,
@@ -1319,6 +1534,8 @@ int main()
     check_bus_off(cfg.devices[0]);
     check_lss_store(dir);
     check_lss(rt, dir);
+    check_program(cfg.devices[0], rt);
+    check_stop_state_config();
     check_packed_config();
     {
         Config pcfg;

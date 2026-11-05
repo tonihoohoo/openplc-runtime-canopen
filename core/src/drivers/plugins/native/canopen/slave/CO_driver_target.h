@@ -25,16 +25,23 @@ extern "C"
     (CO_CONFIG_HB_CONS_ENABLE | CO_CONFIG_HB_CONS_QUERY_FUNCT | CO_CONFIG_FLAG_OD_DYNAMIC)
 #define CO_CONFIG_NODE_GUARDING (0)
 #define CO_CONFIG_EM (CO_CONFIG_EM_PRODUCER | CO_CONFIG_EM_HISTORY)
-// Error register (CiA 301 7.5.2.2): the generic bit for any active error, the manufacturer bit
-// for the bits from CO_EM_MANUFACTURER_START on (the PLC stop is one).
+// Error register (CiA 301 7.5.2.2): the generic bit for any active error; the manufacturer bit
+// for a PLC stop (the first manufacturer error status bit) and, like the other class bits, for
+// the program's emergencies of that class (SlaveCanPort.error_classes, kept by the slave thread).
+#define CO_SLAVE_ERROR_CLASSES(em) (((const SlaveCanPort *)(em)->CANdevTx->CANptr)->error_classes)
 #define CO_CONFIG_ERR_CONDITION_GENERIC                                                            \
     ((em->errorStatusBits[0] | em->errorStatusBits[1] | em->errorStatusBits[2] |                   \
       em->errorStatusBits[3] | em->errorStatusBits[4] | em->errorStatusBits[5] |                   \
       em->errorStatusBits[6] | em->errorStatusBits[7] | em->errorStatusBits[8] |                   \
       em->errorStatusBits[9]) != 0U)
+#define CO_CONFIG_ERR_CONDITION_CURRENT ((CO_SLAVE_ERROR_CLASSES(em) & 0x02U) != 0U)
+#define CO_CONFIG_ERR_CONDITION_VOLTAGE ((CO_SLAVE_ERROR_CLASSES(em) & 0x04U) != 0U)
+#define CO_CONFIG_ERR_CONDITION_TEMPERATURE ((CO_SLAVE_ERROR_CLASSES(em) & 0x08U) != 0U)
+#define CO_CONFIG_ERR_CONDITION_COMMUNICATION                                                      \
+    ((em->errorStatusBits[2] != 0U) || (em->errorStatusBits[3] != 0U) ||                           \
+     ((CO_SLAVE_ERROR_CLASSES(em) & 0x10U) != 0U))
 #define CO_CONFIG_ERR_CONDITION_MANUFACTURER                                                       \
-    ((em->errorStatusBits[6] | em->errorStatusBits[7] | em->errorStatusBits[8] |                   \
-      em->errorStatusBits[9]) != 0U)
+    (((em->errorStatusBits[6] & 0x01U) != 0U) || ((CO_SLAVE_ERROR_CLASSES(em) & 0x80U) != 0U))
 #define CO_CONFIG_SDO_SRV (CO_CONFIG_SDO_SRV_SEGMENTED | CO_CONFIG_FLAG_OD_DYNAMIC)
 #define CO_CONFIG_SDO_SRV_BUFFER_SIZE 300
 #define CO_CONFIG_SDO_CLI (0)
@@ -69,6 +76,8 @@ extern "C"
     {
         void *ctx;
         int (*send)(void *ctx, uint32_t ident, uint8_t dlc, const uint8_t *data);
+        // Error register class bits of the program's active emergencies (0x02 to 0x80).
+        uint8_t error_classes;
     } SlaveCanPort;
 
     // A received frame as the stack's receive callbacks see it.

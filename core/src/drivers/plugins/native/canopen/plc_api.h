@@ -14,7 +14,7 @@
 
 #include <stdint.h>
 
-#define CANOPEN_PLC_API_VERSION 2u
+#define CANOPEN_PLC_API_VERSION 3u
 #define CANOPEN_PLC_MAX_DATA 256u
 
 // canopen_plc_api_v1.flags: the library is never unmapped, so the table and its functions stay
@@ -184,14 +184,62 @@ typedef struct canopen_plc_api_v2
     int (*node_enable)(uint8_t network, uint8_t node, uint8_t on);
 } canopen_plc_api_v2;
 
+// CANOPEN_BUS_STATE of the block library, in its order.
+enum canopen_plc_bus_state
+{
+    CANOPEN_PLC_BUS_ERROR_ACTIVE  = 0,
+    CANOPEN_PLC_BUS_ERROR_PASSIVE = 1,
+    CANOPEN_PLC_BUS_STATE_OFF     = 2,
+    CANOPEN_PLC_BUS_UNKNOWN       = 3
+};
+
+// canopen_plc_slave_status.flags
+#define CANOPEN_PLC_SLAVE_ON_BUS 0x01u         // the CAN interface is open
+#define CANOPEN_PLC_SLAVE_MASTER_WATCHED 0x02u // the master's heartbeat is watched (0x1016)
+#define CANOPEN_PLC_SLAVE_MASTER_SEEN 0x04u    // and it is being received
+
+// Program emergencies a slave can hold at a time.
+#define CANOPEN_PLC_SLAVE_EMCY_SLOTS 31u
+
+typedef struct canopen_plc_slave_status
+{
+    uint8_t state;          // canopen_plc_device_state
+    uint8_t node_id;        // in use
+    uint8_t flags;          // CANOPEN_PLC_SLAVE_*
+    uint8_t bus_state;      // canopen_plc_bus_state
+    uint8_t error_register; // 0x1001
+    uint8_t emcy_active;    // active emergencies, the slave's own and the program's
+    uint8_t reserved[2];
+} canopen_plc_slave_status;
+
+// Version 3 appends the slaves of this runtime, counted from 1 in the order of the configuration.
+typedef struct canopen_plc_api_v3
+{
+    canopen_plc_api_v2 v2;
+    int (*slave_status)(uint8_t slave, canopen_plc_slave_status *out);
+    // Asks the slave to change its own NMT state: 1 start, 2 stop, 128 pre-operational. It
+    // applies the request on its next tick (1 ms).
+    int (*slave_nmt)(uint8_t slave, uint8_t command);
+    // Sets `done` to 1 once the slave is in the state of `command` and no request is pending.
+    int (*slave_nmt_done)(uint8_t slave, uint8_t command, uint8_t *done);
+    // Takes a free program emergency slot for one block. The handle holds until the PLC stops;
+    // after a PLC start slave_emcy() answers an older handle with CANOPEN_PLC_REQUEST_ERROR,
+    // and the block claims again.
+    int (*slave_emcy_claim)(uint8_t slave, uint32_t *handle);
+    // Makes the slot's emergency active with `code` and `info` (bytes 4 to 7), or clears it.
+    int (*slave_emcy)(uint8_t slave, uint32_t handle, uint8_t active, uint16_t code, uint32_t info);
+    // How often the master has written the object (SDO or RPDO) since the slave started.
+    int (*slave_written)(uint8_t slave, uint16_t index, uint8_t subindex, uint32_t *count);
+} canopen_plc_api_v3;
+
 #ifdef __cplusplus
 #define CANOPEN_PLC_EXTERN_C extern "C"
 #else
 #define CANOPEN_PLC_EXTERN_C
 #endif
 
-// Exported by the plugin. Returns the table of `version` (1 or 2; version 2's table serves
-// version 1 too), or NULL when it has none.
+// Exported by the plugin. Returns the table of `version` (1 to 3; the newest table serves the
+// earlier versions too), or NULL when it has none.
 CANOPEN_PLC_EXTERN_C const void *canopen_plc_api(uint32_t version);
 
 #endif // CANOPEN_PLC_API_H

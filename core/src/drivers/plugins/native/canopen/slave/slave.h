@@ -4,7 +4,8 @@
 // runs the stack and sends, and exchanges values with the PLC scan through triple buffers, so the
 // scan never waits for it. The slave stays on the bus while the PLC is stopped (heartbeat, NMT,
 // SDO), sends EMCY 6200h on a PLC stop and 0000h when the PLC runs again, and is replaced only when
-// a PLC start brings a different configuration.
+// a PLC start brings a different configuration. The PLC program reads and steers it through the
+// plc_* functions (plc_api.h version 3).
 
 #ifndef CANOPEN_SLAVE_H
 #define CANOPEN_SLAVE_H
@@ -21,6 +22,7 @@
 #include "config.h"
 #include "image_io.h"
 #include "pi_mutex.h"
+#include "plc_api.h"
 #include "plugin_types.h"
 #include "status.h"
 
@@ -116,12 +118,55 @@ class Slave
 
     SlaveSnapshot snapshot() const;
 
+    // ---- PLC blocks (plc_api.h version 3): called from the scan, no lock, allocation or
+    // logging; return a canopen_plc_error ----
+    void plc_status(canopen_plc_slave_status &out) const;
+    int plc_nmt(uint8_t command);
+    int plc_nmt_done(uint8_t command, bool &done) const;
+    int plc_emcy_claim(uint32_t &handle);
+    int plc_emcy(uint32_t handle, bool active, uint16_t code, uint32_t info);
+    int plc_written(uint16_t index, uint8_t subindex, uint32_t &count) const;
+
+    // Whether `code` may be raised by the program (the slave sends 0000h, 6200h and 8130h itself).
+    static bool program_code_allowed(uint16_t code);
+    // The error register bit of an error code's class (CiA 301 7.5.2.2), 0 for generic only.
+    static uint8_t error_class_bit(uint16_t code);
+
   private:
+    struct EmcySlot;
     struct Impl;
     void thread_main();
     // The node ID and bit rate to start with (stored, else the project's); slave thread or start().
     void load_lss_values();
     bool store_lss(uint8_t node_id, uint16_t kbit);
+
+    void publish_plc(uint8_t nmt, uint8_t node_id, bool on_bus, bool watched, bool seen,
+                     BusState bus, uint8_t error_register, uint8_t emcy_active);
+
+    // What the blocks read, written by the slave thread under a sequence counter.
+    struct PlcView
+    {
+        std::atomic<uint32_t> seq{0}; // odd while written
+        std::atomic<uint8_t> state{CANOPEN_PLC_NOT_AVAIL};
+        std::atomic<uint8_t> node_id{0};
+        std::atomic<uint8_t> flags{0};
+        std::atomic<uint8_t> bus_state{CANOPEN_PLC_BUS_UNKNOWN};
+        std::atomic<uint8_t> error_register{0};
+        std::atomic<uint8_t> emcy_active{0};
+    };
+    // One program emergency; `gen` changes with every request so the thread sees it.
+    struct EmcySlot
+    {
+        std::atomic<bool> claimed{false};
+        std::atomic<uint32_t> gen{0};
+        std::atomic<bool> active{false};
+        std::atomic<uint16_t> code{0};
+        std::atomic<uint32_t> info{0};
+    };
+    PlcView view_;
+    std::atomic<uint8_t> nmt_request_{0}; // 0 none, else the CiA 301 command
+    std::atomic<uint32_t> emcy_epoch_{1}; // changes at each PLC start; part of the handles
+    EmcySlot emcy_[CANOPEN_PLC_SLAVE_EMCY_SLOTS];
 
     DeviceConfig dev_;
     std::unique_ptr<SlaveLink> link_;

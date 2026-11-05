@@ -1035,6 +1035,10 @@ const char *slave_nmt_by_name(SlaveNmtBy by)
         return "self";
     case SlaveNmtBy::StartAlone:
         return "start_alone";
+    case SlaveNmtBy::Program:
+        return "program";
+    case SlaveNmtBy::PlcStop:
+        return "plc_stop";
     default:
         return "boot";
     }
@@ -1122,6 +1126,8 @@ cJSON *slave_event_json(const SlaveEvent &e)
     case SlaveEventKind::Emcy:
         add_uint(o, "code", e.code);
         add_uint(o, "register", e.reg);
+        if (e.program)
+            cJSON_AddBoolToObject(o, "program", true);
         break;
     case SlaveEventKind::EmcyReset:
         add_uint(o, "register", e.reg);
@@ -1152,12 +1158,18 @@ void add_slave_details(cJSON *o, const SlaveSnapshot &s)
     cJSON *active = cJSON_AddArrayToObject(o, "emcy_active");
     for (uint16_t c : s.emcy_active)
         cJSON_AddItemToArray(active, cJSON_CreateNumber(c));
+    cJSON *program = cJSON_AddArrayToObject(o, "emcy_program");
+    for (uint16_t c : s.emcy_program)
+        cJSON_AddItemToArray(program, cJSON_CreateNumber(c));
     cJSON *history = cJSON_AddArrayToObject(o, "error_history");
     for (uint32_t h : s.error_history)
         cJSON_AddItemToArray(history, cJSON_CreateNumber(static_cast<double>(h)));
     add_uint(o, "heartbeat_ms", s.heartbeat_ms);
     add_uint(o, "master_watch_ms", s.master_watch_ms);
     cJSON_AddStringToObject(o, "on_master_lost", on_master_lost_name(s.on_master_lost));
+    cJSON_AddStringToObject(o, "on_plc_stop_state",
+                            s.on_plc_stop_state == 1 ? "none"
+                                                     : on_master_lost_name(s.on_plc_stop_state));
     cJSON *pdos = cJSON_AddArrayToObject(o, "pdos");
     for (const SlavePdoStatus &p : s.pdos)
     {

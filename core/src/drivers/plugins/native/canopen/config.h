@@ -17,7 +17,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 10;
+constexpr int kConfigVersion = 11;
 
 // One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
 // location: its bits are skipped on receive and sent as zeros.
@@ -241,6 +241,14 @@ enum class SlaveOnStop
     Zero
 };
 
+// The slave's NMT state after a PLC stop (0x1029 sub 2).
+enum class SlaveStopState
+{
+    PreOperational,
+    NoChange,
+    Stopped
+};
+
 constexpr unsigned kSlavePdos = 4;
 
 // The slave's LSS (CiA 305) settings.
@@ -261,15 +269,16 @@ struct DeviceConfig
     int priority     = kDefaultPriority;
     std::string device_name;
     std::string software_version;
-    uint32_t vendor_id          = 0;
-    uint32_t product_code       = 0;
-    uint32_t revision           = 0;
-    unsigned heartbeat_ms       = 1000;
-    unsigned master_node_id     = 0; // 0: the master's heartbeat is not watched
-    unsigned master_watch_ms    = 0;
-    OnMasterLost on_master_lost = OnMasterLost::PreOperational;
-    SlaveOnStop on_plc_stop     = SlaveOnStop::Hold;
-    bool start_alone            = false;
+    uint32_t vendor_id               = 0;
+    uint32_t product_code            = 0;
+    uint32_t revision                = 0;
+    unsigned heartbeat_ms            = 1000;
+    unsigned master_node_id          = 0; // 0: the master's heartbeat is not watched
+    unsigned master_watch_ms         = 0;
+    OnMasterLost on_master_lost      = OnMasterLost::PreOperational;
+    SlaveOnStop on_plc_stop          = SlaveOnStop::Hold;
+    SlaveStopState on_plc_stop_state = SlaveStopState::NoChange;
+    bool start_alone                 = false;
     SlaveLss lss;
     std::vector<SlaveObject> objects;
     std::vector<SlavePdo> rpdos;

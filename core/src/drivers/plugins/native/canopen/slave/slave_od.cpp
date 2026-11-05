@@ -188,10 +188,25 @@ bool SlaveOd::build(const DeviceConfig &dev, uint32_t serial, std::string &probl
             error_behaviour_ = kErrorStopped;
             break;
         }
+        uint8_t stop_state = kErrorNoChange;
+        switch (dev.on_plc_stop_state)
+        {
+        case SlaveStopState::PreOperational:
+            stop_state = kErrorPreOperational;
+            break;
+        case SlaveStopState::NoChange:
+            stop_state = kErrorNoChange;
+            break;
+        case SlaveStopState::Stopped:
+            stop_state = kErrorStopped;
+            break;
+        }
         Record &rec = add_record(0x1029);
-        add_sub(rec, 0, store_u8(1), ODA_SDO_R, 1);
+        add_sub(rec, 0, store_u8(2), ODA_SDO_R, 1);
         error_data_ = store_u8(error_behaviour_);
         add_sub(rec, 1, error_data_, ODA_SDO_RW, 1);
+        plc_stop_data_ = store_u8(stop_state);
+        add_sub(rec, 2, plc_stop_data_, ODA_SDO_RW, 1);
     }
     {
         Record &rec = add_record(0x1200);
@@ -228,6 +243,9 @@ bool SlaveOd::build(const DeviceConfig &dev, uint32_t serial, std::string &probl
         {
             const SlaveObject &o    = *objs[k];
             app.objects[o.subindex] = &o;
+            counts_.emplace_back(0u);
+            app.counts[o.subindex] = &counts_.back();
+            counters_.push_back({o.index, o.subindex, &counts_.back()});
             const OD_size_t len     = static_cast<OD_size_t>(o.bytes());
             uint8_t *p              = store(len);
             if (o.string)
@@ -365,6 +383,14 @@ void SlaveOd::restore_defaults(Restore what)
     written_ = true; // the scan takes the restored values
 }
 
+const std::atomic<uint32_t> *SlaveOd::write_count(uint16_t index, uint8_t subindex) const
+{
+    for (const Counter &c : counters_)
+        if (c.index == index && c.subindex == subindex)
+            return c.count;
+    return nullptr;
+}
+
 bool SlaveOd::take_written()
 {
     bool w   = written_;
@@ -405,7 +431,11 @@ ODR_t SlaveOd::app_write(OD_stream_t *stream, const void *buf, OD_size_t count,
     }
     ODR_t r = OD_writeOriginal(stream, buf, count, countWritten);
     if (r == ODR_OK && o && o->dir == SlaveDirection::FromMaster)
+    {
         app->self->written_ = true;
+        if (std::atomic<uint32_t> *c = app->counts[stream->subIndex])
+            c->fetch_add(1, std::memory_order_relaxed);
+    }
     return r;
 }
 
@@ -413,6 +443,12 @@ ODR_t SlaveOd::error_write(OD_stream_t *stream, const void *buf, OD_size_t count
                            OD_size_t *countWritten)
 {
     SlaveOd *self = static_cast<SlaveOd *>(stream->object);
+    if (stream->subIndex == 2 && count == 1)
+    {
+        if (*static_cast<const uint8_t *>(buf) > kErrorStopped)
+            return ODR_INVALID_VALUE;
+        return OD_writeOriginal(stream, buf, count, countWritten);
+    }
     if (stream->subIndex == 1 && count == 1)
     {
         const uint8_t v = *static_cast<const uint8_t *>(buf);

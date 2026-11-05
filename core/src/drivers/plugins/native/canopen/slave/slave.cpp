@@ -2,6 +2,7 @@
 
 #include "slave.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -28,6 +29,7 @@
 #include "can_link.h"
 #include "log.h"
 #include "lss_store.h"
+#include "plc_port.h"
 #include "slave_od.h"
 
 namespace canopen_plugin
@@ -45,6 +47,10 @@ using Clock = std::chrono::steady_clock;
 
 // Error status bit of a PLC stop: the first manufacturer bit (CiA 301 leaves them free).
 constexpr uint8_t kPlcStopBit = CO_EM_MANUFACTURER_START;
+// The program's emergencies use the manufacturer bits after it, one per slot.
+constexpr uint8_t kProgramBit = CO_EM_MANUFACTURER_START + 1;
+static_assert(kProgramBit + CANOPEN_PLC_SLAVE_EMCY_SLOTS - 1 <= CO_EM_MANUFACTURER_END,
+              "every program emergency slot needs an error status bit");
 constexpr int kRetryMs        = 1000;
 constexpr int kTickMs         = 1;
 constexpr uint16_t kLssMasterId = 0x7E5;
@@ -290,6 +296,27 @@ struct Slave::Impl
     } sdo;
     std::deque<SlaveEvent> events; // newest first
 
+    // The program's emergencies as applied to the stack, by slot.
+    struct ProgramEmcy
+    {
+        uint32_t gen  = 0;
+        bool on       = false;
+        uint16_t code = 0;
+        uint32_t info = 0;
+        uint8_t klass = 0;
+    };
+    ProgramEmcy program[CANOPEN_PLC_SLAVE_EMCY_SLOTS];
+    bool program_nmt  = false; // the program asked for the last NMT change
+    bool plc_stop_nmt = false; // the PLC stop setting (0x1029 sub 2) made it
+
+    bool program_code_active(uint16_t code) const
+    {
+        for (const ProgramEmcy &p : program)
+            if (p.on && p.code == code)
+                return true;
+        return false;
+    }
+
     void push(SlaveEvent e)
     {
         e.time = wall_ms();
@@ -362,9 +389,10 @@ struct Slave::Impl
             last_emcy           = code;
             emcy_sent           = true;
             SlaveEvent e;
-            e.kind = code ? SlaveEventKind::Emcy : SlaveEventKind::EmcyReset;
-            e.code = code;
-            e.reg  = f.data[2];
+            e.kind    = code ? SlaveEventKind::Emcy : SlaveEventKind::EmcyReset;
+            e.code    = code;
+            e.reg     = f.data[2];
+            e.program = code && program_code_active(code);
             push(e);
             return;
         }
@@ -419,6 +447,68 @@ struct Slave::Impl
     }
 
     void fill_details(CO_t *co, SlaveSnapshot &s);
+
+    void update_classes()
+    {
+        uint8_t classes = 0;
+        for (const ProgramEmcy &p : program)
+            if (p.on)
+                classes |= p.klass;
+        port.error_classes = classes;
+    }
+
+    // Raises, changes or clears the program's emergencies the blocks asked for since the last
+    // tick. A change while active sends one EMCY with the new code, without a reset between.
+    void apply_program_emcy(CO_t *co, EmcySlot *slots)
+    {
+        for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+        {
+            const uint32_t gen = slots[i].gen.load(std::memory_order_acquire);
+            if (gen == program[i].gen)
+                continue;
+            program[i].gen      = gen;
+            const bool active   = slots[i].active.load(std::memory_order_relaxed);
+            const uint16_t code = slots[i].code.load(std::memory_order_relaxed);
+            const uint32_t info = slots[i].info.load(std::memory_order_relaxed);
+            const uint8_t bit   = static_cast<uint8_t>(kProgramBit + i);
+            ProgramEmcy &p      = program[i];
+            if (active)
+            {
+                if (p.on && p.code == code && p.info == info)
+                    continue;
+                if (p.on)
+                    co->em->errorStatusBits[bit >> 3] &= static_cast<uint8_t>(~(1u << (bit & 7u)));
+                p.on    = true;
+                p.code  = code;
+                p.info  = info;
+                p.klass = Slave::error_class_bit(code);
+                update_classes();
+                CO_errorReport(co->em, bit, code, info);
+            }
+            else if (p.on)
+            {
+                p.on = false;
+                update_classes();
+                CO_errorReset(co->em, bit, 0);
+            }
+        }
+    }
+
+    // At a PLC stop: every program emergency is cleared (the PLC stop's 6200h takes over).
+    void clear_program_emcy(CO_t *co, EmcySlot *slots)
+    {
+        for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+        {
+            slots[i].active.store(false, std::memory_order_relaxed);
+            program[i].gen = slots[i].gen.fetch_add(1, std::memory_order_acq_rel) + 1;
+            if (program[i].on)
+            {
+                program[i].on = false;
+                update_classes();
+                CO_errorReset(co->em, static_cast<uint8_t>(kProgramBit + i), 0);
+            }
+        }
+    }
 };
 
 namespace
@@ -473,6 +563,12 @@ void Slave::Impl::fill_details(CO_t *co, SlaveSnapshot &s)
         if (!known)
             s.emcy_active.push_back(code);
     }
+    s.emcy_program.clear();
+    for (const ProgramEmcy &p : program)
+        if (p.on &&
+            std::find(s.emcy_program.begin(), s.emcy_program.end(), p.code) == s.emcy_program.end())
+            s.emcy_program.push_back(p.code);
+    s.on_plc_stop_state = od.plc_stop_state();
 
     s.pdos.resize(2 * kPdos);
     for (unsigned i = 0; i < 2 * kPdos; ++i)
@@ -600,6 +696,18 @@ void Slave::copy_from_plc(const plugin_runtime_args_t &rt)
 
 void Slave::set_plc_running(bool running)
 {
+    if (running)
+    {
+        // The scan does not run here: the blocks of the new run claim their slots again.
+        emcy_epoch_.fetch_add(1, std::memory_order_acq_rel);
+        for (EmcySlot &e : emcy_)
+        {
+            e.active.store(false, std::memory_order_relaxed);
+            e.gen.fetch_add(1, std::memory_order_release);
+            e.claimed.store(false, std::memory_order_release);
+        }
+        nmt_request_.store(0, std::memory_order_release);
+    }
     plc_running_.store(running);
 }
 
@@ -732,6 +840,178 @@ SlaveSnapshot Slave::snapshot() const
 {
     std::lock_guard<PiMutex> lock(status_mutex_);
     return status_;
+}
+
+bool Slave::program_code_allowed(uint16_t code)
+{
+    return code != CO_EMC_NO_ERROR && code != CO_EMC_SOFTWARE_USER && code != CO_EMC_HEARTBEAT;
+}
+
+uint8_t Slave::error_class_bit(uint16_t code)
+{
+    if ((code & 0xFF00u) == 0xFF00u)
+        return CO_ERR_REG_MANUFACTURER;
+    switch (code >> 12)
+    {
+    case 0x2:
+        return CO_ERR_REG_CURRENT;
+    case 0x3:
+        return CO_ERR_REG_VOLTAGE;
+    case 0x4:
+        return CO_ERR_REG_TEMPERATURE;
+    case 0x8:
+        return CO_ERR_REG_COMMUNICATION;
+    default:
+        return 0;
+    }
+}
+
+void Slave::publish_plc(uint8_t nmt, uint8_t node_id, bool on_bus, bool watched, bool seen,
+                        BusState bus, uint8_t error_register, uint8_t emcy_active)
+{
+    uint8_t flags = 0;
+    if (on_bus)
+        flags |= CANOPEN_PLC_SLAVE_ON_BUS;
+    if (watched)
+        flags |= CANOPEN_PLC_SLAVE_MASTER_WATCHED;
+    if (watched && seen)
+        flags |= CANOPEN_PLC_SLAVE_MASTER_SEEN;
+    uint8_t bus_state = CANOPEN_PLC_BUS_UNKNOWN;
+    switch (bus)
+    {
+    case BusState::ErrorActive:
+    case BusState::ErrorWarning:
+        bus_state = CANOPEN_PLC_BUS_ERROR_ACTIVE;
+        break;
+    case BusState::ErrorPassive:
+        bus_state = CANOPEN_PLC_BUS_ERROR_PASSIVE;
+        break;
+    case BusState::BusOff:
+        bus_state = CANOPEN_PLC_BUS_STATE_OFF;
+        break;
+    default:
+        break;
+    }
+    const uint32_t seq = view_.seq.load(std::memory_order_relaxed);
+    view_.seq.store(seq + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    view_.state.store(on_bus ? device_state_of(nmt) : static_cast<uint8_t>(CANOPEN_PLC_NOT_AVAIL),
+                      std::memory_order_relaxed);
+    view_.node_id.store(node_id, std::memory_order_relaxed);
+    view_.flags.store(flags, std::memory_order_relaxed);
+    view_.bus_state.store(bus_state, std::memory_order_relaxed);
+    view_.error_register.store(error_register, std::memory_order_relaxed);
+    view_.emcy_active.store(emcy_active, std::memory_order_relaxed);
+    view_.seq.store(seq + 2, std::memory_order_release);
+}
+
+void Slave::plc_status(canopen_plc_slave_status &out) const
+{
+    // A torn read is retried a few times; the slave thread writes for a few nanoseconds only.
+    for (int tries = 0; tries < 8; ++tries)
+    {
+        const uint32_t before = view_.seq.load(std::memory_order_acquire);
+        if (before & 1u)
+            continue;
+        canopen_plc_slave_status s{};
+        s.state          = view_.state.load(std::memory_order_relaxed);
+        s.node_id        = view_.node_id.load(std::memory_order_relaxed);
+        s.flags          = view_.flags.load(std::memory_order_relaxed);
+        s.bus_state      = view_.bus_state.load(std::memory_order_relaxed);
+        s.error_register = view_.error_register.load(std::memory_order_relaxed);
+        s.emcy_active    = view_.emcy_active.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (view_.seq.load(std::memory_order_relaxed) == before)
+        {
+            out = s;
+            return;
+        }
+    }
+}
+
+namespace
+{
+
+// The CiA 301 NMT state byte a local command leads to, 0 for a command the program may not use.
+uint8_t state_of_command(uint8_t command)
+{
+    switch (command)
+    {
+    case CO_NMT_ENTER_OPERATIONAL:
+        return CO_NMT_OPERATIONAL;
+    case CO_NMT_ENTER_STOPPED:
+        return CO_NMT_STOPPED;
+    case CO_NMT_ENTER_PRE_OPERATIONAL:
+        return CO_NMT_PRE_OPERATIONAL;
+    default:
+        return 0;
+    }
+}
+
+} // namespace
+
+int Slave::plc_nmt(uint8_t command)
+{
+    if (!state_of_command(command))
+        return CANOPEN_PLC_WRONG_PARAMETER;
+    nmt_request_.store(command, std::memory_order_release);
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int Slave::plc_nmt_done(uint8_t command, bool &done) const
+{
+    const uint8_t want = state_of_command(command);
+    if (!want)
+        return CANOPEN_PLC_WRONG_PARAMETER;
+    canopen_plc_slave_status st{};
+    plc_status(st);
+    done = nmt_request_.load(std::memory_order_acquire) == 0 && st.state == device_state_of(want);
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int Slave::plc_emcy_claim(uint32_t &handle)
+{
+    const uint32_t epoch = emcy_epoch_.load(std::memory_order_acquire) & 0xFFFFFFu;
+    for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+    {
+        bool expected = false;
+        if (emcy_[i].claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        {
+            handle = (epoch << 8) | (i + 1);
+            return CANOPEN_PLC_NO_ERROR;
+        }
+    }
+    return CANOPEN_PLC_REQUEST_ERROR;
+}
+
+int Slave::plc_emcy(uint32_t handle, bool active, uint16_t code, uint32_t info)
+{
+    const uint32_t slot = handle & 0xFFu;
+    if (slot < 1 || slot > CANOPEN_PLC_SLAVE_EMCY_SLOTS ||
+        (handle >> 8) != (emcy_epoch_.load(std::memory_order_acquire) & 0xFFFFFFu) ||
+        !emcy_[slot - 1].claimed.load(std::memory_order_acquire))
+        return CANOPEN_PLC_REQUEST_ERROR;
+    if (active && !program_code_allowed(code))
+        return CANOPEN_PLC_WRONG_PARAMETER;
+    EmcySlot &e = emcy_[slot - 1];
+    if (e.active.load(std::memory_order_relaxed) == active &&
+        (!active || (e.code.load(std::memory_order_relaxed) == code &&
+                     e.info.load(std::memory_order_relaxed) == info)))
+        return CANOPEN_PLC_NO_ERROR;
+    e.code.store(code, std::memory_order_relaxed);
+    e.info.store(info, std::memory_order_relaxed);
+    e.active.store(active, std::memory_order_relaxed);
+    e.gen.fetch_add(1, std::memory_order_release);
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int Slave::plc_written(uint16_t index, uint8_t subindex, uint32_t &count) const
+{
+    const std::atomic<uint32_t> *c = impl_->od.write_count(index, subindex);
+    if (!c)
+        return CANOPEN_PLC_WRONG_PARAMETER;
+    count = c->load(std::memory_order_relaxed);
+    return CANOPEN_PLC_NO_ERROR;
 }
 
 namespace
@@ -1003,6 +1283,15 @@ void Slave::thread_main()
             CO_CANsetNormalMode(co->CANmodule);
             if (!unconfigured && !plc_running_.load())
                 CO_errorReport(co->em, kPlcStopBit, CO_EMC_SOFTWARE_USER, 0);
+            // A new stack has no errors set: the program's active ones are raised again.
+            im.port.error_classes = 0;
+            for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+            {
+                im.program[i]     = Impl::ProgramEmcy{};
+                im.program[i].gen = emcy_[i].gen.load(std::memory_order_acquire) - 1;
+            }
+            im.program_nmt  = false;
+            im.plc_stop_nmt = false;
             if (unconfigured)
                 log_info("%s: no node ID; waiting for an LSS master (serial number 0x%08X)",
                          label.c_str(), serial_);
@@ -1072,9 +1361,24 @@ void Slave::thread_main()
                     {
                         if (!unconfigured)
                             CO_errorReport(co->em, kPlcStopBit, CO_EMC_SOFTWARE_USER, 0);
+                        im.clear_program_emcy(co, emcy_);
                         if (dev_.on_plc_stop == SlaveOnStop::Zero)
                             for (auto &slot : im.od.to_master())
                                 im.od.set_to_master(slot, 0);
+                        // The NMT state set for a PLC stop (0x1029 sub 2, coded as sub 1).
+                        const uint8_t now_state =
+                            static_cast<uint8_t>(CO_NMT_getInternalState(co->NMT));
+                        const uint8_t stop_state = unconfigured ? 1 : im.od.plc_stop_state();
+                        if (stop_state == kErrorPreOperational && now_state == CO_NMT_OPERATIONAL)
+                        {
+                            CO_NMT_sendInternalCommand(co->NMT, CO_NMT_ENTER_PRE_OPERATIONAL);
+                            im.plc_stop_nmt = true;
+                        }
+                        else if (stop_state == kErrorStopped && now_state != CO_NMT_STOPPED)
+                        {
+                            CO_NMT_sendInternalCommand(co->NMT, CO_NMT_ENTER_STOPPED);
+                            im.plc_stop_nmt = true;
+                        }
                     }
                     else
                     {
@@ -1100,6 +1404,16 @@ void Slave::thread_main()
                     for (size_t i = 0; i < slots.size(); ++i)
                         im.od.set_to_master(slots[i], out[i]);
                 }
+
+                // The program NMT request and emergencies; an unconfigured slave stays silent.
+                const uint8_t cmd = nmt_request_.exchange(0, std::memory_order_acq_rel);
+                if (cmd && !unconfigured)
+                {
+                    CO_NMT_sendInternalCommand(co->NMT, static_cast<CO_NMT_command_t>(cmd));
+                    im.program_nmt = true;
+                }
+                if (!unconfigured)
+                    im.apply_program_emcy(co, emcy_);
 
                 const Clock::time_point now = Clock::now();
                 uint32_t dt                 = static_cast<uint32_t>(
@@ -1165,7 +1479,11 @@ void Slave::thread_main()
                 {
                     log_info("%s: %s", label.c_str(), state_text(state));
                     SlaveNmtBy by = SlaveNmtBy::Boot;
-                    if (im.nmt_command)
+                    if (im.program_nmt)
+                        by = SlaveNmtBy::Program;
+                    else if (im.plc_stop_nmt)
+                        by = SlaveNmtBy::PlcStop;
+                    else if (im.nmt_command)
                         by = SlaveNmtBy::Master;
                     else if (last_state == CO_NMT_OPERATIONAL)
                         by = SlaveNmtBy::Self;
@@ -1184,8 +1502,10 @@ void Slave::thread_main()
                     status_.nmt_by = by;
                     last_state     = state;
                 }
-                im.nmt_command = false;
-                bool master    = false;
+                im.nmt_command  = false;
+                im.program_nmt  = false;
+                im.plc_stop_nmt = false;
+                bool master     = false;
                 if (status_.master_node_id && !unconfigured)
                     master = CO_HBconsumer_getState(co->HBcons, 0) == CO_HBconsumer_ACTIVE;
                 if (status_.master_node_id && !unconfigured && master != master_was)
@@ -1250,6 +1570,13 @@ void Slave::thread_main()
                     status_.lss_selected = dev_.lss.enabled && CO_LSSslave_getState(co->LSSslave) ==
                                                                    CO_LSS_STATE_CONFIGURATION;
                     im.fill_details(co, status_);
+                    unsigned active = 0;
+                    for (uint8_t b : co->em->errorStatusBits)
+                        active += static_cast<unsigned>(__builtin_popcount(b));
+                    publish_plc(state, static_cast<uint8_t>(im.node_id), true,
+                                status_.master_node_id != 0, master, bus.state,
+                                CO_getErrorRegister(co->em),
+                                static_cast<uint8_t>(active > 255 ? 255 : active));
                 }
             }
             if (reset == CO_RESET_APP)
@@ -1275,6 +1602,8 @@ void Slave::thread_main()
         CO_CANsetConfigurationMode(&im.port);
         CO_delete(co);
         link_->close();
+        publish_plc(0, static_cast<uint8_t>(im.node_id), false, status_.master_node_id != 0, false,
+                    BusState::Unknown, 0, 0);
         set_problem(stop_.load() || new_bitrate ? "" : "the CAN interface failed");
         {
             std::lock_guard<PiMutex> lock(status_mutex_);

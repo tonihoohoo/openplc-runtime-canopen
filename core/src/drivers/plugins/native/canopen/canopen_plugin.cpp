@@ -652,23 +652,100 @@ int plc_node_enable(uint8_t network, uint8_t node, uint8_t on)
     return CANOPEN_PLC_NO_ERROR;
 }
 
-const canopen_plc_api_v2 kPlcApi = {
+// The slaves of the running PLC, by their number from 1 (the order of the configuration).
+Slave *plc_slave(uint8_t slave, int &error)
+{
+    if (!g_active.load(std::memory_order_acquire) || !g_run)
     {
-        sizeof(canopen_plc_api_v2),
-        CANOPEN_PLC_API_VERSION,
-        plc_start,
-        plc_poll,
-        plc_cancel,
-        plc_node_state,
-        plc_kernel_state,
-        plc_local_node_id,
-        plc_emcy_cursor,
-        plc_emcy_next,
-        CANOPEN_PLC_FLAG_PERMANENT,
-    },
-    plc_node_status,
-    plc_network_status,
-    plc_node_enable,
+        error = CANOPEN_PLC_NO_DRIVER;
+        return nullptr;
+    }
+    if (slave < 1 || slave > g_run->slaves.size())
+    {
+        error = CANOPEN_PLC_NET_ID_UNKNOWN;
+        return nullptr;
+    }
+    error = CANOPEN_PLC_NO_ERROR;
+    return g_run->slaves[slave - 1];
+}
+
+int plc_slave_status(uint8_t slave, canopen_plc_slave_status *out)
+{
+    int error;
+    Slave *s = plc_slave(slave, error);
+    if (!s || !out)
+        return s ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    s->plc_status(*out);
+    return CANOPEN_PLC_NO_ERROR;
+}
+
+int plc_slave_nmt(uint8_t slave, uint8_t command)
+{
+    int error;
+    Slave *s = plc_slave(slave, error);
+    return s ? s->plc_nmt(command) : error;
+}
+
+int plc_slave_nmt_done(uint8_t slave, uint8_t command, uint8_t *done)
+{
+    int error;
+    Slave *s = plc_slave(slave, error);
+    if (!s || !done)
+        return s ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    bool d = false;
+    int rc = s->plc_nmt_done(command, d);
+    *done  = d ? 1 : 0;
+    return rc;
+}
+
+int plc_slave_emcy_claim(uint8_t slave, uint32_t *handle)
+{
+    int error;
+    Slave *s = plc_slave(slave, error);
+    if (!s || !handle)
+        return s ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    return s->plc_emcy_claim(*handle);
+}
+
+int plc_slave_emcy(uint8_t slave, uint32_t handle, uint8_t active, uint16_t code, uint32_t info)
+{
+    int error;
+    Slave *s = plc_slave(slave, error);
+    return s ? s->plc_emcy(handle, active != 0, code, info) : error;
+}
+
+int plc_slave_written(uint8_t slave, uint16_t index, uint8_t subindex, uint32_t *count)
+{
+    int error;
+    Slave *s = plc_slave(slave, error);
+    if (!s || !count)
+        return s ? CANOPEN_PLC_WRONG_PARAMETER : error;
+    return s->plc_written(index, subindex, *count);
+}
+
+const canopen_plc_api_v3 kPlcApi = {
+    {{
+         sizeof(canopen_plc_api_v3),
+         CANOPEN_PLC_API_VERSION,
+         plc_start,
+         plc_poll,
+         plc_cancel,
+         plc_node_state,
+         plc_kernel_state,
+         plc_local_node_id,
+         plc_emcy_cursor,
+         plc_emcy_next,
+         CANOPEN_PLC_FLAG_PERMANENT,
+     },
+     plc_node_status,
+     plc_network_status,
+     plc_node_enable},
+    plc_slave_status,
+    plc_slave_nmt,
+    plc_slave_nmt_done,
+    plc_slave_emcy_claim,
+    plc_slave_emcy,
+    plc_slave_written,
 };
 
 void report(const char *where, const char *what)
@@ -773,7 +850,7 @@ CANOPEN_EXPORT void cycle_end(void)
 
 CANOPEN_EXPORT const void *canopen_plc_api(uint32_t version)
 {
-    return version == 1u || version == 2u ? &kPlcApi : nullptr;
+    return version >= 1u && version <= CANOPEN_PLC_API_VERSION ? &kPlcApi : nullptr;
 }
 
 CANOPEN_EXPORT void cleanup(void)

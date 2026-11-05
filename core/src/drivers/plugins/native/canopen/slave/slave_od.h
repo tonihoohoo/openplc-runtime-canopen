@@ -9,6 +9,7 @@
 #define CANOPEN_SLAVE_OD_H
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -87,6 +88,14 @@ class SlaveOd
     {
         return error_behaviour_;
     }
+    // 0x1029 sub 2, the NMT state after a PLC stop, in the coding of sub 1.
+    uint8_t plc_stop_state() const
+    {
+        return plc_stop_data_ ? *plc_stop_data_ : static_cast<uint8_t>(kErrorNoChange);
+    }
+    // The master's writes (SDO or RPDO) to an application object since build(), or nullptr for
+    // an object the dictionary does not have. Safe to read from another thread.
+    const std::atomic<uint32_t> *write_count(uint16_t index, uint8_t subindex) const;
     // Set by an SDO or RPDO write to an object from the master; cleared by take_written().
     bool take_written();
     // Sets a value to the master and asks for its event-driven TPDOs when it changed.
@@ -107,6 +116,7 @@ class SlaveOd
     {
         SlaveOd *self = nullptr;
         std::array<const SlaveObject *, 256> objects{};
+        std::array<std::atomic<uint32_t> *, 256> counts{};
         OD_extension_t ext{};
     };
 
@@ -148,6 +158,15 @@ class SlaveOd
     OD_extension_t error_ext_{};
     uint8_t *error_data_     = nullptr;
     uint8_t error_behaviour_ = kErrorPreOperational;
+    uint8_t *plc_stop_data_  = nullptr;
+    struct Counter
+    {
+        uint16_t index;
+        uint8_t subindex;
+        std::atomic<uint32_t> *count;
+    };
+    std::deque<std::atomic<uint32_t>> counts_;
+    std::vector<Counter> counters_;
     std::vector<Slot> from_master_;
     std::vector<Slot> to_master_;
     bool written_         = false;
