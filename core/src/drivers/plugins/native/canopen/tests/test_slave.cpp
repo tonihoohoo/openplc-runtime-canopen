@@ -1028,6 +1028,8 @@ void check_lss(const plugin_runtime_args_t &rt, const std::string &dir)
         uint32_t address[4] = {};
         CHECK(fastscan_all(p, address));
         CHECK(address[0] == 4660 && address[1] == 1 && address[2] == 65536 && address[3] == 23);
+        // Selected by the fastscan, it is in configuration and no longer takes part.
+        CHECK(!fastscan(p, 0, 0x80, 0, 0));
         CHECK(lss(p, {0x5E}, &f) && f.data[1] == 0xFF);
         // Node ID 12 and 250 kbit/s (table index 3), stored.
         CHECK(lss(p, {0x11, 12}, &f) && f.data[1] == 0);
@@ -1095,6 +1097,17 @@ void check_lss(const plugin_runtime_args_t &rt, const std::string &dir)
         const std::string text = read_file(file);
         CHECK(text.find("node_id") == std::string::npos);
         CHECK(text.find("\"serial\":23") == std::string::npos);
+        // The project's node ID 5 given by a master without a store still counts as from the master.
+        CHECK(lss(p, {0x04, 1}));
+        CHECK(lss(p, {0x11, 5}, &f) && f.data[1] == 0);
+        m = p.mark();
+        lss(p, {0x04, 0});
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; },
+            milliseconds(1000)));
+        CHECK(scan_until(
+            slave, rt, [&] { return std::string(slave.snapshot().node_from) == "lss"; },
+            milliseconds(1000)));
         slave.stop();
     }
     {

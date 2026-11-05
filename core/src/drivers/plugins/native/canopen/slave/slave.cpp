@@ -47,6 +47,8 @@ using Clock = std::chrono::steady_clock;
 constexpr uint8_t kPlcStopBit = CO_EM_MANUFACTURER_START;
 constexpr int kRetryMs        = 1000;
 constexpr int kTickMs         = 1;
+constexpr uint16_t kLssMasterId = 0x7E5;
+constexpr uint8_t kLssFastscan  = 0x51;
 
 class SocketLink : public SlaveLink
 {
@@ -663,6 +665,8 @@ void Slave::load_lss_values()
     else if (stored_node_ || stored_rate_)
         log_info("%s: LSS is off; the stored LSS values are not used", label.c_str());
     pending_node_ = static_cast<uint8_t>(node);
+    start_node_   = static_cast<uint8_t>(node);
+    start_from_   = nfrom;
     pending_kbit_ = static_cast<uint16_t>(rate / 1000);
     link_bitrate_ = rate;
 
@@ -702,6 +706,8 @@ bool Slave::store_lss(uint8_t node_id, uint16_t kbit)
     std::lock_guard<PiMutex> lock(status_mutex_);
     status_.stored_node_id = stored_node_;
     status_.stored_bitrate = stored_rate_;
+    if (!status_.unconfigured && status_.node_id == stored_node_)
+        status_.node_from = "stored";
     return true;
 }
 
@@ -989,10 +995,11 @@ void Slave::thread_main()
                 std::lock_guard<PiMutex> lock(status_mutex_);
                 status_.node_id      = unconfigured ? 0 : node;
                 status_.unconfigured = unconfigured;
-                if (!unconfigured && node != stored_node_ && node != dev_.node_id)
-                    status_.node_from = "lss";
-                else if (!unconfigured)
-                    status_.node_from = node == stored_node_ ? "stored" : "project";
+                // Stored wins; the start value keeps its source; any other ID came from a master.
+                if (!unconfigured)
+                    status_.node_from = stored_node_ && node == stored_node_ ? "stored"
+                                        : node == start_node_               ? start_from_
+                                                                            : "lss";
             }
             {
                 SlaveEvent e;
@@ -1024,7 +1031,13 @@ void Slave::thread_main()
                     std::memcpy(msg.data, f.data, 8);
                     ++im.rx;
                     im.seen_rx(f);
-                    co_slave_receive(co->CANmodule, &msg);
+                    // CiA 305: only a slave in the waiting state takes part in fastscan.
+                    const bool fastscan_ignored =
+                        dev_.lss.enabled && msg.ident == kLssMasterId && msg.dlc >= 1 &&
+                        msg.data[0] == kLssFastscan &&
+                        CO_LSSslave_getState(co->LSSslave) != CO_LSS_STATE_WAITING;
+                    if (!fastscan_ignored)
+                        co_slave_receive(co->CANmodule, &msg);
                     got = link_->read(f, 0);
                 }
                 if (got < 0)

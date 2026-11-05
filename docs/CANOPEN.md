@@ -320,8 +320,8 @@ Behaviour:
 
 With `lss.enabled` the slave is also a CiA 305 LSS slave, so an LSS master can find it and give it
 its node ID and bit rate. The slave answers switch state global and selective, configure node ID,
-configure bit timing, store configuration, the inquire services and, while it has no node ID,
-LSS fastscan. Its LSS address is the vendor ID, product code and revision from `identity` and the
+configure bit timing, store configuration, the inquire services and, while it has no node ID and
+is in the waiting state, LSS fastscan (once a master has selected it, it no longer takes part). Its LSS address is the vendor ID, product code and revision from `identity` and the
 serial number in 0x1018 sub 4.
 
 ```json
@@ -348,7 +348,8 @@ serial number in 0x1018 sub 4.
   written is answered with error 2.
 - The status shows `node_id` as `null` while the slave has no node ID, its `serial`, and an `lss`
   object: `state` (`waiting` or `configuration`), `serial_auto`, `node_id_from` (`none`,
-  `project`, `stored` or `lss`), `bitrate_from` (`project` or `stored`), `bitrate`, the project's
+  `project`, `stored`, or `lss` for one a master gave and did not store, also when it equals the
+  project's), `bitrate_from` (`project` or `stored`), `bitrate`, the project's
   `project_node_id` and `project_bitrate` and the stored `stored_node_id` and `stored_bitrate`.
 
 ## Status
