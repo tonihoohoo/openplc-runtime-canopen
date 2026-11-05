@@ -17,7 +17,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 7;
+constexpr int kConfigVersion = 8;
 
 // One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
 // location: its bits are skipped on receive and sent as zeros.
@@ -237,6 +237,15 @@ enum class SlaveOnStop
 
 constexpr unsigned kSlavePdos = 4;
 
+// The slave's LSS (CiA 305) settings.
+struct SlaveLss
+{
+    bool enabled         = false;
+    bool wait_for_master = false; // start with no node ID until an LSS master gives one
+    uint32_t serial      = 0;     // 0x1018 sub 4; 0 for the automatic serial
+    bool bitrate_change  = true;  // an LSS master may configure the bit rate
+};
+
 struct DeviceConfig
 {
     std::string name;
@@ -255,6 +264,7 @@ struct DeviceConfig
     OnMasterLost on_master_lost = OnMasterLost::PreOperational;
     SlaveOnStop on_plc_stop     = SlaveOnStop::Hold;
     bool start_alone            = false;
+    SlaveLss lss;
     std::vector<SlaveObject> objects;
     std::vector<SlavePdo> rpdos;
     std::vector<SlavePdo> tpdos;

@@ -1206,7 +1206,10 @@ void add_slaves(cJSON *root, const std::vector<SlaveSnapshot> &slaves)
         cJSON *o = cJSON_CreateObject();
         cJSON_AddStringToObject(o, "name", s.name.c_str());
         cJSON_AddStringToObject(o, "interface", s.interface.c_str());
-        cJSON_AddNumberToObject(o, "node_id", s.node_id);
+        if (s.unconfigured)
+            cJSON_AddNullToObject(o, "node_id");
+        else
+            cJSON_AddNumberToObject(o, "node_id", s.node_id);
         cJSON_AddBoolToObject(o, "bus_open", s.bus_open);
         if (!s.problem.empty())
             cJSON_AddStringToObject(o, "problem", s.problem.c_str());
@@ -1221,6 +1224,25 @@ void add_slaves(cJSON *root, const std::vector<SlaveSnapshot> &slaves)
             cJSON_AddNumberToObject(o, "last_emcy", s.last_emcy);
         cJSON_AddNumberToObject(o, "rx_frames", static_cast<double>(s.rx_frames));
         cJSON_AddNumberToObject(o, "tx_frames", static_cast<double>(s.tx_frames));
+        if (s.serial)
+            cJSON_AddNumberToObject(o, "serial", s.serial);
+        if (s.lss)
+        {
+            cJSON *l = cJSON_AddObjectToObject(o, "lss");
+            cJSON_AddStringToObject(l, "state", s.lss_selected ? "configuration" : "waiting");
+            cJSON_AddBoolToObject(l, "serial_auto", s.serial_auto);
+            cJSON_AddStringToObject(l, "node_id_from", s.unconfigured ? "none" : s.node_from);
+            cJSON_AddNumberToObject(l, "project_node_id", s.project_node_id);
+            cJSON_AddStringToObject(l, "bitrate_from", s.rate_from);
+            if (s.bitrate)
+                cJSON_AddNumberToObject(l, "bitrate", s.bitrate);
+            if (s.project_bitrate)
+                cJSON_AddNumberToObject(l, "project_bitrate", s.project_bitrate);
+            if (s.stored_node_id)
+                cJSON_AddNumberToObject(l, "stored_node_id", s.stored_node_id);
+            if (s.stored_bitrate)
+                cJSON_AddNumberToObject(l, "stored_bitrate", s.stored_bitrate);
+        }
         if (s.detailed)
             add_slave_details(o, s);
         cJSON_AddItemToArray(list, o);

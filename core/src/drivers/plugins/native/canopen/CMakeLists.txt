@@ -90,9 +90,11 @@ if(EXISTS ${CANOPENNODE_SOURCE_DIR}/CANopen.c)
     set(CANOPEN_SLAVE_SOURCES
         ${CANOPENNODE_SOURCE_DIR}/CANopen.c
         ${CANOPENNODE_301}
+        ${CANOPENNODE_SOURCE_DIR}/305/CO_LSSslave.c
         ${CMAKE_CURRENT_SOURCE_DIR}/slave/co_driver.c
         ${CMAKE_CURRENT_SOURCE_DIR}/slave/slave_od.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/slave/slave.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/slave/lss_store.cpp
     )
     set(CANOPEN_HAVE_SLAVE ON)
     message(STATUS "CANopen plugin: CANopen slave on CANopenNode in ${CANOPENNODE_SOURCE_DIR}")

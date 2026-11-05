@@ -142,6 +142,7 @@ class Parser
     void check_cob_ids(const NetworkConfig &net);
     void check_locations();
     bool parse_device(const cJSON *j, size_t pos, DeviceConfig &dev);
+    void parse_slave_lss(const cJSON *j, const std::string &where, SlaveLss &lss);
     bool parse_object(const cJSON *j, const std::string &where, SlaveObject &obj);
     bool parse_value(const cJSON *v, const std::string &where, const char *key, CoType type,
                      uint64_t &out);
@@ -1131,6 +1132,32 @@ void Parser::parse_slave_pdos(const cJSON *j, const char *key, const std::string
     }
 }
 
+void Parser::parse_slave_lss(const cJSON *j, const std::string &where, SlaveLss &lss)
+{
+    const cJSON *o = cJSON_GetObjectItemCaseSensitive(j, "lss");
+    if (!o || cJSON_IsNull(o))
+        return;
+    if (!cJSON_IsObject(o))
+    {
+        error(where, "\"lss\" must be an object or null");
+        return;
+    }
+    const std::string w = where + ": lss";
+    for (const cJSON *item = o->child; item; item = item->next)
+    {
+        const std::string key = item->string ? item->string : "";
+        if (key != "enabled" && key != "wait_for_master" && key != "serial" &&
+            key != "bitrate_change")
+            error(w, "unknown field \"" + key + "\"");
+    }
+    get_bool(o, "enabled", w, lss.enabled);
+    get_bool(o, "wait_for_master", w, lss.wait_for_master);
+    get_bool(o, "bitrate_change", w, lss.bitrate_change);
+    uint64_t v = 0;
+    if (cJSON_GetObjectItemCaseSensitive(o, "serial") && get_uint(o, "serial", w, 1, 0xFFFFFFFF, v))
+        lss.serial = static_cast<uint32_t>(v);
+}
+
 bool Parser::parse_device(const cJSON *j, size_t pos, DeviceConfig &dev)
 {
     std::string where = "device " + std::to_string(pos);
@@ -1222,6 +1249,7 @@ bool Parser::parse_device(const cJSON *j, size_t pos, DeviceConfig &dev)
             error(where, "\"on_plc_stop\" \"" + text + "\" is not one of hold, zero");
     }
     get_bool(j, "start_alone", where, dev.start_alone);
+    parse_slave_lss(j, where, dev.lss);
 
     const cJSON *objects = get_array(j, "objects", where, true);
     const cJSON *o       = nullptr;

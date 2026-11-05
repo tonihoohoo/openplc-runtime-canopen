@@ -425,6 +425,19 @@ struct SlaveSnapshot
     bool emcy_sent          = false;
     uint64_t rx_frames      = 0;
     uint64_t tx_frames      = 0;
+    uint32_t serial         = 0; // 0x1018 sub 4
+    // LSS (CiA 305), reported when `lss` is on.
+    bool lss                 = false;
+    bool serial_auto         = false;
+    bool unconfigured        = false;     // waits for an LSS master to give a node ID
+    bool lss_selected        = false;     // in LSS configuration state
+    unsigned bitrate         = 0;         // bit/s the interface runs at; 0 when left as it was
+    const char *node_from    = "project"; // project, stored, lss (set by a master, not stored)
+    const char *rate_from    = "project"; // project, stored
+    unsigned project_node_id = 0;
+    unsigned project_bitrate = 0;
+    unsigned stored_node_id  = 0; // 0: none stored
+    unsigned stored_bitrate  = 0;
     // Details for the editor's Online tab; `detailed` is false until the slave is first on the bus.
     bool detailed = false;
     BusStatus bus;

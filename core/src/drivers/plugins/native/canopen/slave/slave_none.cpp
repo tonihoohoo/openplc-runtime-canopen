@@ -44,6 +44,10 @@ void Slave::stop() {}
 void Slave::copy_to_plc(const plugin_runtime_args_t &) {}
 void Slave::copy_from_plc(const plugin_runtime_args_t &) {}
 void Slave::set_plc_running(bool) {}
+bool Slave::forget_lss()
+{
+    return false;
+}
 void Slave::thread_main() {}
 
 SlaveSnapshot Slave::snapshot() const

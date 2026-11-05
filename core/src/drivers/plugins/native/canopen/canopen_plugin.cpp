@@ -283,6 +283,14 @@ class PluginRequests : public Requests
         closing_ = true;
     }
 
+    std::string slave_lss_forget(const std::string &name) override
+    {
+        for (const auto &s : g_slaves)
+            if (s->config().name == name)
+                return s->forget_lss() ? "" : "lss_off";
+        return "unknown_slave";
+    }
+
     // A close asked by the last request, done after g_mutex is released.
     bool closing_ = false;
 

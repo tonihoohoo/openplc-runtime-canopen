@@ -81,8 +81,12 @@ void SlaveOd::add_pdos(bool tpdo)
         for (const auto &p : pdos)
             if (p.number == n)
                 pdo = &p;
-        uint32_t cob =
-            pdo ? pdo->cob_id : (kCobInvalid | (cob_base + 0x100 * (n - 1) + dev_->node_id));
+        // PDOs 1-4 on their default COB-ID keep the bare base, which the stack adds the node ID
+        // in use to.
+        const uint32_t base = cob_base + 0x100 * (n - 1);
+        uint32_t cob        = pdo ? pdo->cob_id : (kCobInvalid | base);
+        if (pdo && n <= 4 && (cob & 0x7FF) == base + dev_->node_id)
+            cob = (cob & ~0x7FFu) | base;
         Record &rec = add_record(static_cast<uint16_t>(comm_base + n - 1));
         add_sub(rec, 0, store_u8(tpdo ? 6 : 5), ODA_SDO_R, 1);
         add_sub(rec, 1, store_u32(cob), rw | ODA_MB, 4);
@@ -123,7 +127,7 @@ void SlaveOd::add_pdos(bool tpdo)
     }
 }
 
-bool SlaveOd::build(const DeviceConfig &dev, std::string &problem)
+bool SlaveOd::build(const DeviceConfig &dev, uint32_t serial, std::string &problem)
 {
     dev_               = &dev;
     const uint8_t node = static_cast<uint8_t>(dev.node_id);
@@ -152,7 +156,7 @@ bool SlaveOd::build(const DeviceConfig &dev, std::string &problem)
         add_var(0x100A, p, ODA_SDO_R | ODA_STR,
                 static_cast<OD_size_t>(dev.software_version.size()));
     }
-    add_var(0x1014, store_u32(0x80u + node), ODA_SDO_RW | ODA_MB, 4);
+    add_var(0x1014, store_u32(0x80u), ODA_SDO_RW | ODA_MB, 4);
     {
         Record &rec = add_record(0x1016);
         add_sub(rec, 0, store_u8(1), ODA_SDO_R, 1);
@@ -169,7 +173,7 @@ bool SlaveOd::build(const DeviceConfig &dev, std::string &problem)
         add_sub(rec, 1, store_u32(dev.vendor_id), ODA_SDO_R | ODA_MB, 4);
         add_sub(rec, 2, store_u32(dev.product_code), ODA_SDO_R | ODA_MB, 4);
         add_sub(rec, 3, store_u32(dev.revision), ODA_SDO_R | ODA_MB, 4);
-        add_sub(rec, 4, store_u32(0), ODA_SDO_R | ODA_MB, 4);
+        add_sub(rec, 4, store_u32(serial), ODA_SDO_R | ODA_MB, 4);
     }
     {
         switch (dev.on_master_lost)
@@ -300,7 +304,7 @@ bool SlaveOd::build(const DeviceConfig &dev, std::string &problem)
     config_.CNT_LEDS     = 0;
     config_.CNT_GFC      = 0;
     config_.CNT_SRDO     = 0;
-    config_.CNT_LSS_SLV  = 0;
+    config_.CNT_LSS_SLV  = dev.lss.enabled ? 1 : 0;
     config_.CNT_LSS_MST  = 0;
     config_.CNT_GTWA     = 0;
     if (!config_.ENTRY_H1017 || !config_.ENTRY_H1400 || !config_.ENTRY_H1800)

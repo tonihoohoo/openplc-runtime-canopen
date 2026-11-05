@@ -178,6 +178,17 @@ def test_request_is_forwarded_unchanged(tmp_path: Path) -> None:
         plugin.close()
 
 
+def test_slave_lss_forget_is_forwarded(tmp_path: Path) -> None:
+    sock_path = tmp_path / "canopen.socket"
+    plugin = FakePlugin(sock_path, b'{"ok":true}\n')
+    try:
+        request = {"op": "slave_lss_forget", "slave": "io"}
+        assert send_canopen_request(request, sock_path) == ({"ok": True}, 200)
+        assert plugin.received() == [b'{"op":"slave_lss_forget","slave":"io"}\n']
+    finally:
+        plugin.close()
+
+
 def test_lss_request_is_forwarded(tmp_path: Path) -> None:
     sock_path = tmp_path / "canopen.socket"
     plugin = FakePlugin(sock_path, b'{"job":8}\n')

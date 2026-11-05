@@ -54,6 +54,11 @@ class SlaveLink
     virtual int read(Frame &frame, int timeout_ms) = 0;
     // 0 when the frame was queued.
     virtual int write(const Frame &frame) = 0;
+    // The bit rate the next open() brings the link up at (0 keeps the link's own).
+    virtual void set_bitrate(unsigned bitrate)
+    {
+        (void)bitrate;
+    }
     // A reading of the CAN interface for the bus status; false when there is none (in-process bus).
     virtual bool info(LinkInfo &out)
     {
@@ -105,11 +110,18 @@ class Slave
     // PLC start and stop (EMCY 0000h and 6200h, and the values to the master on a stop).
     void set_plc_running(bool running);
 
+    // Forgets the node ID and bit rate an LSS master stored and restarts the slave with the
+    // project's values (done by the slave thread). False when the slave's LSS is off.
+    bool forget_lss();
+
     SlaveSnapshot snapshot() const;
 
   private:
     struct Impl;
     void thread_main();
+    // The node ID and bit rate to start with (stored, else the project's); slave thread or start().
+    void load_lss_values();
+    bool store_lss(uint8_t node_id, uint16_t kbit);
 
     DeviceConfig dev_;
     std::unique_ptr<SlaveLink> link_;
@@ -118,6 +130,20 @@ class Slave
     TripleBuffer out_; // values to the master, scan -> slave thread
     std::atomic<bool> plc_running_{false};
     std::atomic<bool> stop_{false};
+    std::atomic<bool> forget_{false};
+    // LSS: pending node ID (0xFF unconfigured) and bit rate (kbit/s) as CANopenNode sees them, the
+    // serial number, the stored values and the bit rate the link runs at. Slave thread only after
+    // start().
+    uint8_t pending_node_   = 0;
+    uint16_t pending_kbit_  = 0;
+    uint32_t serial_        = 0;
+    bool serial_auto_       = false;
+    uint8_t start_node_     = 0xFF; // the node ID this start began with
+    const char *start_from_ = "project";
+    unsigned link_bitrate_  = 0;
+    unsigned stored_node_   = 0;
+    unsigned stored_rate_   = 0;
+    std::string store_path_;
     std::thread thread_;
     mutable PiMutex status_mutex_;
     SlaveSnapshot status_;

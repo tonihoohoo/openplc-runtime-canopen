@@ -27,6 +27,7 @@
 #include "bus_off_recovery.h"
 #include "can_link.h"
 #include "log.h"
+#include "lss_store.h"
 #include "slave_od.h"
 
 namespace canopen_plugin
@@ -46,6 +47,8 @@ using Clock = std::chrono::steady_clock;
 constexpr uint8_t kPlcStopBit = CO_EM_MANUFACTURER_START;
 constexpr int kRetryMs        = 1000;
 constexpr int kTickMs         = 1;
+constexpr uint16_t kLssMasterId = 0x7E5;
+constexpr uint8_t kLssFastscan  = 0x51;
 
 class SocketLink : public SlaveLink
 {
@@ -111,6 +114,11 @@ class SocketLink : public SlaveLink
         frame.dlc = f.can_dlc > 8 ? 8 : f.can_dlc;
         std::memcpy(frame.data, f.data, 8);
         return 1;
+    }
+
+    void set_bitrate(unsigned bitrate) override
+    {
+        bitrate_ = bitrate;
     }
 
     int write(const Frame &frame) override
@@ -476,10 +484,14 @@ void Slave::Impl::fill_details(CO_t *co, SlaveSnapshot &s)
         p.number               = i % kPdos + 1;
         p.tpdo                 = tpdo;
         p.cob_id               = od_value<uint32_t>(d, comm, 1);
-        p.transmission         = od_value<uint8_t>(d, comm, 2);
-        p.inhibit_100us        = tpdo ? od_value<uint16_t>(d, comm, 3) : 0;
-        p.event_ms             = od_value<uint16_t>(d, comm, 5);
-        const uint8_t n        = od_value<uint8_t>(d, mapping, 0);
+        // The bare pre-defined base follows the node ID in use, as in CO_PDO.c.
+        const uint32_t base = (tpdo ? 0x180u : 0x200u) + 0x100u * (i % kPdos);
+        if (node_id != 0 && (p.cob_id & 0x7FFu) == base)
+            p.cob_id += node_id;
+        p.transmission  = od_value<uint8_t>(d, comm, 2);
+        p.inhibit_100us = tpdo ? od_value<uint16_t>(d, comm, 3) : 0;
+        p.event_ms      = od_value<uint16_t>(d, comm, 5);
+        const uint8_t n = od_value<uint8_t>(d, mapping, 0);
         p.mapping.clear();
         for (uint8_t k = 1; k <= n && k <= 8; ++k)
             p.mapping.push_back(od_value<uint32_t>(d, mapping, k));
@@ -521,8 +533,11 @@ Slave::~Slave()
 
 bool Slave::start(std::string &problem)
 {
-    if (!impl_->od.build(dev_, problem))
+    store_path_ = lss_store_path(dev_.interface);
+    load_lss_values();
+    if (!impl_->od.build(dev_, serial_, problem))
         return false;
+    link_->set_bitrate(link_bitrate_);
     in_.resize(impl_->od.from_master().size());
     out_.resize(impl_->od.to_master().size());
     // The defaults reach the PLC before the first frame does.
@@ -569,6 +584,131 @@ void Slave::copy_from_plc(const plugin_runtime_args_t &rt)
 void Slave::set_plc_running(bool running)
 {
     plc_running_.store(running);
+}
+
+bool Slave::forget_lss()
+{
+    if (!dev_.lss.enabled)
+        return false;
+    forget_.store(true);
+    return true;
+}
+
+namespace
+{
+
+std::string rate_text(unsigned bitrate)
+{
+    if (!bitrate)
+        return "the interface's own bit rate";
+    return std::to_string(bitrate / 1000) + " kbit/s";
+}
+
+} // namespace
+
+void Slave::load_lss_values()
+{
+    const std::string label = dev_.label();
+    LssStored stored;
+    std::string problem;
+    const bool have = lss_load(store_path_, stored, problem);
+    if (!problem.empty())
+        log_warn("%s: %s; it is ignored", label.c_str(), problem.c_str());
+    if (dev_.lss.serial)
+    {
+        serial_      = dev_.lss.serial;
+        serial_auto_ = false;
+    }
+    else if (!serial_)
+    {
+        serial_auto_ = true;
+        if (have && stored.serial)
+            serial_ = stored.serial;
+        else
+        {
+            serial_       = lss_random_serial();
+            stored.serial = serial_;
+            if (lss_save(store_path_, stored, problem))
+                log_info("%s: serial number 0x%08X (automatic)", label.c_str(), serial_);
+            else
+                log_warn("%s: serial number 0x%08X (automatic) cannot be kept: %s", label.c_str(),
+                         serial_, problem.c_str());
+        }
+    }
+    stored_node_ = have ? stored.node_id : 0;
+    stored_rate_ = have ? stored.bitrate : 0;
+
+    unsigned node     = dev_.node_id;
+    unsigned rate     = dev_.bitrate;
+    const char *nfrom = "project";
+    const char *rfrom = "project";
+    if (dev_.lss.enabled)
+    {
+        if (dev_.lss.wait_for_master)
+            node = 0xFF;
+        if (stored_node_)
+        {
+            node  = stored_node_;
+            nfrom = "stored";
+        }
+        if (stored_rate_)
+        {
+            rate  = stored_rate_;
+            rfrom = "stored";
+        }
+        if (stored_node_ || stored_rate_)
+            log_info("%s: %s%s and %s from stored LSS values (project: node ID %u, %s)",
+                     label.c_str(), node == 0xFF ? "no node ID" : "node ID ",
+                     node == 0xFF ? "" : std::to_string(node).c_str(), rate_text(rate).c_str(),
+                     dev_.node_id, rate_text(dev_.bitrate).c_str());
+    }
+    else if (stored_node_ || stored_rate_)
+        log_info("%s: LSS is off; the stored LSS values are not used", label.c_str());
+    pending_node_ = static_cast<uint8_t>(node);
+    start_node_   = static_cast<uint8_t>(node);
+    start_from_   = nfrom;
+    pending_kbit_ = static_cast<uint16_t>(rate / 1000);
+    link_bitrate_ = rate;
+
+    std::lock_guard<PiMutex> lock(status_mutex_);
+    status_.serial          = serial_;
+    status_.lss             = dev_.lss.enabled;
+    status_.serial_auto     = serial_auto_;
+    status_.node_from       = nfrom;
+    status_.rate_from       = rfrom;
+    status_.bitrate         = rate;
+    status_.project_node_id = dev_.node_id;
+    status_.project_bitrate = dev_.bitrate;
+    status_.stored_node_id  = stored_node_;
+    status_.stored_bitrate  = stored_rate_;
+}
+
+bool Slave::store_lss(uint8_t node_id, uint16_t kbit)
+{
+    const std::string label = dev_.label();
+    LssStored stored;
+    std::string problem;
+    lss_load(store_path_, stored, problem);
+    if (serial_auto_)
+        stored.serial = serial_;
+    stored.node_id = node_id;
+    stored.bitrate = static_cast<unsigned>(kbit) * 1000;
+    if (!lss_save(store_path_, stored, problem))
+    {
+        log_error("%s: LSS store failed: %s", label.c_str(), problem.c_str());
+        return false;
+    }
+    stored_node_ = stored.node_id;
+    stored_rate_ = stored.bitrate;
+    log_info(
+        "%s: LSS store: %s%s, %s saved", label.c_str(), node_id == 0xFF ? "no node ID" : "node ID ",
+        node_id == 0xFF ? "" : std::to_string(node_id).c_str(), rate_text(stored.bitrate).c_str());
+    std::lock_guard<PiMutex> lock(status_mutex_);
+    status_.stored_node_id = stored_node_;
+    status_.stored_bitrate = stored_rate_;
+    if (!status_.unconfigured && status_.node_id == stored_node_)
+        status_.node_from = "stored";
+    return true;
 }
 
 SlaveSnapshot Slave::snapshot() const
@@ -783,7 +923,9 @@ void Slave::thread_main()
         }
         CO_NMT_reset_cmd_t reset = CO_RESET_NOT;
         bool link_ok             = true;
+        bool new_bitrate         = false; // a reset node brought another bit rate
         bool said_seen           = false; // survives a reset communication
+        const unsigned opened_at = link_bitrate_;
         while (!stop_.load() && link_ok && reset != CO_RESET_QUIT)
         {
             co->CANmodule->CANnormal = false;
@@ -791,13 +933,39 @@ void Slave::thread_main()
             CO_CANmodule_disable(co->CANmodule);
             uint32_t err_info    = 0;
             CO_ReturnError_t err = CO_CANinit(co, &im.port, 0);
+            uint8_t node         = pending_node_;
+            if (err == CO_ERROR_NO && dev_.lss.enabled)
+            {
+                CO_LSS_address_t address{};
+                address.identity.vendorID       = dev_.vendor_id;
+                address.identity.productCode    = dev_.product_code;
+                address.identity.revisionNumber = dev_.revision;
+                address.identity.serialNumber   = serial_;
+                err = CO_LSSinit(co, &address, &pending_node_, &pending_kbit_);
+                if (err == CO_ERROR_NO)
+                {
+                    CO_LSSslave_initCkBitRateCall(
+                        co->LSSslave, this,
+                        [](void *object, uint16_t kbit) -> bool_t
+                        {
+                            const Slave *self = static_cast<const Slave *>(object);
+                            return self->dev_.lss.bitrate_change && kbit != 0;
+                        });
+                    CO_LSSslave_initCfgStoreCall(
+                        co->LSSslave, this, [](void *object, uint8_t id, uint16_t kbit) -> bool_t
+                        { return static_cast<Slave *>(object)->store_lss(id, kbit); });
+                    node = co->LSSslave->activeNodeID;
+                }
+            }
             if (err == CO_ERROR_NO)
                 err = CO_CANopenInit(co, nullptr, nullptr, im.od.od(), nullptr,
                                      nmt_control(dev_, im.od.error_behaviour()), 500, 1000, 0,
-                                     false, static_cast<uint8_t>(dev_.node_id), &err_info);
-            if (err == CO_ERROR_NO)
-                err = CO_CANopenInitPDO(co, co->em, im.od.od(), static_cast<uint8_t>(dev_.node_id),
-                                        &err_info);
+                                     false, node, &err_info);
+            const bool unconfigured = err == CO_ERROR_NODE_ID_UNCONFIGURED_LSS;
+            if (unconfigured)
+                err = CO_ERROR_NO;
+            if (err == CO_ERROR_NO && !unconfigured)
+                err = CO_CANopenInitPDO(co, co->em, im.od.od(), node, &err_info);
             if (err != CO_ERROR_NO)
             {
                 log_error("%s: the CANopen stack refused its configuration (error %d, object "
@@ -807,20 +975,40 @@ void Slave::thread_main()
                 stop_.store(true);
                 break;
             }
-            im.history      = co->em->OD_1003_extension;
-            im.history.read = read_history;
-            OD_extension_init(OD_find(im.od.od(), 0x1003), &im.history);
+            im.emcy_id = 0x80u + node;
+            im.node_id = unconfigured ? 0 : node;
+            if (!unconfigured)
+            {
+                im.history      = co->em->OD_1003_extension;
+                im.history.read = read_history;
+                OD_extension_init(OD_find(im.od.od(), 0x1003), &im.history);
+            }
             CO_CANsetNormalMode(co->CANmodule);
-            if (!plc_running_.load())
+            if (!unconfigured && !plc_running_.load())
                 CO_errorReport(co->em, kPlcStopBit, CO_EMC_SOFTWARE_USER, 0);
-            log_info("%s: node %u on the bus", label.c_str(), dev_.node_id);
+            if (unconfigured)
+                log_info("%s: no node ID; waiting for an LSS master (serial number 0x%08X)",
+                         label.c_str(), serial_);
+            else
+                log_info("%s: node %u on the bus", label.c_str(), node);
+            {
+                std::lock_guard<PiMutex> lock(status_mutex_);
+                status_.node_id      = unconfigured ? 0 : node;
+                status_.unconfigured = unconfigured;
+                // Stored wins; the start value keeps its source; any other ID came from a master.
+                if (!unconfigured)
+                    status_.node_from = stored_node_ && node == stored_node_ ? "stored"
+                                        : node == start_node_               ? start_from_
+                                                                            : "lss";
+            }
             {
                 SlaveEvent e;
                 e.kind = SlaveEventKind::OnBus;
                 im.push(e);
             }
-            im.nmt_command = false;
-            im.sdo.active  = false;
+            im.nmt_command      = false;
+            im.sdo.active       = false;
+            uint8_t pending_was = pending_node_;
 
             reset                  = CO_RESET_NOT;
             Clock::time_point last = Clock::now();
@@ -843,7 +1031,13 @@ void Slave::thread_main()
                     std::memcpy(msg.data, f.data, 8);
                     ++im.rx;
                     im.seen_rx(f);
-                    co_slave_receive(co->CANmodule, &msg);
+                    // CiA 305: only a slave in the waiting state takes part in fastscan.
+                    const bool fastscan_ignored =
+                        dev_.lss.enabled && msg.ident == kLssMasterId && msg.dlc >= 1 &&
+                        msg.data[0] == kLssFastscan &&
+                        CO_LSSslave_getState(co->LSSslave) != CO_LSS_STATE_WAITING;
+                    if (!fastscan_ignored)
+                        co_slave_receive(co->CANmodule, &msg);
                     got = link_->read(f, 0);
                 }
                 if (got < 0)
@@ -859,7 +1053,8 @@ void Slave::thread_main()
                 {
                     if (!plc)
                     {
-                        CO_errorReport(co->em, kPlcStopBit, CO_EMC_SOFTWARE_USER, 0);
+                        if (!unconfigured)
+                            CO_errorReport(co->em, kPlcStopBit, CO_EMC_SOFTWARE_USER, 0);
                         if (dev_.on_plc_stop == SlaveOnStop::Zero)
                             for (auto &slot : im.od.to_master())
                                 im.od.set_to_master(slot, 0);
@@ -868,7 +1063,8 @@ void Slave::thread_main()
                     {
                         if (!first_plc)
                             im.od.restore_defaults(SlaveOd::Restore::Application);
-                        CO_errorReset(co->em, kPlcStopBit, 0);
+                        if (!unconfigured)
+                            CO_errorReset(co->em, kPlcStopBit, 0);
                     }
                     plc_was = plc;
                     SlaveEvent e;
@@ -896,6 +1092,39 @@ void Slave::thread_main()
                 bool sync = CO_process_SYNC(co, dt, nullptr);
                 CO_process_RPDO(co, sync, dt, nullptr);
                 CO_process_TPDO(co, sync, dt, nullptr);
+
+                // LSS: a node ID set by a master, and a forget asked by the editor.
+                if (pending_node_ != pending_was)
+                {
+                    if (unconfigured)
+                        log_info("%s: LSS master gave node ID %u", label.c_str(), pending_node_);
+                    else if (pending_node_ == 0xFF)
+                        log_info("%s: LSS master cleared the node ID (no node ID after reset "
+                                 "communication)",
+                                 label.c_str());
+                    else
+                        log_info("%s: LSS master set node ID %u (active after reset "
+                                 "communication)",
+                                 label.c_str(), pending_node_);
+                    pending_was = pending_node_;
+                }
+                if (forget_.exchange(false))
+                {
+                    LssStored stored;
+                    std::string problem;
+                    lss_load(store_path_, stored, problem);
+                    stored.node_id = 0;
+                    stored.bitrate = 0;
+                    if (serial_auto_)
+                        stored.serial = serial_;
+                    if (lss_save(store_path_, stored, problem))
+                        log_info("%s: stored LSS values forgotten; restarting with the project's",
+                                 label.c_str());
+                    else
+                        log_error("%s: cannot forget the stored LSS values: %s", label.c_str(),
+                                  problem.c_str());
+                    reset = CO_RESET_APP;
+                }
 
                 // A master's write to 0x1029.
                 if (im.od.error_behaviour() != behaviour)
@@ -940,9 +1169,9 @@ void Slave::thread_main()
                 }
                 im.nmt_command = false;
                 bool master    = false;
-                if (status_.master_node_id)
+                if (status_.master_node_id && !unconfigured)
                     master = CO_HBconsumer_getState(co->HBcons, 0) == CO_HBconsumer_ACTIVE;
-                if (status_.master_node_id && master != master_was)
+                if (status_.master_node_id && !unconfigured && master != master_was)
                 {
                     if (master && !said_seen)
                     {
@@ -993,14 +1222,16 @@ void Slave::thread_main()
                     status_nmt  = state;
                     last_status = now;
                     std::lock_guard<PiMutex> lock(status_mutex_);
-                    status_.nmt         = state;
-                    status_.plc_running = plc;
-                    status_.master_seen = master;
-                    status_.last_emcy   = im.last_emcy;
-                    status_.emcy_sent   = im.emcy_sent;
-                    status_.rx_frames   = im.rx;
-                    status_.tx_frames   = im.tx;
-                    status_.bus         = bus;
+                    status_.nmt          = state;
+                    status_.plc_running  = plc;
+                    status_.master_seen  = master;
+                    status_.last_emcy    = im.last_emcy;
+                    status_.emcy_sent    = im.emcy_sent;
+                    status_.rx_frames    = im.rx;
+                    status_.tx_frames    = im.tx;
+                    status_.bus          = bus;
+                    status_.lss_selected = dev_.lss.enabled && CO_LSSslave_getState(co->LSSslave) ==
+                                                                   CO_LSS_STATE_CONFIGURATION;
                     im.fill_details(co, status_);
                 }
             }
@@ -1009,6 +1240,13 @@ void Slave::thread_main()
                 log_info("%s: reset node", label.c_str());
                 im.od.restore_defaults(SlaveOd::Restore::All);
                 reset = CO_RESET_NOT;
+                load_lss_values();
+                if (link_bitrate_ != opened_at)
+                {
+                    link_->set_bitrate(link_bitrate_);
+                    new_bitrate = true;
+                    link_ok     = false;
+                }
             }
             else if (reset == CO_RESET_COMM)
             {
@@ -1020,12 +1258,12 @@ void Slave::thread_main()
         CO_CANsetConfigurationMode(&im.port);
         CO_delete(co);
         link_->close();
-        set_problem(stop_.load() ? "" : "the CAN interface failed");
+        set_problem(stop_.load() || new_bitrate ? "" : "the CAN interface failed");
         {
             std::lock_guard<PiMutex> lock(status_mutex_);
             status_.bus_open = false;
         }
-        if (!stop_.load())
+        if (!stop_.load() && !new_bitrate)
             sleep_or_stop(kRetryMs);
     }
     log_info("%s: left the bus", label.c_str());

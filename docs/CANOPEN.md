@@ -123,7 +123,7 @@ has `lss`.
 
 ```json
 {
-  "version": 7,
+  "version": 8,
   "networks": [
     {
       "name": "CANopen 1",
@@ -186,7 +186,7 @@ change both together.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 6. Older files are refused; build the project again with a matching editor. |
+| `version` | Format version, 8. Older files are refused; build the project again with a matching editor. |
 | `networks`, `devices` | The master networks and the [slave devices](#canopen-slave); either list may be empty or left out, not both. |
 | `interface` | SocketCAN interface, unique per network. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
@@ -241,7 +241,7 @@ an object dictionary built from the file when the PLC starts.
 
 ```json
 {
-  "version": 7,
+  "version": 8,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "can1", "bitrate": 250000, "node_id": 5, "priority": 90,
@@ -252,6 +252,7 @@ an object dictionary built from the file when the PLC starts.
     "on_master_lost": "pre_operational",
     "on_plc_stop": "hold",
     "start_alone": false,
+    "lss": null,
     "objects": [
       {"index": 8192, "subindex": 1, "name": "Setpoint", "type": "INTEGER16",
        "direction": "from_master", "exchange": "pdo", "location": "%IW0"},
@@ -281,6 +282,7 @@ an object dictionary built from the file when the PLC starts.
 | `on_master_lost` | What the slave does when the watched heartbeat is lost, written to 0x1029 sub 1: `pre_operational` (default), `no_change` or `stopped`. It also sends EMCY 8130h. |
 | `on_plc_stop` | The values to the master while the PLC is stopped: `hold` (default, the last values) or `zero`. |
 | `start_alone` | `true`: the slave goes operational by itself after its boot-up (NMT startup); default `false`, it waits for the master's NMT start. |
+| `lss` | `null` (default, LSS off) or the [LSS](#lss-in-the-slave) settings `{enabled, wait_for_master, serial, bitrate_change}`. |
 | `objects` | The application objects, index 0x2000-0x5FFF, sub-index 1-254, each with a `type` as for a PDO entry or `VISIBLE_STRING`, a `direction` (`from_master`: written by the master, read by the program from a `%I` location; `to_master`: written by the program to a `%Q` location, read by the master) and an `exchange`: `pdo` (may be mapped to a PDO), `sdo` (by SDO only) or `constant` (a fixed `value`, no location). A `VISIBLE_STRING` object (at most 255 characters) is always a constant. |
 | `default`, `min`, `max` | The object's value at start (default 0) and, for objects from the master, the range a write must keep (SDO aborts 0609 0031h above and 0609 0032h below it). |
 | `rpdos`, `tpdos` | Up to four of each: PDO `number` 1-4, `cob_id`, `transmission` (0-240, 254 or 255; default 255), `event_timer_ms`, `inhibit_100us` (TPDOs only) and the mapped `entries` in order, at most 8 bytes, each a `pdo` object of the right direction. Unused PDOs are present and invalid. |
@@ -313,6 +315,42 @@ Behaviour:
 - The status (below) lists each slave under `slaves`, with what the master did to it: the NMT
   state and who set it, the SDO writes and refusals, the PDOs in use with their frame counts, the
   current values of its objects and its active emergencies.
+
+### LSS in the slave
+
+With `lss.enabled` the slave is also a CiA 305 LSS slave, so an LSS master can find it and give it
+its node ID and bit rate. The slave answers switch state global and selective, configure node ID,
+configure bit timing, store configuration, the inquire services and, while it has no node ID and
+is in the waiting state, LSS fastscan (once a master has selected it, it no longer takes part). Its LSS address is the vendor ID, product code and revision from `identity` and the
+serial number in 0x1018 sub 4.
+
+```json
+"lss": {"enabled": true, "wait_for_master": true, "serial": 23, "bitrate_change": true}
+```
+
+| Field | Meaning |
+|---|---|
+| `enabled` | LSS on. Off (default), the slave ignores LSS frames and any stored LSS values. |
+| `wait_for_master` | `true`: the slave starts with no node ID and stays silent apart from LSS until a master gives it one; `node_id` is then only shown in the editor. Default `false`: it starts with `node_id`. |
+| `serial` | The serial number, 1-4294967295. Left out, the slave picks a random one the first time and keeps it in its stored file, so the LSS address stays the same across restarts and uploads. |
+| `bitrate_change` | Default `true`: the master may set a new bit rate (CiA 301 table) and store it; it is used from the next start of the slave. `false`: the request is refused. Activate bit timing is ignored: the slave never switches its bit rate on the bus. |
+
+- A node ID from configure node ID is taken when the master switches the slave back to waiting:
+  the slave resets its communication and boots up with the new ID. The COB-IDs of the EMCY
+  (0x1014), the SDO server and PDOs 1-4 follow the node ID when they are the CiA 301 defaults
+  (0x80, 0x180, 0x200, ... plus the node ID); other COB-IDs stay as set.
+- Store configuration writes the node ID and bit rate to
+  `<data folder>/canopen/lss-<interface>.json` (the data folder is `OPENPLC_PERSISTENT_DATA_DIR`,
+  else `/var/run/runtime` in the container and `/var/lib/openplc-runtime` on a host). Stored values
+  win over the project's `node_id` and `bitrate` at every start, reset node and upload, until the
+  editor's Forget (request `slave_lss_forget`) removes them; the slave then restarts with the
+  project's values. Turning LSS off keeps the file but does not use it. A store that cannot be
+  written is answered with error 2.
+- The status shows `node_id` as `null` while the slave has no node ID, its `serial`, and an `lss`
+  object: `state` (`waiting` or `configuration`), `serial_auto`, `node_id_from` (`none`,
+  `project`, `stored`, or `lss` for one a master gave and did not store, also when it equals the
+  project's), `bitrate_from` (`project` or `stored`), `bitrate`, the project's
+  `project_node_id` and `project_bitrate` and the stored `stored_node_id` and `stored_bitrate`.
 
 ## Status
 
@@ -655,7 +693,7 @@ refuses a file with `devices`.
 pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), a node started by the program (waiting, started, waiting again after a reset) and a node turned on and off (booted, stopped, pulled without a loss, skipped by NMT to every node), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 | `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, a kept table that stays the same across reloads, and version 2's table serving version 1. |
 | `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states, the emergency ring, and the node control (wanted states, run states, network counts), with no allocation on the scan's side. |
-| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, the status fields (NMT source, SDO writes and refusals, values, PDO counts and remap, active emergencies and the error register), error passive and bus-off on a stood-in link (EMCY 8120h and 8140h, the link reset without a new boot-up), and then the plugin's own master booting and running the slave. |
+| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, the status fields (NMT source, SDO writes and refusals, values, PDO counts and remap, active emergencies and the error register), error passive and bus-off on a stood-in link (EMCY 8120h and 8140h, the link reset without a new boot-up), the plugin's own master booting and running the slave, and with LSS: silence while unconfigured, fastscan, configure, store, the stored values across restarts and reset node, reset communication taking a new node ID, forget, a refused bit rate, a failed store, and the stored file's checks. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
@@ -679,6 +717,9 @@ TPDO, the master's heartbeat lost, and a PLC stop and start, checking `slaves` i
 (NMT source, SDO writes and refusals, values, PDO counts, active emergencies).
 With `e2e/fixtures/canopen-lss` the simulated module starts without a node ID, and the check waits
 until the master has given it node 2 over LSS, stored it once and booted it.
+`e2e/fixtures/canopen-slave-lss` is the same slave with LSS on, waiting for the master, and
+`.github/scripts/canopen_slave_lss_e2e.py` plays an LSS master: fastscan, node ID 12 configured
+and stored, the boot-up as node 12 with its COB-IDs following, a reset node, and the forget request.
 
 vcan needs the kernel's `vcan` module. On a runner whose kernel has no matching
 `linux-modules-extra` package the vcan jobs fail at their first step, and the reason is in its log.
