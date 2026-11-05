@@ -145,8 +145,12 @@ plugin_runtime_args_t fake_args()
     return rt;
 }
 
+std::atomic<int> g_master_seen_lines{0};
+
 void quiet_sink(LogLevel, const char *msg)
 {
+    if (std::strstr(msg, "heartbeat of master node") && std::strstr(msg, " seen"))
+        ++g_master_seen_lines;
     if (std::getenv("CANOPEN_TEST_VERBOSE"))
         std::fprintf(stderr, "%s\n", msg);
 }
@@ -502,8 +506,9 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     CHECK(p.wait(
         m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x7F; }, milliseconds(1000)));
     CHECK(g_int_in[0] == 0x1234); // values from the master hold
-    m    = p.mark();
-    beat = true;
+    const int seen_before = g_master_seen_lines.load();
+    m                     = p.mark();
+    beat                  = true;
     std::thread again(
         [&]
         {
@@ -516,9 +521,29 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(1000)));
     std::this_thread::sleep_for(milliseconds(200));
     CHECK(p.count(m, 0x705) > 0);
+    // The error history holds the errors, not the 0000h "error reset" messages.
+    {
+        uint32_t n = 0;
+        CHECK(sdo_read(p, 0x1003, 0, n) && n >= 2);
+        uint32_t newest = 0;
+        CHECK(sdo_read(p, 0x1003, 1, newest) && (newest & 0xFFFF) == 0x8130);
+        for (uint8_t s = 1; s <= n; ++s)
+        {
+            uint32_t e = 0;
+            CHECK(sdo_read(p, 0x1003, s, e) && (e & 0xFFFF) != 0);
+        }
+    }
     CHECK(p.wait(
         m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x7F; },
         milliseconds(300))); // stays pre-operational until started
+    // A master that resets the slave's communication right after its return is logged once.
+    m = p.mark();
+    p.send(0x000, {0x82, 0x05});
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; }, milliseconds(500)));
+    std::this_thread::sleep_for(milliseconds(300));
+    CHECK(slave.snapshot().master_seen);
+    CHECK(g_master_seen_lines.load() - seen_before == 1);
     beat = false;
     again.join();
 
