@@ -71,7 +71,8 @@ class LssOnline
     {
         bool ok = false;
         // Failed: not_found (no device with the address answered), no_answer, refused,
-        // store_refused (set but not stored), too_many (Find stopped).
+        // store_refused (set but not stored), too_many (Find stopped at kMaxDevices), incomplete
+        // (Find stopped by a device answering out of turn). Find fills `devices` in both.
         std::string reason;
         std::vector<LssAddress4> devices; // Find: the devices without a node ID
         unsigned previous_id = 0xFF;      // SetId: 255 when the device had none

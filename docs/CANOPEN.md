@@ -462,7 +462,10 @@ seconds and is a job like an SDO request; `job` answers with the members below a
   of 1000000, 800000, 500000, 250000, 125000, 50000, 20000 or 10000.
 - Every request ends with all devices in the LSS waiting state.
 - Failed: `not_found` (no device has the address), `no_answer`, `refused` (the device refused the
-  value), `store_refused` (set but not stored), `too_many` (find stopped after 64 devices).
+  value), `store_refused` (set but not stored), `too_many` (find stopped after 64 devices),
+  `incomplete` (find stopped because a device answered out of turn: some devices answer a
+  fastscan while selected, which hides the devices after them). A failed find still lists the
+  devices found; give them a node ID and search again to find the rest.
   Refused at once: `busy` (another LSS sequence, the start-up assignment included, is running),
   `needs_service_mode`, `node_in_use`, `bad_request`.
 - Each request and its result are logged.
