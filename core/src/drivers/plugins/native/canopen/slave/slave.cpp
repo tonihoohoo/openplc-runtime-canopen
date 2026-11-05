@@ -2,8 +2,10 @@
 
 #include "slave.h"
 
+#include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <mutex>
 
 #include <net/if.h>
@@ -21,6 +23,8 @@
 #include <lely/io2/vcan.hpp>
 
 #include "CANopen.h"
+#include "bus_monitor.h"
+#include "bus_off_recovery.h"
 #include "can_link.h"
 #include "log.h"
 #include "slave_od.h"
@@ -58,8 +62,7 @@ class SocketLink : public SlaveLink
     bool open(std::string &problem) override
     {
         close();
-        LinkSetup setup;
-        if (prepare_link(system_link_ops(), interface_, bitrate_, problem, setup) !=
+        if (prepare_link(system_link_ops(), interface_, bitrate_, problem, setup_) !=
             LinkResult::Ready)
             return false;
         fd_ = socket(PF_CAN, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, CAN_RAW);
@@ -119,10 +122,26 @@ class SocketLink : public SlaveLink
         return ::write(fd_, &f, sizeof(f)) == static_cast<ssize_t>(sizeof(f)) ? 0 : -1;
     }
 
+    bool info(LinkInfo &out) override
+    {
+        return system_link_ops().get(interface_, out) == 0;
+    }
+
+    int take_down() override
+    {
+        return system_link_ops().set_up(interface_, false);
+    }
+
+    bool restart_refused() const override
+    {
+        return setup_.restart_refused;
+    }
+
   private:
     std::string interface_;
     unsigned bitrate_;
     int fd_ = -1;
+    LinkSetup setup_; // restart_refused is kept across reopens
 };
 
 class VirtualLink : public SlaveLink
@@ -230,11 +249,15 @@ static ODR_t read_history(OD_stream_t *stream, void *buf, OD_size_t count, OD_si
     return ODR_OK;
 }
 
+constexpr unsigned kPdos = 4; // RPDOs and TPDOs each
+
 struct Slave::Impl
 {
     SlaveOd od;
     SlaveCanPort port{};
     SlaveLink *link         = nullptr;
+    unsigned node_id        = 0;
+    unsigned master_node_id = 0; // 0: not watched
     uint32_t emcy_id        = 0;
     uint64_t rx             = 0;
     uint64_t tx             = 0;
@@ -242,6 +265,133 @@ struct Slave::Impl
     bool emcy_sent          = false;
     unsigned write_failures = 0;
     OD_extension_t history{};
+
+    // What the frames show, for the status (slave thread only).
+    uint32_t pdo_cob[2 * kPdos]{}; // RPDOs then TPDOs, 11-bit; refreshed with the status
+    uint64_t pdo_frames[2 * kPdos]{};
+    int64_t pdo_last[2 * kPdos]{};
+    int64_t master_last = 0;
+    bool nmt_command    = false; // an NMT command for this node since the last state check
+    struct SdoDownload
+    {
+        bool active      = false;
+        bool expedited   = false;
+        bool last        = false; // the last segment was sent
+        uint16_t index   = 0;
+        uint8_t subindex = 0;
+    } sdo;
+    std::deque<SlaveEvent> events; // newest first
+
+    void push(SlaveEvent e)
+    {
+        e.time = wall_ms();
+        events.push_front(e);
+        if (events.size() > kSlaveEvents)
+            events.pop_back();
+    }
+
+    void count_pdo(uint32_t id, unsigned first)
+    {
+        for (unsigned i = first; i < first + kPdos; ++i)
+            if (pdo_cob[i] && pdo_cob[i] == id)
+            {
+                ++pdo_frames[i];
+                pdo_last[i] = wall_ms();
+                return;
+            }
+    }
+
+    // A frame received from the bus.
+    void seen_rx(const SlaveLink::Frame &f)
+    {
+        const uint32_t id = f.id & 0x7FF;
+        if (f.id & SlaveLink::kRtr)
+            return;
+        if (id == 0 && f.dlc >= 2 && (f.data[1] == 0 || f.data[1] == node_id))
+        {
+            nmt_command = true;
+            if (f.data[0] == CO_NMT_RESET_NODE || f.data[0] == CO_NMT_RESET_COMMUNICATION)
+            {
+                SlaveEvent e;
+                e.kind = SlaveEventKind::Reset;
+                e.node = f.data[0] == CO_NMT_RESET_NODE;
+                push(e);
+            }
+            return;
+        }
+        if (master_node_id && id == 0x700u + master_node_id)
+        {
+            master_last = wall_ms();
+            return;
+        }
+        if (id == 0x600u + node_id && f.dlc == 8)
+        {
+            const uint8_t ccs = f.data[0] >> 5;
+            if (ccs == 1) // initiate download
+            {
+                sdo.active    = true;
+                sdo.expedited = (f.data[0] & 0x02) != 0;
+                sdo.last      = false;
+                sdo.index     = static_cast<uint16_t>(f.data[1] | (f.data[2] << 8));
+                sdo.subindex  = f.data[3];
+            }
+            else if (ccs == 0 && sdo.active) // download segment
+                sdo.last = (f.data[0] & 0x01) != 0;
+            else if (ccs == 4) // abort by the master
+                sdo.active = false;
+            return;
+        }
+        count_pdo(id, 0);
+    }
+
+    // A frame the slave sent.
+    void seen_tx(const SlaveLink::Frame &f)
+    {
+        const uint32_t id = f.id & 0x7FF;
+        if (id == emcy_id && f.dlc >= 3)
+        {
+            const uint16_t code = static_cast<uint16_t>(f.data[0] | (f.data[1] << 8));
+            last_emcy           = code;
+            emcy_sent           = true;
+            SlaveEvent e;
+            e.kind = code ? SlaveEventKind::Emcy : SlaveEventKind::EmcyReset;
+            e.code = code;
+            e.reg  = f.data[2];
+            push(e);
+            return;
+        }
+        if (id == 0x580u + node_id && f.dlc == 8 && sdo.active)
+        {
+            const uint16_t index = static_cast<uint16_t>(f.data[1] | (f.data[2] << 8));
+            SlaveEvent e;
+            e.kind     = SlaveEventKind::SdoWrite;
+            e.index    = sdo.index;
+            e.subindex = sdo.subindex;
+            if (f.data[0] == 0x80) // abort
+            {
+                if (index != sdo.index || f.data[3] != sdo.subindex)
+                    return;
+                e.abort_code = static_cast<uint32_t>(f.data[4]) | (f.data[5] << 8) |
+                               (f.data[6] << 16) | (static_cast<uint32_t>(f.data[7]) << 24);
+                sdo.active = false;
+                push(e);
+            }
+            else if ((f.data[0] >> 5) == 3 && sdo.expedited) // initiate download response
+            {
+                e.ok       = true;
+                sdo.active = false;
+                push(e);
+            }
+            else if ((f.data[0] >> 5) == 1 && sdo.last) // last segment acknowledged
+            {
+                e.ok       = true;
+                sdo.active = false;
+                push(e);
+            }
+            return;
+        }
+        count_pdo(id, kPdos);
+    }
 
     static int send(void *ctx, uint32_t ident, uint8_t dlc, const uint8_t *data)
     {
@@ -256,14 +406,104 @@ struct Slave::Impl
             return -1;
         }
         ++self->tx;
-        if (f.id == self->emcy_id && f.dlc >= 2)
-        {
-            self->last_emcy = static_cast<uint16_t>(f.data[0] | (f.data[1] << 8));
-            self->emcy_sent = true;
-        }
+        self->seen_tx(f);
         return 0;
     }
+
+    void fill_details(CO_t *co, SlaveSnapshot &s);
 };
+
+namespace
+{
+
+template <typename T> T od_value(OD_t *od, uint16_t index, uint8_t sub)
+{
+    T v           = 0;
+    OD_entry_t *e = OD_find(od, index);
+    if (e)
+        (void)OD_get_value(e, sub, &v, sizeof(v), true);
+    return v;
+}
+
+} // namespace
+
+// The details of the status, read in the slave thread; `s` keeps its vectors' memory.
+void Slave::Impl::fill_details(CO_t *co, SlaveSnapshot &s)
+{
+    OD_t *d           = od.od();
+    s.detailed        = true;
+    s.error_register  = CO_getErrorRegister(co->em);
+    s.heartbeat_ms    = od_value<uint16_t>(d, 0x1017, 0);
+    s.master_watch_ms = static_cast<uint16_t>(od_value<uint32_t>(d, 0x1016, 1) & 0xFFFFu);
+    s.on_master_lost  = od.error_behaviour();
+    s.master_last     = master_last;
+
+    s.error_history.clear();
+    uint32_t count = 0;
+    history_entry(co->em, 0, count);
+    for (uint8_t k = 1; k <= count; ++k)
+    {
+        uint32_t v = 0;
+        if (history_entry(co->em, k, v))
+            s.error_history.push_back(v);
+    }
+    // Active errors: the set status bits, each with the code of its newest report.
+    s.emcy_active.clear();
+    for (uint8_t k = 1; k <= co->em->fifoCount; ++k)
+    {
+        int index = static_cast<int>(co->em->fifoWrPtr) - k;
+        if (index < 0)
+            index += co->em->fifoSize;
+        const uint32_t msg  = co->em->fifo[index].msg;
+        const uint16_t code = static_cast<uint16_t>(msg & 0xFFFFu);
+        const uint8_t bit   = static_cast<uint8_t>(msg >> 24);
+        if (code == 0 || !CO_isError(co->em, bit))
+            continue;
+        bool known = false;
+        for (uint16_t c : s.emcy_active)
+            known = known || c == code;
+        if (!known)
+            s.emcy_active.push_back(code);
+    }
+
+    s.pdos.resize(2 * kPdos);
+    for (unsigned i = 0; i < 2 * kPdos; ++i)
+    {
+        const bool tpdo        = i >= kPdos;
+        const uint16_t comm    = static_cast<uint16_t>((tpdo ? 0x1800 : 0x1400) + i % kPdos);
+        const uint16_t mapping = static_cast<uint16_t>(comm + 0x200);
+        SlavePdoStatus &p      = s.pdos[i];
+        p.number               = i % kPdos + 1;
+        p.tpdo                 = tpdo;
+        p.cob_id               = od_value<uint32_t>(d, comm, 1);
+        p.transmission         = od_value<uint8_t>(d, comm, 2);
+        p.inhibit_100us        = tpdo ? od_value<uint16_t>(d, comm, 3) : 0;
+        p.event_ms             = od_value<uint16_t>(d, comm, 5);
+        const uint8_t n        = od_value<uint8_t>(d, mapping, 0);
+        p.mapping.clear();
+        for (uint8_t k = 1; k <= n && k <= 8; ++k)
+            p.mapping.push_back(od_value<uint32_t>(d, mapping, k));
+        p.frames   = pdo_frames[i];
+        p.last     = pdo_last[i];
+        pdo_cob[i] = (p.cob_id & 0x80000000u) ? 0 : (p.cob_id & 0x7FFu);
+    }
+
+    s.values.clear();
+    for (const SlaveObject &o : od.config().objects)
+    {
+        if (o.string)
+            continue;
+        SlaveValue v;
+        v.index       = o.index;
+        v.subindex    = o.subindex;
+        v.bytes       = static_cast<uint8_t>(o.bytes() > 8 ? 8 : o.bytes());
+        OD_entry_t *e = OD_find(d, o.index);
+        if (e)
+            (void)OD_get_value(e, o.subindex, v.data, v.bytes, true);
+        s.values.push_back(v);
+    }
+    s.events = events;
+}
 
 Slave::Slave(const DeviceConfig &dev, std::unique_ptr<SlaveLink> link)
     : dev_(dev), link_(std::move(link)), impl_(new Impl)
@@ -385,14 +625,23 @@ void Slave::thread_main()
 {
     const std::string label = dev_.label();
     enter_realtime(dev_.priority, label);
-    Impl &im     = *impl_;
-    im.link      = link_.get();
-    im.emcy_id   = 0x80u + dev_.node_id;
-    im.port.ctx  = &im;
-    im.port.send = Impl::send;
+    Impl &im          = *impl_;
+    im.link           = link_.get();
+    im.emcy_id        = 0x80u + dev_.node_id;
+    im.port.ctx       = &im;
+    im.port.send      = Impl::send;
+    im.node_id        = dev_.node_id;
+    im.master_node_id = status_.master_node_id;
     std::string last_problem;
     bool first_plc = true;
     bool plc_was   = true;
+    BusMonitor monitor(dev_.interface);
+    BusOffRecovery recovery;
+    bool reset_forbidden = false;
+    uint32_t link_resets = 0;
+    BusStatus bus        = monitor.simulated();
+    BusState bus_was     = BusState::Unknown;
+    Clock::time_point last_monitor;
 
     auto set_problem = [&](const std::string &problem)
     {
@@ -404,6 +653,108 @@ void Slave::thread_main()
     {
         for (int waited = 0; waited < ms && !stop_.load(); waited += 50)
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    };
+
+    // Reads the link into `bus`, tells the stack its error state, and resets a bus-off link the
+    // kernel does not restart (as a master network does). True when the link was taken down.
+    auto supervise = [&](CO_t *co) -> bool
+    {
+        LinkInfo li;
+        const auto now = BusMonitor::clock::now();
+        if (!link_->info(li))
+        {
+            bus = monitor.simulated();
+            return false;
+        }
+        if (!li.up)
+        {
+            bus = monitor.unusable(BusState::Down);
+            return false;
+        }
+        bus            = monitor.update(li, now);
+        bus.has_resets = li.kind == "can";
+        bus.resets     = link_resets;
+        uint16_t err   = 0;
+        if (bus.state == BusState::BusOff)
+            err |= CO_CAN_ERRTX_BUS_OFF;
+        if (li.has_berr)
+        {
+            if (li.tx_errors >= 128)
+                err |= CO_CAN_ERRTX_PASSIVE;
+            else if (li.tx_errors >= 96)
+                err |= CO_CAN_ERRTX_WARNING;
+            if (li.rx_errors >= 128)
+                err |= CO_CAN_ERRRX_PASSIVE;
+            else if (li.rx_errors >= 96)
+                err |= CO_CAN_ERRRX_WARNING;
+        }
+        const uint16_t mask = CO_CAN_ERRTX_BUS_OFF | CO_CAN_ERR_WARN_PASSIVE;
+        co->CANmodule->CANerrorStatus =
+            static_cast<uint16_t>((co->CANmodule->CANerrorStatus & ~mask) | err);
+        if (li.kind != "can" || reset_forbidden)
+            return false;
+        const LinkFault fault = bus.state == BusState::BusOff ? LinkFault::BusOff : LinkFault::None;
+        if (!recovery.reading(fault, li.restart_ms, link_->restart_refused(), now))
+        {
+            if (recovery.held_back_news())
+            {
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              recovery.next_reset() - now)
+                              .count();
+                log_warn("%s: CAN interface %s is bus-off again; resetting the link in %lld s",
+                         label.c_str(), dev_.interface.c_str(),
+                         static_cast<long long>((ms + 999) / 1000));
+            }
+            return false;
+        }
+        recovery.reset_done(now);
+        SlaveEvent e;
+        e.kind       = SlaveEventKind::BusReset;
+        const int rc = link_->take_down();
+        if (rc == 0)
+        {
+            log_error("%s: CAN interface %s is bus-off; resetting the link", label.c_str(),
+                      dev_.interface.c_str());
+            ++link_resets;
+            e.outcome = ResetOutcome::Done;
+            im.push(e);
+            return true;
+        }
+        if (rc == -EPERM)
+        {
+            reset_forbidden = true;
+            log_error("%s: CAN interface %s is bus-off and the runtime is not permitted to reset "
+                      "it; reset it by hand with \"ip link set %s down\" and then \"ip link set "
+                      "%s up\"",
+                      label.c_str(), dev_.interface.c_str(), dev_.interface.c_str(),
+                      dev_.interface.c_str());
+            e.outcome = ResetOutcome::NotPermitted;
+        }
+        else
+        {
+            log_error("%s: CAN interface %s is bus-off and resetting the link failed: %s",
+                      label.c_str(), dev_.interface.c_str(), std::strerror(-rc));
+            e.outcome = ResetOutcome::Failed;
+        }
+        im.push(e);
+        return false;
+    };
+    // Brings the link up again after a reset, keeping the stack and its state. False on stop.
+    auto reopen = [&](const std::string &) -> bool
+    {
+        link_->close();
+        std::string problem;
+        while (!stop_.load() && !link_->open(problem))
+        {
+            set_problem(problem);
+            sleep_or_stop(kRetryMs);
+        }
+        if (stop_.load())
+            return false;
+        set_problem("");
+        log_info("%s: CAN interface %s is back after the reset", label.c_str(),
+                 dev_.interface.c_str());
+        return true;
     };
 
     while (!stop_.load())
@@ -463,6 +814,13 @@ void Slave::thread_main()
             if (!plc_running_.load())
                 CO_errorReport(co->em, kPlcStopBit, CO_EMC_SOFTWARE_USER, 0);
             log_info("%s: node %u on the bus", label.c_str(), dev_.node_id);
+            {
+                SlaveEvent e;
+                e.kind = SlaveEventKind::OnBus;
+                im.push(e);
+            }
+            im.nmt_command = false;
+            im.sdo.active  = false;
 
             reset                  = CO_RESET_NOT;
             Clock::time_point last = Clock::now();
@@ -484,6 +842,7 @@ void Slave::thread_main()
                     msg.dlc = f.dlc;
                     std::memcpy(msg.data, f.data, 8);
                     ++im.rx;
+                    im.seen_rx(f);
                     co_slave_receive(co->CANmodule, &msg);
                     got = link_->read(f, 0);
                 }
@@ -512,6 +871,10 @@ void Slave::thread_main()
                         CO_errorReset(co->em, kPlcStopBit, 0);
                     }
                     plc_was = plc;
+                    SlaveEvent e;
+                    e.kind = SlaveEventKind::Plc;
+                    e.ok   = plc;
+                    im.push(e);
                 }
                 first_plc = false;
 
@@ -555,25 +918,75 @@ void Slave::thread_main()
                 if (state != last_state)
                 {
                     log_info("%s: %s", label.c_str(), state_text(state));
-                    last_state = state;
+                    SlaveNmtBy by = SlaveNmtBy::Boot;
+                    if (im.nmt_command)
+                        by = SlaveNmtBy::Master;
+                    else if (last_state == CO_NMT_OPERATIONAL)
+                        by = SlaveNmtBy::Self;
+                    else if (state == CO_NMT_OPERATIONAL && dev_.start_alone)
+                        by = SlaveNmtBy::StartAlone;
+                    if (state != CO_NMT_INITIALIZING)
+                    {
+                        SlaveEvent e;
+                        e.kind  = SlaveEventKind::Nmt;
+                        e.state = state;
+                        e.by    = by;
+                        im.push(e);
+                    }
+                    std::lock_guard<PiMutex> lock(status_mutex_);
+                    status_.since  = wall_ms();
+                    status_.nmt_by = by;
+                    last_state     = state;
                 }
-                bool master = false;
+                im.nmt_command = false;
+                bool master    = false;
                 if (status_.master_node_id)
                     master = CO_HBconsumer_getState(co->HBcons, 0) == CO_HBconsumer_ACTIVE;
                 if (status_.master_node_id && master != master_was)
                 {
                     if (master && !said_seen)
+                    {
                         log_info("%s: heartbeat of master node %u seen", label.c_str(),
                                  dev_.master_node_id);
+                        SlaveEvent e;
+                        e.kind = SlaveEventKind::Heartbeat;
+                        e.ok   = true;
+                        im.push(e);
+                    }
                     else if (!master && CO_isError(co->em, CO_EM_HEARTBEAT_CONSUMER))
                     {
                         log_warn("%s: heartbeat of master node %u lost", label.c_str(),
                                  dev_.master_node_id);
                         said_seen = false;
+                        SlaveEvent e;
+                        e.kind = SlaveEventKind::Heartbeat;
+                        im.push(e);
                     }
                     if (master)
                         said_seen = true;
                     master_was = master;
+                }
+                // Bus status and bus-off recovery, once a second.
+                if (now - last_monitor >= std::chrono::seconds(1))
+                {
+                    last_monitor = now;
+                    if (supervise(co))
+                    {
+                        if (!reopen(label))
+                            break;
+                        im.sdo.active = false;
+                    }
+                    if (bus.state != bus_was)
+                    {
+                        if (bus_was != BusState::Unknown || bus.state != BusState::ErrorActive)
+                        {
+                            SlaveEvent e;
+                            e.kind      = SlaveEventKind::BusState;
+                            e.bus_state = bus.state;
+                            im.push(e);
+                        }
+                        bus_was = bus.state;
+                    }
                 }
                 if (now - last_status >= std::chrono::milliseconds(100) || state != status_nmt)
                 {
@@ -587,6 +1000,8 @@ void Slave::thread_main()
                     status_.emcy_sent   = im.emcy_sent;
                     status_.rx_frames   = im.rx;
                     status_.tx_frames   = im.tx;
+                    status_.bus         = bus;
+                    im.fill_details(co, status_);
                 }
             }
             if (reset == CO_RESET_APP)

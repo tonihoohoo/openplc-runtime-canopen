@@ -7,6 +7,7 @@
 // master loss and return, PLC stop and start, and reset node. Then our own master boots the slave
 // from the configuration the slave's EDS would give and exchanges PDOs with it.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -356,6 +357,36 @@ bool scan_until(Slave &s, const plugin_runtime_args_t &rt, std::function<bool()>
     return false;
 }
 
+// Waits for the slave's status (refreshed every 100 ms) to satisfy `ok`.
+bool snapshot_until(Slave &s, std::function<bool(const SlaveSnapshot &)> ok, milliseconds timeout)
+{
+    auto end = Clock::now() + timeout;
+    for (;;)
+    {
+        if (ok(s.snapshot()))
+            return true;
+        if (Clock::now() >= end)
+            return false;
+        std::this_thread::sleep_for(milliseconds(10));
+    }
+}
+
+const SlaveEvent *find_event(const SlaveSnapshot &s, std::function<bool(const SlaveEvent &)> ok)
+{
+    for (const SlaveEvent &e : s.events)
+        if (ok(e))
+            return &e;
+    return nullptr;
+}
+
+const SlaveValue *find_value(const SlaveSnapshot &s, uint16_t index, uint8_t sub)
+{
+    for (const SlaveValue &v : s.values)
+        if (v.index == index && v.subindex == sub)
+            return &v;
+    return nullptr;
+}
+
 bool is_emcy(const Frame &f, uint16_t code)
 {
     return f.id == 0x80 + kNode && f.len == 8 && (f.data[0] | (f.data[1] << 8)) == code;
@@ -399,6 +430,51 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     CHECK(sdo_read(p, 0x2000, 4, v) && v == 1200);
     CHECK(sdo_write(p, 0x2100, 1, 7, 2) == 0x06010002);
     CHECK(sdo_write(p, 0x2100, 5, 0x31, 1) == 0x06010002);
+    // The writes in the status: events with the result, and the value now in the dictionary.
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            const SlaveValue *v = find_value(s, 0x2000, 4);
+            return s.detailed && v && v->bytes == 2 && v->data[0] == 0xB0 && v->data[1] == 0x04;
+        },
+        milliseconds(500)));
+    {
+        SlaveSnapshot snap = slave.snapshot();
+        CHECK(find_event(snap,
+                         [](const SlaveEvent &e) {
+                             return e.kind == SlaveEventKind::SdoWrite && e.index == 0x2000 &&
+                                    e.subindex == 4 && e.ok;
+                         }));
+        CHECK(find_event(snap,
+                         [](const SlaveEvent &e)
+                         {
+                             return e.kind == SlaveEventKind::SdoWrite && e.index == 0x2000 &&
+                                    e.subindex == 4 && !e.ok && e.abort_code == 0x06090031;
+                         }));
+        CHECK(find_event(snap,
+                         [](const SlaveEvent &e)
+                         {
+                             return e.kind == SlaveEventKind::SdoWrite && e.index == 0x1010 &&
+                                    !e.ok && e.abort_code == 0x06020000;
+                         }));
+        CHECK(
+            find_event(snap, [](const SlaveEvent &e) { return e.kind == SlaveEventKind::OnBus; }));
+        CHECK(snap.nmt == 127 && snap.nmt_by == SlaveNmtBy::Boot);
+        CHECK(snap.heartbeat_ms == 100 && snap.master_watch_ms == 300 && snap.on_master_lost == 0);
+        CHECK(snap.pdos.size() == 8 && snap.pdos[0].cob_id == 0x205 && !snap.pdos[0].tpdo);
+        CHECK(snap.pdos[4].tpdo && snap.pdos[4].cob_id == 0x185 &&
+              snap.pdos[4].mapping.size() == 2);
+        CHECK(snap.pdos[5].transmission == 1);
+        CHECK(snap.bus.state == BusState::ErrorActive);
+        CHECK(!find_value(snap, 0x2100, 5)); // the string constant is left out
+        // The fields in the JSON answer.
+        std::string json = inactive_status_json({snap});
+        CHECK(json.find("\"nmt_by\":\"boot\"") != std::string::npos);
+        CHECK(json.find("\"kind\":\"sdo_write\"") != std::string::npos);
+        CHECK(json.find("\"data\":\"b004\"") != std::string::npos);
+        CHECK(json.find("\"now\":") != std::string::npos);
+    }
 
     // An SDO-only object to the master is read with the PLC's value.
     g_dint_out[0] = 123456;
@@ -443,6 +519,19 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     p.send(0x205, {0x34, 0x12, 0x09});
     CHECK(scan_until(
         slave, rt, [] { return g_int_in[0] == 0x1234 && g_byte_in[2] == 9; }, milliseconds(1000)));
+    // Started by the master, and the PDOs counted.
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            return s.nmt == 5 && s.nmt_by == SlaveNmtBy::Master && s.since > 0 &&
+                   s.pdos.size() == 8 && s.pdos[0].frames >= 1 && s.pdos[0].last > 0 &&
+                   s.pdos[4].frames >= 2;
+        },
+        milliseconds(500)));
+    CHECK(find_event(
+        slave.snapshot(), [](const SlaveEvent &e)
+        { return e.kind == SlaveEventKind::Nmt && e.state == 5 && e.by == SlaveNmtBy::Master; }));
 
     // A SYNC TPDO.
     g_byte_out[0] = 77;
@@ -476,10 +565,33 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
         },
         milliseconds(1000)));
 
+    // The remap in the status.
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            return s.pdos.size() == 8 && s.pdos[4].mapping.size() == 2 &&
+                   s.pdos[4].mapping[0] == 0x21000210 && s.pdos[4].mapping[1] == 0x21000110;
+        },
+        milliseconds(500)));
+
     // PLC stop and start.
     m = p.mark();
     slave.set_plc_running(false);
     CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x6200); }, milliseconds(500)));
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            return !s.plc_running && s.emcy_active.size() == 1 && s.emcy_active[0] == 0x6200 &&
+                   s.error_register == 0x81 && !s.error_history.empty() &&
+                   (s.error_history[0] & 0xFFFF) == 0x6200;
+        },
+        milliseconds(500)));
+    CHECK(find_event(slave.snapshot(),
+                     [](const SlaveEvent &e) { return e.kind == SlaveEventKind::Plc && !e.ok; }));
+    CHECK(find_event(slave.snapshot(), [](const SlaveEvent &e)
+                     { return e.kind == SlaveEventKind::Emcy && e.code == 0x6200; }));
     CHECK(p.wait(
         m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x05; }, milliseconds(500)));
     m = p.mark();
@@ -506,6 +618,17 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     CHECK(p.wait(
         m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x7F; }, milliseconds(1000)));
     CHECK(g_int_in[0] == 0x1234); // values from the master hold
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            return s.nmt == 127 && s.nmt_by == SlaveNmtBy::Self && s.master_last > 0 &&
+                   std::find(s.emcy_active.begin(), s.emcy_active.end(), 0x8130) !=
+                       s.emcy_active.end();
+        },
+        milliseconds(500)));
+    CHECK(find_event(slave.snapshot(), [](const SlaveEvent &e)
+                     { return e.kind == SlaveEventKind::Heartbeat && !e.ok; }));
     const int seen_before = g_master_seen_lines.load();
     m                     = p.mark();
     beat                  = true;
@@ -544,6 +667,8 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     std::this_thread::sleep_for(milliseconds(300));
     CHECK(slave.snapshot().master_seen);
     CHECK(g_master_seen_lines.load() - seen_before == 1);
+    CHECK(find_event(slave.snapshot(), [](const SlaveEvent &e)
+                     { return e.kind == SlaveEventKind::Reset && !e.node; }));
     beat = false;
     again.join();
 
@@ -567,6 +692,118 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
 
     slave.stop();
     CHECK(!slave.snapshot().bus_open);
+}
+
+// A CAN link whose state the test sets: frames go over Lely's in-process bus.
+class FakeCanLink : public SlaveLink
+{
+  public:
+    explicit FakeCanLink(std::shared_ptr<lely::io::VirtualCanController> bus)
+        : inner_(virtual_slave_link(bus))
+    {
+    }
+    bool open(std::string &problem) override
+    {
+        ++opens;
+        return inner_->open(problem);
+    }
+    void close() override
+    {
+        inner_->close();
+    }
+    int read(Frame &frame, int timeout_ms) override
+    {
+        return inner_->read(frame, timeout_ms);
+    }
+    int write(const Frame &frame) override
+    {
+        return inner_->write(frame);
+    }
+    bool info(LinkInfo &out) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        out = info_;
+        return true;
+    }
+    int take_down() override
+    {
+        ++downs;
+        set_state(0, 0, 0); // the reset clears the controller
+        return 0;
+    }
+    void set_state(unsigned can_state, unsigned tx_errors, unsigned rx_errors)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        info_.up            = true;
+        info_.kind          = "can";
+        info_.restart_ms    = 0; // no auto-restart: the plugin resets the link
+        info_.has_can_state = true;
+        info_.can_state     = can_state;
+        info_.has_berr      = true;
+        info_.tx_errors     = tx_errors;
+        info_.rx_errors     = rx_errors;
+    }
+    std::atomic<int> opens{0};
+    std::atomic<int> downs{0};
+
+  private:
+    std::unique_ptr<SlaveLink> inner_;
+    std::mutex mutex_;
+    LinkInfo info_;
+};
+
+// Bus status, and a bus-off link without auto-restart reset by the plugin, as a network's.
+void check_bus_off(const DeviceConfig &dev)
+{
+    auto vbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
+    Probe p(vbus);
+    std::unique_ptr<FakeCanLink> owned(new FakeCanLink(vbus));
+    FakeCanLink *link = owned.get();
+    link->set_state(0, 0, 0);
+    size_t m = p.mark();
+    Slave slave(dev, std::move(owned));
+    std::string problem;
+    CHECK(slave.start(problem));
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x7F; }, milliseconds(1000)));
+
+    // Error passive: in the status and the events, and the stack's EMCY 8120h.
+    m = p.mark();
+    link->set_state(2, 130, 0);
+    CHECK(snapshot_until(
+        slave, [](const SlaveSnapshot &s)
+        { return s.bus.state == BusState::ErrorPassive && s.bus.tx_errors == 130; },
+        milliseconds(2000)));
+    CHECK(find_event(
+        slave.snapshot(), [](const SlaveEvent &e)
+        { return e.kind == SlaveEventKind::BusState && e.bus_state == BusState::ErrorPassive; }));
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x8120); }, milliseconds(1000)));
+
+    // Bus-off: the link is reset and reopened, the stack keeps its state.
+    m               = p.mark();
+    const int opens = link->opens.load();
+    link->set_state(3, 256, 0);
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x8140); }, milliseconds(2000)));
+    CHECK(snapshot_until(
+        slave, [&](const SlaveSnapshot &) { return link->downs.load() == 1; }, milliseconds(3000)));
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            return s.bus.state == BusState::ErrorActive && s.bus.has_resets && s.bus.resets == 1 &&
+                   s.bus_open;
+        },
+        milliseconds(3000)));
+    CHECK(link->opens.load() == opens + 1);
+    CHECK(find_event(
+        slave.snapshot(), [](const SlaveEvent &e)
+        { return e.kind == SlaveEventKind::BusReset && e.outcome == ResetOutcome::Done; }));
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(2000)));
+    CHECK(p.count(m, 0x705) > 0); // heartbeat goes on
+    CHECK(!p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; },
+        milliseconds(0))); // no new boot-up: the stack was kept
+    slave.stop();
 }
 
 // Our master boots the slave and exchanges PDOs with it.
@@ -667,6 +904,7 @@ int main()
     std::memset(g_int_in, 0, sizeof(g_int_in));
     std::memset(g_byte_in, 0, sizeof(g_byte_in));
     check_with_master(cfg.devices[0], rt, dir);
+    check_bus_off(cfg.devices[0]);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }
