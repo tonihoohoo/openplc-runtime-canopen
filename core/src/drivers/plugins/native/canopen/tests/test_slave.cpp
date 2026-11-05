@@ -45,7 +45,7 @@ namespace
 {
 
 const char *const kConfig = R"({
-  "version": 8,
+  "version": 10,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "vcan-slave", "bitrate": 0, "node_id": 5,
@@ -87,6 +87,8 @@ const char *const kConfig = R"({
 // ---- fake PLC image ----
 constexpr int kSize = 16;
 IEC_BYTE g_byte_in[kSize];
+IEC_BOOL g_bool_in[kSize][8];
+IEC_BOOL g_bool_out[kSize][8];
 IEC_UINT g_int_in[kSize];
 IEC_UDINT g_dint_in[kSize];
 IEC_BYTE g_byte_out[kSize];
@@ -98,8 +100,10 @@ IEC_UINT *g_int_out_ptr[kSize];
 IEC_UDINT *g_dint_out_ptr[kSize];
 IEC_ULINT *g_lint_out_ptr[kSize];
 
-int write_bool(int, int, int, int)
+int write_bool(int, int index, int bit, int value)
 {
+    if (index >= 0 && index < kSize && bit >= 0 && bit < 8)
+        g_bool_in[index][bit] = static_cast<IEC_BOOL>(value != 0);
     return 0;
 }
 int write_byte(int, int index, int value)
@@ -133,6 +137,8 @@ plugin_runtime_args_t fake_args()
         g_byte_out_ptr[i] = &g_byte_out[i];
         g_int_out_ptr[i]  = &g_int_out[i];
         g_dint_out_ptr[i] = &g_dint_out[i];
+        for (int b = 0; b < 8; ++b)
+            g_bool_out_ptr[i][b] = &g_bool_out[i][b];
     }
     rt.bool_output        = g_bool_out_ptr;
     rt.byte_output        = g_byte_out_ptr;
@@ -819,7 +825,7 @@ void check_bus_off(const DeviceConfig &dev)
 
 // Our master boots the slave and exchanges PDOs with it.
 const char *const kMasterConfig = R"({
-  "version": 8,
+  "version": 10,
   "networks": [{
     "name": "line", "interface": "vcan-master", "bitrate": 0, "master_node_id": 127,
     "heartbeat_producer_ms": 100,
@@ -898,7 +904,7 @@ constexpr uint32_t kLssMaster = 0x7E5;
 constexpr uint32_t kLssSlave  = 0x7E4;
 
 const char *const kLssConfig = R"({
-  "version": 8,
+  "version": 10,
   "networks": [],
   "devices": [{
     "name": "lss", "interface": "vcan-lss", "bitrate": 500000, "node_id": 5,
@@ -1139,6 +1145,156 @@ void check_lss(const plugin_runtime_args_t &rt, const std::string &dir)
 
 } // namespace
 
+const char *const kPackedConfig = R"({
+  "version": 10,
+  "networks": [],
+  "devices": [{
+    "name": "bits", "interface": "vcan-packed", "bitrate": 0, "node_id": 5,
+    "identity": {"device_name": "bits", "vendor_id": 1, "product_code": 1, "revision": 1},
+    "heartbeat_ms": 1000, "master_watch": null, "on_master_lost": "pre_operational",
+    "on_plc_stop": "zero",
+    "objects": [
+      {"index": 8192, "subindex": 1, "name": "Valves", "type": "UNSIGNED8",
+       "direction": "from_master", "exchange": "pdo", "default": 129,
+       "bits": ["%IX0.0", "%IX0.1", "%IX0.2", "%IX0.3", "%IX0.4", "%IX0.5", "%IX0.6", "%IX0.7"]},
+      {"index": 8448, "subindex": 1, "name": "Inputs", "type": "UNSIGNED8",
+       "direction": "to_master", "exchange": "pdo",
+       "bits": ["%QX1.0", "%QX1.1", "%QX1.2", "%QX1.3", "%QX1.4", "%QX1.5", "%QX1.6", "%QX1.7"]}
+    ],
+    "rpdos": [{"number": 1, "cob_id": 517, "entries": [{"index": 8192, "subindex": 1}]}],
+    "tpdos": [{"number": 1, "cob_id": 389, "entries": [{"index": 8448, "subindex": 1}]}]
+  }]
+})";
+
+std::string replaced(std::string text, const std::string &from, const std::string &to)
+{
+    size_t at = text.find(from);
+    CHECK(at != std::string::npos);
+    if (at != std::string::npos)
+        text.replace(at, from.size(), to);
+    return text;
+}
+
+bool packed_refused(const std::string &text, const std::string &part)
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    bool ok = parse_config(text, cfg, errors);
+    for (const auto &e : errors)
+        if (e.find(part) != std::string::npos)
+            return !ok;
+    std::fprintf(stderr, "expected an error with \"%s\", got:\n", part.c_str());
+    for (const auto &e : errors)
+        std::fprintf(stderr, "  %s\n", e.c_str());
+    return false;
+}
+
+void check_packed_config()
+{
+    const std::string base = kPackedConfig;
+    const std::string bits = R"("%IX0.0", "%IX0.1", "%IX0.2", "%IX0.3", "%IX0.4", "%IX0.5", "%IX0.6", "%IX0.7")";
+    CHECK(packed_refused(replaced(base, bits, R"("%IX0.0", "%IX0.1", "%IX0.2", "%IX0.3", "%IX0.4", "%IX0.5", "%IX0.6")"),
+                         "\"bits\" must list 8 locations"));
+    CHECK(packed_refused(replaced(base, "\"%IX0.7\"", "\"%QX2.0\""),
+                         "bit location %QX2.0 must be a %IX location"));
+    CHECK(packed_refused(replaced(base, "\"%IX0.7\"", "\"%IB3\""),
+                         "bit location %IB3 must be a %IX location"));
+    CHECK(packed_refused(replaced(base, "\"%IX0.7\"", "\"%IX0.0\""),
+                         "bit location %IX0.0 is given twice"));
+    CHECK(packed_refused(replaced(base, "\"name\": \"Valves\", \"type\": \"UNSIGNED8\"",
+                                  "\"name\": \"Valves\", \"type\": \"UNSIGNED16\""),
+                         "\"bits\" needs type UNSIGNED8, not UNSIGNED16"));
+    CHECK(packed_refused(replaced(base, "\"default\": 129,", "\"default\": 129, \"location\": \"%IB0\","),
+                         "an object with \"bits\" has no \"location\""));
+    CHECK(packed_refused(replaced(base, "\"default\": 129,", "\"default\": 129, \"max\": 7,"),
+                         "an object with \"bits\" has no \"min\" or \"max\""));
+    CHECK(packed_refused(replaced(base, "\"exchange\": \"pdo\", \"default\": 129,",
+                                  "\"exchange\": \"constant\", \"value\": 129,"),
+                         "a constant has no \"bits\""));
+    // A bit shared with another object.
+    CHECK(packed_refused(
+        replaced(base, "    ],\n    \"rpdos\"",
+                 ",\n      {\"index\": 8192, \"subindex\": 2, \"name\": \"Run\", \"type\": \"UNSIGNED8\",\n"
+                 "       \"direction\": \"from_master\", \"exchange\": \"sdo\",\n"
+                 "       \"bits\": [\"%IX3.0\", \"%IX3.1\", \"%IX3.2\", \"%IX3.3\", \"%IX3.4\", \"%IX0.5\", \"%IX3.6\", \"%IX3.7\"]}\n"
+                 "    ],\n    \"rpdos\""),
+        "both use %IX0.5"));
+}
+
+void check_packed(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
+{
+    std::memset(g_bool_in, 0, sizeof(g_bool_in));
+    std::memset(g_bool_out, 0, sizeof(g_bool_out));
+    auto vbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
+    Probe p(vbus);
+    size_t m0 = p.mark();
+    Slave slave(dev, virtual_slave_link(vbus));
+    std::string problem;
+    CHECK(slave.start(problem));
+    CHECK(p.wait(
+        m0, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; }, milliseconds(1000)));
+
+    // The default 0x81 reaches bits 0 and 7.
+    CHECK(scan_until(
+        slave, rt, [] { return g_bool_in[0][0] && g_bool_in[0][7] && !g_bool_in[0][1]; },
+        milliseconds(500)));
+    uint32_t v = 0;
+    CHECK(sdo_read(p, 0x2000, 1, v) && v == 0x81);
+
+    // Operational: RPDO 0x05 gives bits 0 and 2.
+    p.send(0x000, {0x01, static_cast<uint8_t>(kNode)});
+    CHECK(p.wait(
+        m0, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x05; }, milliseconds(1000)));
+    p.send(0x205, {0x05});
+    CHECK(scan_until(
+        slave, rt,
+        []
+        {
+            for (int b = 0; b < 8; ++b)
+                if (g_bool_in[0][b] != (b == 0 || b == 2))
+                    return false;
+            return true;
+        },
+        milliseconds(500)));
+    CHECK(sdo_read(p, 0x2000, 1, v) && v == 0x05);
+
+    // Bits 0, 1 and 3 of the program form 0x0B in TPDO 1 and by SDO.
+    g_bool_out[1][0] = 1;
+    g_bool_out[1][1] = 1;
+    g_bool_out[1][3] = 1;
+    size_t m = p.mark();
+    Frame f;
+    CHECK(scan_until(
+        slave, rt,
+        [&] { return p.wait(m, [](const Frame &x) { return x.id == 0x185 && x.data[0] == 0x0B; },
+                            milliseconds(0), &f); },
+        milliseconds(1000)));
+    CHECK(f.len == 1);
+    CHECK(sdo_read(p, 0x2100, 1, v) && v == 0x0B);
+
+    // The byte in the status.
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            const SlaveValue *x = find_value(s, 0x2100, 1);
+            return x && x->bytes == 1 && x->data[0] == 0x0B;
+        },
+        milliseconds(500)));
+
+    // PLC stop with zero: the byte to the master reads 0.
+    slave.set_plc_running(false);
+    auto end = Clock::now() + milliseconds(1000);
+    bool zero = false;
+    while (!zero && Clock::now() < end)
+    {
+        zero = sdo_read(p, 0x2100, 1, v) && v == 0;
+        std::this_thread::sleep_for(milliseconds(20));
+    }
+    CHECK(zero);
+    slave.stop();
+}
+
 int main()
 {
     set_log_sink(quiet_sink);
@@ -1163,6 +1319,16 @@ int main()
     check_bus_off(cfg.devices[0]);
     check_lss_store(dir);
     check_lss(rt, dir);
+    check_packed_config();
+    {
+        Config pcfg;
+        std::vector<std::string> perrors;
+        CHECK(parse_config(kPackedConfig, pcfg, perrors));
+        for (const auto &e : perrors)
+            std::fprintf(stderr, "%s\n", e.c_str());
+        if (perrors.empty())
+            check_packed(pcfg.devices[0], rt);
+    }
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }

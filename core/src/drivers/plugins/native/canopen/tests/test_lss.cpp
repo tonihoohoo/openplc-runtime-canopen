@@ -123,7 +123,7 @@ size_t logged(const std::string &text)
 std::string config_text(const std::string &wire, const std::string &lss2, bool absent)
 {
     std::string t = R"({
-  "version": 8,
+  "version": 10,
   "networks": [{
     "name": "lss", "interface": ")" +
                     wire + R"(", "bitrate": 0,
