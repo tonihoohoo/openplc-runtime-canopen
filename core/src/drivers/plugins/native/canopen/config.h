@@ -17,7 +17,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 11;
+constexpr int kConfigVersion = 12;
 
 // One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
 // location: its bits are skipped on receive and sent as zeros.
@@ -269,6 +269,7 @@ struct DeviceConfig
     int priority     = kDefaultPriority;
     std::string device_name;
     std::string software_version;
+    std::string hardware_version;
     uint32_t vendor_id               = 0;
     uint32_t product_code            = 0;
     uint32_t revision                = 0;
