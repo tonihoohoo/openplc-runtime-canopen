@@ -10,6 +10,7 @@
 #include <mutex>
 #include <sstream>
 
+#include <lely/can/msg.h>
 #include <lely/coapp/slave.hpp>
 #include <lely/ev/loop.hpp>
 #include <lely/io2/linux/can.hpp>
@@ -22,6 +23,17 @@
 struct __co_emcy;
 extern "C" __co_emcy *co_nmt_get_emcy(const __co_nmt *nmt);
 extern "C" int co_emcy_clear(__co_emcy *emcy);
+struct __can_recv;
+extern "C" __can_recv *can_recv_create(void);
+extern "C" void can_recv_destroy(__can_recv *recv);
+extern "C" void can_recv_set_func(__can_recv *recv, int (*func)(const can_msg *, void *),
+                                  void *data);
+extern "C" int can_recv_start(__can_recv *recv, __can_net *net, uint_least32_t id,
+                              uint_least8_t flags);
+extern "C" uint8_t co_dev_get_id(const __co_dev *dev);
+extern "C" uint8_t co_nmt_get_id(const __co_nmt *nmt);
+extern "C" int co_nmt_cs_ind(__co_nmt *nmt, uint8_t cs);
+constexpr uint8_t kCsResetComm = 0x82;
 
 namespace canopen_sim
 {
@@ -55,6 +67,20 @@ class Dcf
               << "\n\n";
         sub(idx, 0, "Highest sub-index supported", 0x5, sub0_access, highest);
     }
+    // A value relative to the node ID ($NODEID+base), which follows an ID given over LSS.
+    void sub_id(const char *idx, unsigned s, const char *name, uint32_t base)
+    {
+        body_ << "[" << idx << "sub" << std::hex << std::uppercase << s
+              << "]\nParameterName=" << name << "\nObjectType=0x7\nDataType=0x7\nAccessType=rw"
+              << "\nDefaultValue=$NODEID+0x" << base << std::dec << "\nPDOMapping=0\n\n";
+    }
+    void var_id(const char *idx, const char *name, uint32_t base)
+    {
+        list_.push_back(idx);
+        body_ << "[" << idx << "]\nParameterName=" << name
+              << "\nObjectType=0x7\nDataType=0x7\nAccessType=rw\nDefaultValue=$NODEID+0x"
+              << std::hex << base << std::dec << "\nPDOMapping=0\n\n";
+    }
     void sub(const char *idx, unsigned s, const char *name, unsigned type, const char *access,
              uint32_t value, bool map = false)
     {
@@ -63,15 +89,18 @@ class Dcf
               << "\nAccessType=" << access << "\nDefaultValue=0x" << value << std::dec
               << "\nPDOMapping=" << (map ? 1 : 0) << "\n\n";
     }
-    std::string text(unsigned node_id) const
+    std::string text(unsigned node_id, bool lss) const
     {
         std::ostringstream out;
         out << "[FileInfo]\nFileName=sim.dcf\nFileVersion=1\nFileRevision=0\nEDSVersion=4.0\n\n"
                "[DeviceInfo]\nVendorName=Simulated\nProductName=Generic I/O module\n"
                "BaudRate_125=1\nBaudRate_250=1\nBaudRate_500=1\nBaudRate_1000=1\n"
                "SimpleBootUpMaster=0\nSimpleBootUpSlave=1\nGranularity=8\nNrOfRXPDO=1\n"
-               "NrOfTXPDO=1\nLSS_Supported=0\n\n[DeviceComissioning]\nNodeID="
-            << node_id << "\n\n";
+               "NrOfTXPDO=1\nLSS_Supported="
+            << (lss ? 1 : 0) << "\n\n";
+        // Without a node ID (255) the section is left out: the device waits for LSS.
+        if (node_id != 255)
+            out << "[DeviceComissioning]\nNodeID=" << node_id << "\n\n";
         std::ostringstream mand, opt, man;
         int nm = 0, no = 0, nf = 0;
         for (const auto &i : list_)
@@ -117,7 +146,10 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     d.sub("1011", 1, "Restore all", 0x7, "rw", 1);
     d.sub("1011", 2, "Restore communication", 0x7, "rw", 1);
     d.sub("1011", 3, "Restore application", 0x7, "rw", 1);
-    d.var("1014", "COB-ID EMCY", 0x7, "rw", 0x80 + s.node_id);
+    if (s.lss)
+        d.var_id("1014", "COB-ID EMCY", 0x80);
+    else
+        d.var("1014", "COB-ID EMCY", 0x7, "rw", 0x80 + s.node_id);
     d.rec("1016", "Consumer heartbeat time", 2, 1);
     d.sub("1016", 1, "Consumer heartbeat time", 0x7, "rw", 0);
     d.var("1017", "Producer heartbeat time", 0x6, "rw", s.heartbeat_ms);
@@ -125,18 +157,24 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     d.sub("1018", 1, "Vendor-ID", 0x7, "ro", s.vendor_id);
     d.sub("1018", 2, "Product code", 0x7, "ro", s.product_code);
     d.sub("1018", 3, "Revision number", 0x7, "ro", s.revision);
-    d.sub("1018", 4, "Serial number", 0x7, "ro", 0);
+    d.sub("1018", 4, "Serial number", 0x7, "ro", s.serial_number);
     d.rec("1029", "Error behaviour", 2, 1);
     d.sub("1029", 1, "Communication error", 0x5, "rw", 0);
     d.rec("1400", "RPDO communication parameter", 4, 5);
-    d.sub("1400", 1, "COB-ID", 0x7, "rw", 0x200 + s.node_id);
+    if (s.lss)
+        d.sub_id("1400", 1, "COB-ID", 0x200);
+    else
+        d.sub("1400", 1, "COB-ID", 0x7, "rw", 0x200 + s.node_id);
     d.sub("1400", 2, "Transmission type", 0x5, "rw", 0xFF);
     d.sub("1400", 5, "Event timer", 0x6, "rw", 0);
     d.rec("1600", "RPDO mapping parameter", 3, 1, "rw");
     d.sub("1600", 1, "Mapped object", 0x7, "rw", 0x62000108);
     d.sub("1600", 2, "Mapped object", 0x7, "rw", 0);
     d.rec("1800", "TPDO communication parameter", 5, 5);
-    d.sub("1800", 1, "COB-ID", 0x7, "rw", 0x180 + s.node_id);
+    if (s.lss)
+        d.sub_id("1800", 1, "COB-ID", 0x180);
+    else
+        d.sub("1800", 1, "COB-ID", 0x7, "rw", 0x180 + s.node_id);
     d.sub("1800", 2, "Transmission type", 0x5, "rw", 0xFF);
     d.sub("1800", 3, "Inhibit time", 0x6, "rw", 0);
     d.sub("1800", 5, "Event timer", 0x6, "rw", 20);
@@ -153,7 +191,7 @@ std::string sim_slave_dcf(const SimSlaveSpec &s)
     d.sub("6200", 1, "Outputs 1-8", 0x5, "rw", 0, true);
     d.rec("6401", "Analogue inputs", 2, 1);
     d.sub("6401", 1, "Input 1", 0x3, "rw", 0, true);
-    return d.text(s.node_id);
+    return d.text(s.node_id, s.lss);
 }
 
 namespace
@@ -221,14 +259,58 @@ class Slave : public lely::canopen::BasicSlave
         co_emcy_clear(co_nmt_get_emcy(nmt()));
     }
 
+    // LSS device: counts accepted 'store configuration' requests, and watches the master's
+    // 'switch state global: waiting' (0x7E5 04 00), at which a device that had no node ID starts
+    // with the one it was given (CiA 305); Lely's LSS slave needs a reset communication for that.
+    void WatchLss(std::atomic<unsigned> &stores)
+    {
+        std::lock_guard<lely::util::BasicLockable> lock(*this);
+        stores_ = &stores;
+        recv_   = can_recv_create();
+        if (!recv_)
+            return;
+        can_recv_set_func(recv_, &Slave::OnLssFrame, this);
+        can_recv_start(recv_, net(), 0x7E5, 0);
+    }
+    ~Slave()
+    {
+        if (recv_)
+            can_recv_destroy(recv_);
+    }
+    // Called from the loop: takes a pending node ID; returns the node ID in use.
+    unsigned ServiceLss()
+    {
+        std::lock_guard<lely::util::BasicLockable> lock(*this);
+        __co_nmt *n = nmt();
+        if (waiting_.exchange(false) && co_dev_get_id(dev()) == 0xFF && co_nmt_get_id(n) != 0xFF)
+            co_nmt_cs_ind(n, kCsResetComm);
+        return co_dev_get_id(dev());
+    }
+
   protected:
     void OnCommand(lely::canopen::NmtCommand cs) noexcept override
     {
         nmt_ = static_cast<uint8_t>(cs);
     }
+    // LSS 'store configuration': counted; the node ID is kept only in memory.
+    void OnStore(uint8_t, int) override
+    {
+        if (stores_)
+            ++*stores_;
+    }
 
   private:
+    static int OnLssFrame(const can_msg *msg, void *data) noexcept
+    {
+        if (msg->len >= 2 && msg->data[0] == 0x04 && msg->data[1] == 0x00)
+            static_cast<Slave *>(data)->waiting_ = true;
+        return 0;
+    }
+
     std::atomic<uint8_t> &nmt_;
+    std::atomic<unsigned> *stores_ = nullptr;
+    std::atomic<bool> waiting_{false};
+    __can_recv *recv_ = nullptr;
 };
 
 } // namespace
@@ -250,11 +332,12 @@ void SimSlave::start()
     if (thread_.joinable())
         return;
     std::ofstream(dcf_path_, std::ios::trunc) << sim_slave_dcf(spec_);
-    stop_     = false;
-    ready_    = false;
-    restores_ = 0;
-    saves_    = 0;
-    thread_   = std::thread([this] { thread_main(); });
+    stop_       = false;
+    ready_      = false;
+    restores_   = 0;
+    saves_      = 0;
+    lss_stores_ = 0;
+    thread_     = std::thread([this] { thread_main(); });
     while (!ready_ && !stop_)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }
@@ -318,11 +401,16 @@ void SimSlave::thread_main()
         }
         Slave slave(exec, timer, *base, dcf_path_, nmt_state_, restores_, saves_, output_writes_,
                     spec_.restore_refused);
+        if (spec_.lss)
+            slave.WatchLss(lss_stores_);
         slave.Reset();
-        ready_ = true;
+        node_id_ = spec_.node_id;
+        ready_   = true;
         while (!stop_)
         {
             loop.run_for(std::chrono::milliseconds(5));
+            if (spec_.lss)
+                node_id_ = slave.ServiceLss();
             if (inputs_dirty_.exchange(false))
             {
                 slave.Write<uint8_t>(0x6000, 1, digital_.load());

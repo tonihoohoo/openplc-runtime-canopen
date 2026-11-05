@@ -88,6 +88,9 @@ jobs:
       - name: Host test on vcan0
         run: CANOPEN_TEST_INTERFACE=vcan0 "$PLUGIN_DIR/build/tests/test_network"
 
+      - name: LSS on vcan0
+        run: CANOPEN_TEST_INTERFACE=vcan0 "$PLUGIN_DIR/build/tests/test_lss"
+
   e2e:
     name: End-to-end with the editor
     needs: changes
@@ -367,8 +370,57 @@ jobs:
           python3 .github/scripts/canopen_slave_e2e.py --user ci --password ci-canopen-e2e \
             --interface vcan0
 
+      - name: Upload the LSS project with the editor CLI
+        id: lss
+        working-directory: editor
+        env:
+          OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
+        run: |
+          # An editor branch without node IDs over LSS has no such project; the check is skipped.
+          if [ ! -d ./e2e/fixtures/canopen-lss/project ]; then
+            echo "::notice::The editor branch has no LSS project; skipped"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli upload \
+            ./e2e/fixtures/canopen-lss/project --host 127.0.0.1 --yes \
+            --user-data "$RUNNER_TEMP/editor-data" --json
+          sudo cat ../build/plugins/canopen.json
+
+      - name: A node without a node ID gets it over LSS and boots
+        if: steps.lss.outputs.present == 'true'
+        run: |
+          # The simulated node starts without a node ID; the master finds it by its LSS address,
+          # gives it node ID 2, stores it once and boots it; its inputs then reach its outputs.
+          "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 255 \
+            --lss-serial 0x1001 --expect-lss-stores 1 --steps 3 --timeout 180 --linger 30 \
+            > "$RUNNER_TEMP/sim-lss.log" 2>&1 &
+          sim=$!
+          token=$(curl -ks -X POST https://127.0.0.1:8443/api/login -H 'Content-Type: application/json' \
+            -d '{"username": "ci", "password": "ci-canopen-e2e"}' \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])')
+          seen=
+          for _ in $(seq 1 90); do
+            if curl -ks -H "Authorization: Bearer $token" https://127.0.0.1:8443/api/canopen/status \
+              | tee /tmp/canopen-lss-status.json \
+              | python3 -c 'import json, sys; n = [x for x in json.load(sys.stdin)["networks"][0]["nodes"] if x["node_id"] == 2][0]; assert n["state"] == "operational" and n["lss"]["result"] == "given" and n["lss"]["previous_id"] == 255 and n["lss"]["stored"]' 2>/dev/null; then
+              seen=1
+              break
+            fi
+            sleep 1
+          done
+          cat /tmp/canopen-lss-status.json
+          status=0
+          wait "$sim" || status=$?
+          cat "$RUNNER_TEMP/sim-lss.log"
+          if [ -z "$seen" ]; then
+            echo "::error::/api/canopen/status never reported node 2 given its node ID over LSS and operational"
+            exit 1
+          fi
+          exit "$status"
+
       - name: Upload the first project again
-        if: steps.control.outputs.present == 'true' || steps.slave.outputs.present == 'true'
+        if: steps.control.outputs.present == 'true' || steps.slave.outputs.present == 'true' || steps.lss.outputs.present == 'true'
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e

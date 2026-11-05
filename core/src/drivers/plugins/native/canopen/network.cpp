@@ -100,6 +100,12 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
     for (const MasterPdo &m : layout_.tpdos)
         periodic_ = periodic_ || m.pdo->send_period_ms > 0;
     rpdo_error_.assign(layout_.rpdos.size(), 0);
+    bool lss = false;
+    for (const NodeConfig &n : cfg_.nodes)
+        lss = lss || n.has_lss;
+    // Without LSS nodes Lely's start-up has no LSS step and sends no LSS frame.
+    if (lss && !service_)
+        lss_.reset(new LssAssigner(exec, *this));
     scan_.watch   = IO_POLL_WATCH_INIT(&Network::OnScanEvent);
     scan_.task    = EV_TASK_INIT(exec, &Network::OnScanTask);
     scan_.net     = this;
@@ -109,6 +115,8 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
 
 Network::~Network()
 {
+    if (lss_)
+        lss_->AbortAll();
     {
         std::lock_guard<lely::util::BasicLockable> lock(*this);
         for (__can_recv *r : service_recv_)
@@ -605,6 +613,12 @@ void Network::HandleLoss(uint8_t id, ProblemKind kind)
              stop ? "stopping it until the next PLC start" : "booting it again");
     n->last_problem = why;
     n->restored     = false;
+    // A device that lost power without a stored ID comes back without one.
+    if (n->cfg->has_lss)
+    {
+        n->lss_due  = true;
+        n->lss_next = clock::now();
+    }
     Problem p;
     p.kind = kind;
     status_.lost(id, p);
@@ -962,6 +976,8 @@ void Network::OnTick()
     if (!running_)
         return;
     ServeNodeControl();
+    if (lss_starting_)
+        return;
     auto now = clock::now();
     for (auto &it : nodes_)
     {
@@ -985,6 +1001,13 @@ void Network::OnTick()
         }
         if (n.up || n.stopped || n.held || n.booting || n.manual)
             continue;
+        if (n.lss_due)
+        {
+            // The device gets its node ID first; the boot or the poll follows when it has it.
+            if (!n.lss_running)
+                LssRecover(n, it.first, now);
+            continue;
+        }
         if (!n.retry_pending)
         {
             // Also a node heard only by its heartbeat: it missed the NMT reset (frames lost) and
@@ -1574,6 +1597,8 @@ void Network::TurnOn(NodeState &n, uint8_t id)
     n.backoff       = kRetryMin;
     n.next_poll     = clock::now();
     n.looked_since  = n.next_poll;
+    n.lss_due       = n.cfg->has_lss;
+    n.lss_next      = n.next_poll;
     SetListed(n, id, true);
     status_.set_enabled(id, true, true);
     log_info("%s turned on by the PLC program", n.cfg->label().c_str());

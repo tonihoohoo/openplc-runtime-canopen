@@ -40,7 +40,7 @@ namespace
 {
 
 const char *const kConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "vcan-slave", "bitrate": 0, "node_id": 5,
@@ -546,7 +546,7 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
 
 // Our master boots the slave and exchanges PDOs with it.
 const char *const kMasterConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [{
     "name": "line", "interface": "vcan-master", "bitrate": 0, "master_node_id": 127,
     "heartbeat_producer_ms": 100,

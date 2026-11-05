@@ -14,7 +14,7 @@ namespace
 {
 
 const char *kValid = R"({
-  "version": 6,
+  "version": 7,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 500000,
     "heartbeat_producer_ms": 100,
@@ -193,8 +193,8 @@ void test_receive_timeout()
 void test_refusals()
 {
     CHECK(refused_with("{", "not valid JSON"));
-    CHECK(refused_with(with(kValid, "\"version\": 6", "\"version\": 5"),
-                       "version 5 is not supported (this runtime reads version 6)"));
+    CHECK(refused_with(with(kValid, "\"version\": 7", "\"version\": 6"),
+                       "version 6 is not supported (this runtime reads version 7)"));
     CHECK(refused_with(with(kValid, "\"start\": \"master\", ", ""), "missing \"start\""));
     CHECK(refused_with(with(kValid, "\"start\": \"master\"", "\"start\": \"plc\""),
                        "\"start\" \"plc\" is not one of master, program"));
@@ -331,6 +331,48 @@ void test_send_period()
                        "only for a node's RPDOs"));
 }
 
+void test_lss()
+{
+    const std::string lss =
+        with(kValid, "\"supervision\":",
+             "\"lss\": {\"vendor_id\": 1, \"product_code\": 2, "
+             "\"serial_number\": 4097, \"store\": true},\n      \"supervision\":");
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(lss, cfg, errors));
+    CHECK(errors.empty());
+    const NodeConfig &n = cfg.networks[0].nodes[0];
+    CHECK(n.has_lss);
+    CHECK(n.lss.vendor_id == 1 && n.lss.product_code == 2 && n.lss.revision == 0);
+    CHECK(n.lss.serial_number == 4097 && n.lss.store);
+
+    Config plain;
+    errors.clear();
+    CHECK(parse_config(kValid, plain, errors));
+    CHECK(!plain.networks[0].nodes[0].has_lss);
+
+    CHECK(refused_with(with(lss, ", \"serial_number\": 4097", ""), "serial_number"));
+    CHECK(refused_with(with(lss, "\"serial_number\": 4097", "\"serial_number\": 0"),
+                       "\"serial_number\" must not be 0"));
+    CHECK(refused_with(with(lss, "\"store\": true", "\"store\": true, \"speed\": 1"),
+                       "unknown field \"speed\""));
+    CHECK(refused_with(with(lss, "\"store\": true", "\"store\": 1"), "true or false"));
+    CHECK(refused_with(with(kValid, "\"supervision\":", "\"lss\": 5, \"supervision\":"),
+                       "\"lss\" must be an object"));
+
+    // Two nodes with the same LSS address.
+    const std::string node3 =
+        "}, {\"node_id\": 3, \"start\": \"master\", \"enabled\": true, \"name\": \"io2\", "
+        "\"lss\": {\"vendor_id\": 1, \"product_code\": 2, "
+        "\"serial_number\": 4097}}]";
+    const std::string two = with(lss, "}]\n  }]", node3 + "\n  }]");
+    CHECK(refused_with(two, "have the same LSS address"));
+    Config other;
+    errors.clear();
+    CHECK(parse_config(with(two, "\"serial_number\": 4097}", "\"serial_number\": 4098}"), other,
+                       errors));
+}
+
 } // namespace
 
 int main()
@@ -345,6 +387,7 @@ int main()
     test_sdo_policies();
     test_dummy_entries();
     test_send_period();
+    test_lss();
     CHECK(is_standard_bitrate(125000) && is_standard_bitrate(1000000));
     CHECK(!is_standard_bitrate(100000) && !is_standard_bitrate(0));
     return TEST_RESULT();
