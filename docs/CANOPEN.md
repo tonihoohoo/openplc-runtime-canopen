@@ -3,7 +3,9 @@
 The `canopen` native plugin is a CANopen master (CiA 301/302) on a Linux SocketCAN interface. It
 runs inside `plc_main`, exchanges PDOs with the nodes once per PLC cycle, and is built on
 [Lely CANopen](https://gitlab.com/lely_industries/lely-core) (Apache-2.0), which is fetched at a
-pinned commit and linked statically into the plugin.
+pinned commit and linked statically into the plugin. The same plugin can also make the runtime a
+[CANopen slave](#canopen-slave) (CiA 301) on another interface, built on
+[CANopenNode](https://github.com/CANopenNode/CANopenNode) (Apache-2.0) at its newest release.
 
 ```
 Editor upload ──► webserver ──► conf/canopen.json ──► plc_main (canopen plugin) ◄── can0 ──► nodes
@@ -88,7 +90,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 
 ```json
 {
-  "version": 5,
+  "version": 6,
   "networks": [
     {
       "name": "CANopen 1",
@@ -151,7 +153,8 @@ change both together.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 5. Older files are refused; build the project again with a matching editor. |
+| `version` | Format version, 6. Older files are refused; build the project again with a matching editor. |
+| `networks`, `devices` | The master networks and the [slave devices](#canopen-slave); either list may be empty or left out, not both. |
 | `interface` | SocketCAN interface, unique per network. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
 | `master_node_id` | 1-127, default 127. |
@@ -192,6 +195,81 @@ The runtime tells the plugin how long each table of its I/O image is (`%IX`, `%I
 from the `image.conf` the editor uploads and from the program's own located variables, and each
 location is checked against the table of its own size letter.
 
+## CANopen slave
+
+A project's CANopen slave server makes the runtime a CANopen slave (CiA 301) on its own SocketCAN
+interface: a master on that bus reads and writes the objects the project defines, and the values
+pass to and from the PLC program through `%I` and `%Q` locations. The editor writes it as an item
+of `devices` in `conf/canopen.json`, next to `networks` (which may be empty). The slave runs on
+[CANopenNode](https://github.com/CANopenNode/CANopenNode) v4.1 with the plugin's own CAN driver and
+an object dictionary built from the file when the PLC starts.
+
+```json
+{
+  "version": 6,
+  "networks": [],
+  "devices": [{
+    "name": "io", "interface": "can1", "bitrate": 250000, "node_id": 5, "priority": 90,
+    "identity": {"device_name": "plc-node", "software_version": "1.0", "vendor_id": 0,
+                 "product_code": 1, "revision": 65536},
+    "heartbeat_ms": 100,
+    "master_watch": {"node_id": 127, "time_ms": 300},
+    "on_master_lost": "pre_operational",
+    "on_plc_stop": "hold",
+    "start_alone": false,
+    "objects": [
+      {"index": 8192, "subindex": 1, "name": "Setpoint", "type": "INTEGER16",
+       "direction": "from_master", "exchange": "pdo", "location": "%IW0"},
+      {"index": 8192, "subindex": 3, "name": "Limit", "type": "UNSIGNED16",
+       "direction": "from_master", "exchange": "sdo", "location": "%IW2",
+       "default": 1000, "min": 100, "max": 30000},
+      {"index": 8448, "subindex": 1, "name": "Actual", "type": "INTEGER16",
+       "direction": "to_master", "exchange": "pdo", "location": "%QW0"},
+      {"index": 8448, "subindex": 9, "name": "Firmware", "type": "VISIBLE_STRING",
+       "direction": "to_master", "exchange": "constant", "value": "1.0.0"}
+    ],
+    "rpdos": [{"number": 1, "cob_id": 517, "transmission": 255,
+               "entries": [{"index": 8192, "subindex": 1}]}],
+    "tpdos": [{"number": 1, "cob_id": 389, "transmission": 255, "inhibit_100us": 0,
+               "event_timer_ms": 0, "entries": [{"index": 8448, "subindex": 1}]}]
+  }]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `interface`, `bitrate`, `node_id` | The slave's SocketCAN interface (not one a master network or another slave uses), its bit rate as for a network, and its node ID, 1-127. |
+| `priority` | SCHED_FIFO priority of the slave's thread, 1-97, default 90. |
+| `identity` | 0x1008 device name, 0x100A software version, 0x1018 vendor ID, product code and revision. 0x1000 (device type) is 0: no device profile. |
+| `heartbeat_ms` | The slave's heartbeat producer time (0x1017), 1-65535. |
+| `master_watch` | `null` or `{node_id, time_ms}`: the heartbeat consumer (0x1016) for the master's heartbeat. |
+| `on_master_lost` | What the slave does when the watched heartbeat is lost, written to 0x1029 sub 1: `pre_operational` (default), `no_change` or `stopped`. It also sends EMCY 8130h. |
+| `on_plc_stop` | The values to the master while the PLC is stopped: `hold` (default, the last values) or `zero`. |
+| `start_alone` | `true`: the slave goes operational by itself after its boot-up (NMT startup); default `false`, it waits for the master's NMT start. |
+| `objects` | The application objects, index 0x2000-0x5FFF, sub-index 1-254, each with a `type` as for a PDO entry or `VISIBLE_STRING`, a `direction` (`from_master`: written by the master, read by the program from a `%I` location; `to_master`: written by the program to a `%Q` location, read by the master) and an `exchange`: `pdo` (may be mapped to a PDO), `sdo` (by SDO only) or `constant` (a fixed `value`, no location). A `VISIBLE_STRING` object (at most 255 characters) is always a constant. |
+| `default`, `min`, `max` | The object's value at start (default 0) and, for objects from the master, the range a write must keep (SDO aborts 0609 0031h above and 0609 0032h below it). |
+| `rpdos`, `tpdos` | Up to four of each: PDO `number` 1-4, `cob_id`, `transmission` (0-240, 254 or 255; default 255), `event_timer_ms`, `inhibit_100us` (TPDOs only) and the mapped `entries` in order, at most 8 bytes, each a `pdo` object of the right direction. Unused PDOs are present and invalid. |
+
+Behaviour:
+
+- The slave has the CiA 301 communication objects 0x1000-0x1029 (0x1001, 0x1003 with 8 entries,
+  0x1005-0x1007, 0x1014, 0x1016, 0x1017, 0x1018, 0x1029), one SDO server (0x1200), and the PDO
+  parameters 0x1400-0x1403, 0x1600-0x1603, 0x1800-0x1803 and 0x1A00-0x1A03. A master may remap the
+  PDOs by the CiA 301 procedure; an object that is not `pdo` cannot be mapped (abort 0604 0041h).
+  Writes to 0x1010 (store) and 0x1011 (restore) are refused (0602 0000h): nothing is stored, and a
+  master writes its settings again at every boot.
+- Event-driven TPDOs (254, 255) are sent when a mapped value changes and on entering operational;
+  synchronous ones on the SYNC. RPDOs are taken in operational only.
+- The slave stays on the bus while the PLC is stopped. A stop sends EMCY 6200h (and zeroes the
+  values to the master with `on_plc_stop: zero`); the next start sends EMCY 0000h and puts the
+  objects from the master back to their defaults. NMT reset node restores every object, reset
+  communication the communication objects.
+- A new upload keeps a slave whose settings did not change running, without a new boot-up; a
+  changed or removed slave leaves the bus and a changed one starts again with the new settings.
+- A failed interface is opened again every second. Service mode is refused (`busy`) on an
+  interface a slave uses.
+- The status (below) lists each slave under `slaves`.
+
 ## Status
 
 While a CANopen program runs, the plugin keeps a live status of every network and serves it on
@@ -228,6 +306,11 @@ the CANopen device only when `status` is listed, and its online tools only when 
       "sdo_skipped": []
     }],
     "events": [{"time": 1793299990000, "node": 3, "kind": "boot_failed", "problem": {"kind": "identity"}}]
+  }],
+  "slaves": [{
+    "name": "io", "interface": "can1", "node_id": 5, "bus_open": true, "state": "operational",
+    "plc_running": true, "master_node_id": 127, "master_seen": true, "last_emcy": 0,
+    "rx_frames": 3201, "tx_frames": 3410
   }]
 }
 ```
@@ -248,6 +331,7 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `nodes[].emcy` | The last 8 emergencies, newest first; an emergency with code 0 (error reset) marks them inactive. |
 | `nodes[].late_pdos` | TPDOs with a receive timeout whose frames are late. |
 | `nodes[].sdo_skipped` | Configuration SDOs the node refused in its current boot that had `on_abort` `continue` or `jump`, with `index`, `subindex` and `abort_code`. |
+| `slaves[]` | One per [slave device](#canopen-slave): `state` is the slave's own NMT state (`boot_up`, `pre_operational`, `operational`, `stopped`) or `offline` while its interface is not open (with the reason in `problem`); `master_seen` whether the watched master heartbeat is there; `last_emcy` the code of the last emergency it sent. While no master network runs, the answer is `{"version": 1, "active": false, "slaves": [...]}`. |
 | `events` | The last 64 events of the network, newest first: `boot_ok` (with `waits` true when the node waits for the PLC program's start), `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort` (with `policy` `stop`, `continue` or `jump`), `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link, with `outcome` `done`, `not_permitted` or `failed`, and `cause` `bus_off`, `bit_rate` or `tx_stalled`), `sdo_write` (a client's SDO write, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `nmt_command` (an NMT command, with `command` and `source` `client` or `program`), `service` (service mode opened or closed, with `open`), `node_on` and `node_off` (the PLC program turned the node on or off). |
 
 Counters and lists start again when the PLC starts. The status thread never blocks the PLC scan
@@ -446,7 +530,8 @@ itself; they lower the worst-case delays, not the typical ones.
 ## Building and testing
 
 `install.sh` builds the plugin with the other native plugins. Lely is built from source, which
-needs `git`, `autoconf`, `automake` and `libtool` (the dependency step installs them). By hand:
+needs `git`, `autoconf`, `automake` and `libtool` (the dependency step installs them), and
+CANopenNode is cloned at its release tag into the build directory. By hand:
 
 ```bash
 cd core/src/drivers/plugins/native/canopen
@@ -457,6 +542,9 @@ ctest --test-dir build --output-on-failure
 
 `-DLELY_PREFIX=<dir>` uses a Lely already installed there instead of fetching it; a Lely installed
 in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workflow caches one there).
+`-DCANOPENNODE_SOURCE_DIR=<dir>` uses a CANopenNode checkout instead of cloning it. When
+CANopenNode cannot be fetched, the plugin is built without the slave (with a CMake warning) and
+refuses a file with `devices`.
 
 | Test | What it covers |
 |---|---|
@@ -470,6 +558,7 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), a node started by the program (waiting, started, waiting again after a reset) and a node turned on and off (booted, stopped, pulled without a loss, skipped by NMT to every node), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 | `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, a kept table that stays the same across reloads, and version 2's table serving version 1. |
 | `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states, the emergency ring, and the node control (wanted states, run states, network counts), with no allocation on the scan's side. |
+| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, and then the plugin's own master booting and running the slave. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
@@ -484,7 +573,10 @@ project with the editor's command line, and runs the simulated module against it
 It then uploads `e2e/fixtures/canopen-plc-blocks`, a program that calls every function block
 against the simulated module, and `.github/scripts/canopen_blocks_e2e.py` asks it for runs of its
 checks (`canopen_sim_slave --blocks 1` reads the commands), stopping and starting the PLC between
-runs and once while blocks are busy.
+runs and once while blocks are busy. Last it uploads `e2e/fixtures/canopen-slave`, a project
+that makes the runtime a slave on `vcan0`, and `.github/scripts/canopen_slave_e2e.py` plays its
+master over raw SocketCAN: SDOs with range checks, NMT start, an RPDO through the program back in a
+TPDO, the master's heartbeat lost, and a PLC stop and start, checking `slaves` in the status.
 
 vcan needs the kernel's `vcan` module. On a runner whose kernel has no matching
 `linux-modules-extra` package the vcan jobs fail at their first step, and the reason is in its log.

@@ -944,7 +944,76 @@ void problem_text(const Problem &p, char *out, size_t size)
     }
 }
 
-std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t now)
+namespace
+{
+
+const char *slave_state_name(uint8_t nmt)
+{
+    switch (nmt)
+    {
+    case 0:
+        return "boot_up";
+    case 4:
+        return "stopped";
+    case 5:
+        return "operational";
+    case 127:
+        return "pre_operational";
+    default:
+        return "unknown";
+    }
+}
+
+void add_slaves(cJSON *root, const std::vector<SlaveSnapshot> &slaves)
+{
+    cJSON *list = cJSON_AddArrayToObject(root, "slaves");
+    for (const SlaveSnapshot &s : slaves)
+    {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", s.name.c_str());
+        cJSON_AddStringToObject(o, "interface", s.interface.c_str());
+        cJSON_AddNumberToObject(o, "node_id", s.node_id);
+        cJSON_AddBoolToObject(o, "bus_open", s.bus_open);
+        if (!s.problem.empty())
+            cJSON_AddStringToObject(o, "problem", s.problem.c_str());
+        cJSON_AddStringToObject(o, "state", s.bus_open ? slave_state_name(s.nmt) : "offline");
+        cJSON_AddBoolToObject(o, "plc_running", s.plc_running);
+        if (s.master_node_id)
+        {
+            cJSON_AddNumberToObject(o, "master_node_id", s.master_node_id);
+            cJSON_AddBoolToObject(o, "master_seen", s.master_seen);
+        }
+        if (s.emcy_sent)
+            cJSON_AddNumberToObject(o, "last_emcy", s.last_emcy);
+        cJSON_AddNumberToObject(o, "rx_frames", static_cast<double>(s.rx_frames));
+        cJSON_AddNumberToObject(o, "tx_frames", static_cast<double>(s.tx_frames));
+        cJSON_AddItemToArray(list, o);
+    }
+}
+
+std::string print(cJSON *root)
+{
+    char *text      = cJSON_PrintUnformatted(root);
+    std::string out = text ? text : "{}";
+    cJSON_free(text);
+    cJSON_Delete(root);
+    return out;
+}
+
+} // namespace
+
+std::string inactive_status_json(const std::vector<SlaveSnapshot> &slaves)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "version", 1);
+    cJSON_AddBoolToObject(root, "active", false);
+    if (!slaves.empty())
+        add_slaves(root, slaves);
+    return print(root);
+}
+
+std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t now,
+                        const std::vector<SlaveSnapshot> &slaves)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "version", 1);
@@ -969,11 +1038,9 @@ std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t no
             cJSON_AddItemToArray(events, event_json(e));
         cJSON_AddItemToArray(nets, o);
     }
-    char *text      = cJSON_PrintUnformatted(root);
-    std::string out = text ? text : "{}";
-    cJSON_free(text);
-    cJSON_Delete(root);
-    return out;
+    if (!slaves.empty())
+        add_slaves(root, slaves);
+    return print(root);
 }
 
 } // namespace canopen_plugin

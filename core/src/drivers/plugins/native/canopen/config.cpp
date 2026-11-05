@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <set>
@@ -139,6 +140,12 @@ class Parser
     bool parse_pdo(const cJSON *j, const std::string &where, IecArea area, PdoConfig &pdo);
     void check_cob_ids(const NetworkConfig &net);
     void check_locations();
+    bool parse_device(const cJSON *j, size_t pos, DeviceConfig &dev);
+    bool parse_object(const cJSON *j, const std::string &where, SlaveObject &obj);
+    bool parse_value(const cJSON *v, const std::string &where, const char *key, CoType type,
+                     uint64_t &out);
+    void parse_slave_pdos(const cJSON *j, const char *key, const std::string &where, bool tpdo,
+                          DeviceConfig &dev);
 
     Config &cfg_;
     std::vector<std::string> &errors_;
@@ -221,8 +228,21 @@ bool Parser::parse(const cJSON *root)
         parse_network(j, ++pos, net);
         cfg_.networks.push_back(std::move(net));
     }
-    if (cfg_.networks.empty())
-        error("", "\"networks\" is empty");
+    const cJSON *devs = get_array(root, "devices", "", false);
+    if (devs)
+    {
+        pos = 0;
+        cJSON_ArrayForEach(j, devs)
+        {
+            DeviceConfig dev;
+            parse_device(j, ++pos, dev);
+            cfg_.devices.push_back(std::move(dev));
+        }
+    }
+    if (cfg_.networks.empty() && cfg_.devices.empty())
+        error("", "\"networks\" and \"devices\" are both empty");
+    if (!cfg_.devices.empty() && !slave_supported())
+        error("", "this runtime has no CANopen slave support; \"devices\" cannot be run");
     std::map<std::string, std::string> ifaces;
     for (const auto &net : cfg_.networks)
     {
@@ -234,6 +254,17 @@ bool Parser::parse(const cJSON *root)
         else
             ifaces[net.interface] = net.label();
         check_cob_ids(net);
+    }
+    for (const auto &dev : cfg_.devices)
+    {
+        if (dev.interface.empty())
+            continue;
+        auto it = ifaces.find(dev.interface);
+        if (it != ifaces.end())
+            error(dev.label(), "interface " + dev.interface + " is also used by " + it->second +
+                                   "; a CANopen master and slave cannot share an interface");
+        else
+            ifaces[dev.interface] = dev.label();
     }
     check_locations();
     return errors_.size() == failed;
@@ -778,6 +809,10 @@ void Parser::check_locations()
                                                             object_text(e.index, e.subindex)});
         }
     }
+    for (const auto &dev : cfg_.devices)
+        for (const auto &o : dev.objects)
+            if (o.exch != SlaveExchange::Constant)
+                uses.push_back({o.location, dev.label() + " " + object_text(o.index, o.subindex)});
     for (size_t a = 0; a < uses.size(); ++a)
     {
         for (size_t b = a + 1; b < uses.size(); ++b)
@@ -794,6 +829,381 @@ void Parser::check_locations()
     }
 }
 
+bool Parser::parse_value(const cJSON *v, const std::string &where, const char *key, CoType type,
+                         uint64_t &out)
+{
+    if (type == CoType::BOOLEAN && cJSON_IsBool(v))
+    {
+        out = cJSON_IsTrue(v) ? 1 : 0;
+        return true;
+    }
+    if (!cJSON_IsNumber(v))
+    {
+        error(where, std::string("\"") + key + "\" must be a number");
+        return false;
+    }
+    const double d = v->valuedouble;
+    auto bad       = [&](const char *what)
+    {
+        error(where, std::string("\"") + key + "\" " + what + " for a " + co_type_name(type));
+        return false;
+    };
+    switch (type)
+    {
+    case CoType::REAL32:
+    {
+        float f = static_cast<float>(d);
+        uint32_t bits;
+        std::memcpy(&bits, &f, sizeof(bits));
+        out = bits;
+        return true;
+    }
+    case CoType::REAL64:
+    {
+        uint64_t bits;
+        std::memcpy(&bits, &d, sizeof(bits));
+        out = bits;
+        return true;
+    }
+    default:
+        break;
+    }
+    if (std::floor(d) != d)
+        return bad("must be a whole number");
+    const unsigned bits  = co_type_bits(type);
+    const bool is_signed = type == CoType::INTEGER8 || type == CoType::INTEGER16 ||
+                           type == CoType::INTEGER32 || type == CoType::INTEGER64;
+    if (type == CoType::BOOLEAN)
+    {
+        if (d != 0 && d != 1)
+            return bad("must be 0 or 1");
+        out = static_cast<uint64_t>(d);
+        return true;
+    }
+    if (is_signed)
+    {
+        const double lo = -std::ldexp(1.0, static_cast<int>(bits) - 1);
+        const double hi = std::ldexp(1.0, static_cast<int>(bits) - 1) - 1;
+        if (d < lo || d > hi)
+            return bad("is out of range");
+        const int64_t s = static_cast<int64_t>(d);
+        out             = bits == 64 ? static_cast<uint64_t>(s)
+                                     : (static_cast<uint64_t>(s) & ((uint64_t(1) << bits) - 1));
+        return true;
+    }
+    const double hi = std::ldexp(1.0, static_cast<int>(bits)) - 1;
+    if (d < 0 || d > hi)
+        return bad("is out of range");
+    out = static_cast<uint64_t>(d);
+    return true;
+}
+
+bool Parser::parse_object(const cJSON *j, const std::string &where, SlaveObject &obj)
+{
+    if (!cJSON_IsObject(j))
+    {
+        error(where, "must be an object");
+        return false;
+    }
+    uint64_t index = 0, sub = 0;
+    std::string type, dir, exch;
+    bool ok =
+        get_uint(j, "index", where, 0x2000, 0x5FFF, index) &
+        get_uint(j, "subindex", where, 1, 254, sub) & get_string(j, "type", where, type, true) &
+        get_string(j, "direction", where, dir, true) & get_string(j, "exchange", where, exch, true);
+    get_string(j, "name", where, obj.name, false);
+    if (!ok)
+        return false;
+    obj.index     = static_cast<uint16_t>(index);
+    obj.subindex  = static_cast<uint8_t>(sub);
+    std::string w = where + " " + object_text(obj.index, obj.subindex);
+    size_t failed = errors_.size();
+    if (dir == "from_master")
+        obj.dir = SlaveDirection::FromMaster;
+    else if (dir == "to_master")
+        obj.dir = SlaveDirection::ToMaster;
+    else
+        error(w, "\"direction\" \"" + dir + "\" is not one of from_master, to_master");
+    if (exch == "pdo")
+        obj.exch = SlaveExchange::Pdo;
+    else if (exch == "sdo")
+        obj.exch = SlaveExchange::Sdo;
+    else if (exch == "constant")
+        obj.exch = SlaveExchange::Constant;
+    else
+        error(w, "\"exchange\" \"" + exch + "\" is not one of pdo, sdo, constant");
+    if (type == "VISIBLE_STRING")
+        obj.string = true;
+    else if (!parse_co_type(type, obj.type))
+        error(w, "type \"" + type + "\" is not supported");
+    if (errors_.size() != failed)
+        return false;
+
+    const cJSON *loc = cJSON_GetObjectItemCaseSensitive(j, "location");
+    if (obj.exch == SlaveExchange::Constant)
+    {
+        if (loc)
+            error(w, "a constant has no \"location\"");
+        const cJSON *value = cJSON_GetObjectItemCaseSensitive(j, "value");
+        if (!value)
+            error(w, "a constant needs a \"value\"");
+        else if (obj.string)
+        {
+            if (!cJSON_IsString(value))
+                error(w, "\"value\" of a VISIBLE_STRING must be a string");
+            else if (std::strlen(value->valuestring) > 255)
+                error(w, "\"value\" is longer than 255 characters");
+            else
+                obj.text = value->valuestring;
+        }
+        else
+            parse_value(value, w, "value", obj.type, obj.value);
+        if (cJSON_GetObjectItemCaseSensitive(j, "min") ||
+            cJSON_GetObjectItemCaseSensitive(j, "max"))
+            error(w, "a constant has no \"min\" or \"max\"");
+        return errors_.size() == failed;
+    }
+    if (obj.string)
+    {
+        error(w, "a VISIBLE_STRING object must be a constant");
+        return false;
+    }
+    std::string text, why;
+    const IecArea area = obj.dir == SlaveDirection::FromMaster ? IecArea::Input : IecArea::Output;
+    if (!get_string(j, "location", w, text, true))
+        return false;
+    if (!parse_iec_location(text, obj.location, why))
+        error(w, "location \"" + text + "\": " + why);
+    else if (obj.location.area != area)
+        error(w, std::string("location ") + text + " must be " +
+                     (area == IecArea::Input ? "an input (%I) for an object from the master"
+                                             : "an output (%Q) for an object to the master"));
+    else if (!co_type_fits(obj.type, obj.location.size))
+        error(w, std::string("a ") + co_type_name(obj.type) + " does not fit location " + text);
+    if (const cJSON *def = cJSON_GetObjectItemCaseSensitive(j, "default"))
+        parse_value(def, w, "default", obj.type, obj.value);
+    const cJSON *mn = cJSON_GetObjectItemCaseSensitive(j, "min");
+    const cJSON *mx = cJSON_GetObjectItemCaseSensitive(j, "max");
+    if ((mn || mx) && obj.dir != SlaveDirection::FromMaster)
+        error(w, "only an object from the master has \"min\" or \"max\"");
+    else
+    {
+        if (mn)
+            obj.has_min = parse_value(mn, w, "min", obj.type, obj.min);
+        if (mx)
+            obj.has_max = parse_value(mx, w, "max", obj.type, obj.max);
+        if (obj.has_min && obj.has_max && compare_raw(obj.type, obj.min, obj.max) > 0)
+            error(w, "\"min\" is above \"max\"");
+        else if ((obj.has_min && compare_raw(obj.type, obj.value, obj.min) < 0) ||
+                 (obj.has_max && compare_raw(obj.type, obj.value, obj.max) > 0))
+            error(w, "the default is outside \"min\" to \"max\"");
+    }
+    return errors_.size() == failed;
+}
+
+void Parser::parse_slave_pdos(const cJSON *j, const char *key, const std::string &where, bool tpdo,
+                              DeviceConfig &dev)
+{
+    const cJSON *list = get_array(j, key, where, false);
+    if (!list)
+        return;
+    std::vector<SlavePdo> &out = tpdo ? dev.tpdos : dev.rpdos;
+    const char *kind           = tpdo ? "TPDO" : "RPDO";
+    const cJSON *p             = nullptr;
+    std::set<const SlaveObject *> mapped;
+    cJSON_ArrayForEach(p, list)
+    {
+        if (!cJSON_IsObject(p))
+        {
+            error(where, std::string(kind) + " must be an object");
+            continue;
+        }
+        SlavePdo pdo;
+        uint64_t v = 0;
+        if (!get_uint(p, "number", where + " " + kind, 1, kSlavePdos, v))
+            continue;
+        pdo.number          = static_cast<unsigned>(v);
+        const std::string w = where + " " + kind + " " + std::to_string(pdo.number);
+        for (const auto &o : out)
+            if (o.number == pdo.number)
+                error(w, "is given twice");
+        if (get_uint(p, "cob_id", w, 1, 0x7FF, v))
+        {
+            pdo.cob_id = static_cast<uint32_t>(v);
+            if (const char *what = reserved_cob_id(pdo.cob_id))
+                error(w, "COB-ID " + hex(pdo.cob_id, 3) + " is reserved for " + what);
+        }
+        const uint64_t def_tx = 255, zero = 0;
+        if (get_uint(p, "transmission", w, 0, 255, v, &def_tx))
+        {
+            if (v > 240 && v < 254)
+                error(w, "transmission type " + std::to_string(v) + " is reserved");
+            else
+                pdo.transmission = static_cast<unsigned>(v);
+        }
+        if (get_uint(p, "event_timer_ms", w, 0, 65535, v, &zero))
+            pdo.event_timer_ms = static_cast<unsigned>(v);
+        if (tpdo && get_uint(p, "inhibit_100us", w, 0, 65535, v, &zero))
+            pdo.inhibit_100us = static_cast<unsigned>(v);
+        else if (!tpdo && cJSON_GetObjectItemCaseSensitive(p, "inhibit_100us"))
+            error(w, "\"inhibit_100us\" is only for a TPDO");
+        const cJSON *entries = get_array(p, "entries", w, true);
+        unsigned bits        = 0;
+        const cJSON *e       = nullptr;
+        cJSON_ArrayForEach(e, entries)
+        {
+            uint64_t index = 0, sub = 0;
+            if (!cJSON_IsObject(e) || !(get_uint(e, "index", w, 1, 0xFFFF, index) &
+                                        get_uint(e, "subindex", w, 0, 0xFF, sub)))
+                continue;
+            SlavePdoEntry entry{static_cast<uint16_t>(index), static_cast<uint8_t>(sub)};
+            const std::string ew   = w + " " + object_text(entry.index, entry.subindex);
+            const SlaveObject *obj = dev.find(entry.index, entry.subindex);
+            const SlaveDirection want =
+                tpdo ? SlaveDirection::ToMaster : SlaveDirection::FromMaster;
+            if (!obj)
+                error(ew, "is not one of the slave's objects");
+            else if (obj->exch != SlaveExchange::Pdo)
+                error(ew, "is not exchanged by PDO");
+            else if (obj->dir != want)
+                error(ew,
+                      tpdo ? "is not an object to the master" : "is not an object from the master");
+            else if (!mapped.insert(obj).second)
+                error(ew, "is mapped twice");
+            else
+            {
+                bits += co_type_bits(obj->type) < 8 ? 8 : co_type_bits(obj->type);
+                pdo.entries.push_back(entry);
+            }
+        }
+        if (bits > kMaxPdoBits)
+            error(w, "maps " + std::to_string(bits / 8) + " bytes; a PDO holds at most 8");
+        out.push_back(std::move(pdo));
+    }
+}
+
+bool Parser::parse_device(const cJSON *j, size_t pos, DeviceConfig &dev)
+{
+    std::string where = "device " + std::to_string(pos);
+    if (!cJSON_IsObject(j))
+    {
+        error(where, "must be an object");
+        return false;
+    }
+    if (char *text = cJSON_PrintUnformatted(j))
+    {
+        dev.source = text;
+        cJSON_free(text);
+    }
+    get_string(j, "name", where, dev.name, false);
+    get_string(j, "interface", where, dev.interface, true);
+    if (!dev.interface.empty() || !dev.name.empty())
+        where = dev.label();
+    if (dev.interface.size() >= 16)
+        error(where, "interface name \"" + dev.interface + "\" is longer than 15 characters");
+    uint64_t v          = 0;
+    const uint64_t zero = 0;
+    if (get_uint(j, "bitrate", where, 0, 1000000, v, &zero))
+    {
+        dev.bitrate = static_cast<unsigned>(v);
+        if (v && !is_standard_bitrate(dev.bitrate))
+            error(where, "bit rate " + std::to_string(v) + " is not a CANopen bit rate");
+    }
+    if (get_uint(j, "node_id", where, 1, kMaxNodeId, v))
+        dev.node_id = static_cast<unsigned>(v);
+    const uint64_t def_priority = kDefaultPriority;
+    if (get_uint(j, "priority", where, 1, kMaxPriority, v, &def_priority))
+        dev.priority = static_cast<int>(v);
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(j, "identity");
+    if (!cJSON_IsObject(id))
+        error(where, "missing \"identity\" object");
+    else
+    {
+        const std::string w = where + ": identity";
+        get_string(id, "device_name", w, dev.device_name, false);
+        get_string(id, "software_version", w, dev.software_version, false);
+        if (dev.device_name.size() > 255 || dev.software_version.size() > 255)
+            error(w, "names are at most 255 characters");
+        if (get_uint(id, "vendor_id", w, 0, 0xFFFFFFFF, v, &zero))
+            dev.vendor_id = static_cast<uint32_t>(v);
+        if (get_uint(id, "product_code", w, 0, 0xFFFFFFFF, v, &zero))
+            dev.product_code = static_cast<uint32_t>(v);
+        if (get_uint(id, "revision", w, 0, 0xFFFFFFFF, v, &zero))
+            dev.revision = static_cast<uint32_t>(v);
+    }
+    if (get_uint(j, "heartbeat_ms", where, 1, 65535, v))
+        dev.heartbeat_ms = static_cast<unsigned>(v);
+    const cJSON *watch = cJSON_GetObjectItemCaseSensitive(j, "master_watch");
+    if (watch && !cJSON_IsNull(watch))
+    {
+        const std::string w = where + ": master_watch";
+        if (!cJSON_IsObject(watch))
+            error(where, "\"master_watch\" must be an object or null");
+        else
+        {
+            if (get_uint(watch, "node_id", w, 1, kMaxNodeId, v))
+                dev.master_node_id = static_cast<unsigned>(v);
+            if (get_uint(watch, "time_ms", w, 0, 65535, v))
+                dev.master_watch_ms = static_cast<unsigned>(v);
+            if (dev.master_node_id && dev.master_node_id == dev.node_id)
+                error(w, "the master's node ID is the slave's own");
+        }
+    }
+    std::string text;
+    if (get_string(j, "on_master_lost", where, text, false) && !text.empty())
+    {
+        if (text == "pre_operational")
+            dev.on_master_lost = OnMasterLost::PreOperational;
+        else if (text == "no_change")
+            dev.on_master_lost = OnMasterLost::NoChange;
+        else if (text == "stopped")
+            dev.on_master_lost = OnMasterLost::Stopped;
+        else
+            error(where, "\"on_master_lost\" \"" + text +
+                             "\" is not one of pre_operational, no_change, stopped");
+    }
+    text.clear();
+    if (get_string(j, "on_plc_stop", where, text, false) && !text.empty())
+    {
+        if (text == "hold")
+            dev.on_plc_stop = SlaveOnStop::Hold;
+        else if (text == "zero")
+            dev.on_plc_stop = SlaveOnStop::Zero;
+        else
+            error(where, "\"on_plc_stop\" \"" + text + "\" is not one of hold, zero");
+    }
+    get_bool(j, "start_alone", where, dev.start_alone);
+
+    const cJSON *objects = get_array(j, "objects", where, true);
+    const cJSON *o       = nullptr;
+    size_t opos          = 0;
+    cJSON_ArrayForEach(o, objects)
+    {
+        SlaveObject obj;
+        if (!parse_object(o, where + ": object " + std::to_string(++opos), obj))
+            continue;
+        if (dev.find(obj.index, obj.subindex))
+            error(where, object_text(obj.index, obj.subindex) + " is given twice");
+        else
+            dev.objects.push_back(std::move(obj));
+    }
+    parse_slave_pdos(j, "rpdos", where, false, dev);
+    parse_slave_pdos(j, "tpdos", where, true, dev);
+    std::map<uint32_t, std::string> cobs;
+    for (int dir = 0; dir < 2; ++dir)
+        for (const auto &p : dir ? dev.tpdos : dev.rpdos)
+        {
+            std::string what = std::string(dir ? "TPDO " : "RPDO ") + std::to_string(p.number);
+            auto it          = cobs.find(p.cob_id);
+            if (it != cobs.end())
+                error(where,
+                      what + " and " + it->second + " use the same COB-ID " + hex(p.cob_id, 3));
+            else
+                cobs[p.cob_id] = what;
+        }
+    return true;
+}
+
 } // namespace
 
 unsigned PdoConfig::bits() const
@@ -802,6 +1212,73 @@ unsigned PdoConfig::bits() const
     for (const auto &e : entries)
         n += co_type_bits(e.type);
     return n;
+}
+
+unsigned SlaveObject::bytes() const
+{
+    if (string)
+        return static_cast<unsigned>(text.size());
+    const unsigned bits = co_type_bits(type);
+    return bits < 8 ? 1 : bits / 8;
+}
+
+std::string DeviceConfig::label() const
+{
+    std::string text = "slave";
+    if (!name.empty())
+        text += " \"" + name + "\"";
+    if (!interface.empty())
+        text += " (" + interface + ")";
+    return text;
+}
+
+const SlaveObject *DeviceConfig::find(uint16_t index, uint8_t subindex) const
+{
+    for (const auto &o : objects)
+        if (o.index == index && o.subindex == subindex)
+            return &o;
+    return nullptr;
+}
+
+int compare_raw(CoType type, uint64_t a, uint64_t b)
+{
+    auto sign_extend = [](uint64_t v, unsigned bits)
+    {
+        if (bits >= 64)
+            return static_cast<int64_t>(v);
+        const uint64_t m = uint64_t(1) << (bits - 1);
+        v &= (uint64_t(1) << bits) - 1;
+        return static_cast<int64_t>((v ^ m) - m);
+    };
+    switch (type)
+    {
+    case CoType::INTEGER8:
+    case CoType::INTEGER16:
+    case CoType::INTEGER32:
+    case CoType::INTEGER64:
+    {
+        const int64_t x = sign_extend(a, co_type_bits(type));
+        const int64_t y = sign_extend(b, co_type_bits(type));
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    case CoType::REAL32:
+    {
+        float x, y;
+        uint32_t ua = static_cast<uint32_t>(a), ub = static_cast<uint32_t>(b);
+        std::memcpy(&x, &ua, sizeof(x));
+        std::memcpy(&y, &ub, sizeof(y));
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    case CoType::REAL64:
+    {
+        double x, y;
+        std::memcpy(&x, &a, sizeof(x));
+        std::memcpy(&y, &b, sizeof(y));
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    default:
+        return a < b ? -1 : (a > b ? 1 : 0);
+    }
 }
 
 std::string NodeConfig::label() const

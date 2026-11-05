@@ -14,7 +14,7 @@ namespace
 {
 
 const char *kValid = R"({
-  "version": 5,
+  "version": 6,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 500000,
     "heartbeat_producer_ms": 100,
@@ -193,8 +193,8 @@ void test_receive_timeout()
 void test_refusals()
 {
     CHECK(refused_with("{", "not valid JSON"));
-    CHECK(refused_with(with(kValid, "\"version\": 5", "\"version\": 4"),
-                       "version 4 is not supported (this runtime reads version 5)"));
+    CHECK(refused_with(with(kValid, "\"version\": 6", "\"version\": 5"),
+                       "version 5 is not supported (this runtime reads version 6)"));
     CHECK(refused_with(with(kValid, "\"start\": \"master\", ", ""), "missing \"start\""));
     CHECK(refused_with(with(kValid, "\"start\": \"master\"", "\"start\": \"plc\""),
                        "\"start\" \"plc\" is not one of master, program"));

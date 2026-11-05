@@ -320,7 +320,28 @@ class NetworkStatus
 };
 
 // The status of every network as the JSON answer of the status socket (version 1).
-std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t now);
+// One CANopen slave of this runtime, as the status reports it.
+struct SlaveSnapshot
+{
+    std::string name;
+    std::string interface;
+    unsigned node_id = 0;
+    bool bus_open    = false;    // the CAN interface is open
+    std::string problem;         // why it is not, "" when it is
+    uint8_t nmt             = 0; // CiA 301 state: 0 boot-up, 4 stopped, 5 operational, 127 pre-op
+    bool plc_running        = false;
+    unsigned master_node_id = 0;     // 0: not watched
+    bool master_seen        = false; // the master's heartbeat is being received
+    uint16_t last_emcy      = 0;     // error code of the last EMCY sent
+    bool emcy_sent          = false;
+    uint64_t rx_frames      = 0;
+    uint64_t tx_frames      = 0;
+};
+
+std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t now,
+                        const std::vector<SlaveSnapshot> &slaves = {});
+// The answer while no network runs: inactive, with the slaves that run.
+std::string inactive_status_json(const std::vector<SlaveSnapshot> &slaves);
 
 const char *node_run_name(NodeRun s);
 // The node's problem in words for the PLC blocks ("" for none), cut to fit `size`.
