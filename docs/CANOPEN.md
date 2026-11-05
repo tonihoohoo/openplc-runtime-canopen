@@ -252,8 +252,8 @@ an object dictionary built from the file when the PLC starts.
 
 Behaviour:
 
-- The slave has the CiA 301 communication objects 0x1000-0x1029 (0x1001, 0x1003 with 8 entries,
-  0x1005-0x1007, 0x1014, 0x1016, 0x1017, 0x1018, 0x1029), one SDO server (0x1200), and the PDO
+- The slave has the CiA 301 communication objects 0x1000-0x1029 (0x1001, 0x1003 with up to 8 errors,
+  newest first and without the 0000h "error reset" messages, 0x1005-0x1007, 0x1014, 0x1016, 0x1017, 0x1018, 0x1029), one SDO server (0x1200), and the PDO
   parameters 0x1400-0x1403, 0x1600-0x1603, 0x1800-0x1803 and 0x1A00-0x1A03. A master may remap the
   PDOs by the CiA 301 procedure; an object that is not `pdo` cannot be mapped (abort 0604 0041h).
   Writes to 0x1010 (store) and 0x1011 (restore) are refused (0602 0000h): nothing is stored, and a

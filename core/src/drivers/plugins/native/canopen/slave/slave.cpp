@@ -185,6 +185,51 @@ std::unique_ptr<SlaveLink> virtual_slave_link(std::shared_ptr<lely::io::VirtualC
     return std::unique_ptr<SlaveLink>(new VirtualLink(bus));
 }
 
+// 0x1003 without the "error reset" (0000h) messages that CANopenNode keeps in the same FIFO:
+// the number of errors when `nth` is 0, else the nth newest error. False when there is none.
+static bool history_entry(const CO_EM_t *em, uint8_t nth, uint32_t &value)
+{
+    uint8_t found = 0;
+    for (uint8_t k = 1; k <= em->fifoCount; ++k)
+    {
+        int index = static_cast<int>(em->fifoWrPtr) - k;
+        if (index < 0)
+            index += em->fifoSize;
+        const uint32_t msg = em->fifo[index].msg;
+        if ((msg & 0xFFFFu) == 0)
+            continue;
+        if (++found == nth)
+        {
+            value = msg;
+            return true;
+        }
+    }
+    value = found;
+    return nth == 0;
+}
+
+static ODR_t read_history(OD_stream_t *stream, void *buf, OD_size_t count, OD_size_t *count_read)
+{
+    if (stream == nullptr || buf == nullptr || count_read == nullptr || count < 1 ||
+        (stream->subIndex > 0 && count < 4))
+        return ODR_DEV_INCOMPAT;
+    const CO_EM_t *em = static_cast<const CO_EM_t *>(stream->object);
+    uint32_t value    = 0;
+    if (!history_entry(em, stream->subIndex, value))
+        return ODR_NO_DATA;
+    if (stream->subIndex == 0)
+    {
+        CO_setUint8(buf, static_cast<uint8_t>(value));
+        *count_read = 1;
+    }
+    else
+    {
+        CO_setUint32(buf, value);
+        *count_read = 4;
+    }
+    return ODR_OK;
+}
+
 struct Slave::Impl
 {
     SlaveOd od;
@@ -196,6 +241,7 @@ struct Slave::Impl
     uint16_t last_emcy      = 0;
     bool emcy_sent          = false;
     unsigned write_failures = 0;
+    OD_extension_t history{};
 
     static int send(void *ctx, uint32_t ident, uint8_t dlc, const uint8_t *data)
     {
@@ -386,6 +432,7 @@ void Slave::thread_main()
         }
         CO_NMT_reset_cmd_t reset = CO_RESET_NOT;
         bool link_ok             = true;
+        bool said_seen           = false; // survives a reset communication
         while (!stop_.load() && link_ok && reset != CO_RESET_QUIT)
         {
             co->CANmodule->CANnormal = false;
@@ -409,6 +456,9 @@ void Slave::thread_main()
                 stop_.store(true);
                 break;
             }
+            im.history      = co->em->OD_1003_extension;
+            im.history.read = read_history;
+            OD_extension_init(OD_find(im.od.od(), 0x1003), &im.history);
             CO_CANsetNormalMode(co->CANmodule);
             if (!plc_running_.load())
                 CO_errorReport(co->em, kPlcStopBit, CO_EMC_SOFTWARE_USER, 0);
@@ -512,12 +562,17 @@ void Slave::thread_main()
                     master = CO_HBconsumer_getState(co->HBcons, 0) == CO_HBconsumer_ACTIVE;
                 if (status_.master_node_id && master != master_was)
                 {
-                    if (master)
+                    if (master && !said_seen)
                         log_info("%s: heartbeat of master node %u seen", label.c_str(),
                                  dev_.master_node_id);
-                    else if (CO_isError(co->em, CO_EM_HEARTBEAT_CONSUMER))
+                    else if (!master && CO_isError(co->em, CO_EM_HEARTBEAT_CONSUMER))
+                    {
                         log_warn("%s: heartbeat of master node %u lost", label.c_str(),
                                  dev_.master_node_id);
+                        said_seen = false;
+                    }
+                    if (master)
+                        said_seen = true;
                     master_was = master;
                 }
                 if (now - last_status >= std::chrono::milliseconds(100) || state != status_nmt)
