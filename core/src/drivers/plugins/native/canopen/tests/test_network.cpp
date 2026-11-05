@@ -75,7 +75,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 9,
+  "version": 11,
   "networks": [{
     "name": "test", "interface": "vcan-test", "bitrate": 0,
     "sync": {"mode": "plc_cycle"},
@@ -365,7 +365,7 @@ NodeStatus node_status(const NetworkStatus &status, unsigned id)
 }
 
 const char *kWatchConfig = R"({
-  "version": 9,
+  "version": 11,
   "networks": [{
     "name": "watch", "interface": "vcan-test", "bitrate": 0,
     "heartbeat_producer_ms": 50,
@@ -423,7 +423,7 @@ void check_master_watch(std::shared_ptr<lely::io::VirtualCanController> vbus,
 }
 
 const char *kOptionsConfig = R"({
-  "version": 9,
+  "version": 11,
   "networks": [{
     "name": "options", "interface": "vcan-test", "bitrate": 0,
     "on_node_error": "stop", "boot_timeout_ms": 1000, "sdo_timeout_ms": 500,
@@ -1125,7 +1125,7 @@ std::string nmt_request(unsigned node, const char *command)
 }
 
 const char *kPlcConfig = R"({
-  "version": 9,
+  "version": 11,
   "networks": [{
     "name": "plc", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
@@ -1293,7 +1293,7 @@ void check_plc_blocks(std::shared_ptr<lely::io::VirtualCanController> vbus, cons
 }
 
 const char *kControlConfig = R"({
-  "version": 9,
+  "version": 11,
   "networks": [{
     "name": "control", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
@@ -1586,7 +1586,7 @@ void check_session_failure(std::shared_ptr<lely::io::VirtualCanController> vbus,
 }
 
 const char *kBootConfig = R"({
-  "version": 9,
+  "version": 11,
   "networks": [{
     "name": "boot", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,

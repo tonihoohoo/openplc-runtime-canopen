@@ -17,7 +17,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 9;
+constexpr int kConfigVersion = 11;
 
 // One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
 // location: its bits are skipped on receive and sent as zeros.
@@ -195,14 +195,20 @@ struct SlaveObject
     bool string        = false; // VISIBLE_STRING: constants only
     SlaveDirection dir = SlaveDirection::FromMaster;
     SlaveExchange exch = SlaveExchange::Pdo;
-    IecLocation location; // not for constants
+    IecLocation location; // not for constants or packed objects
     uint64_t value = 0;   // raw little-endian bits of the default or constant value
     std::string text;     // the value of a string constant
+    // A packed UNSIGNED8: the %IX/%QX location of each bit, bit 0 first; empty otherwise.
+    std::vector<IecLocation> bits;
     bool has_min = false;
     bool has_max = false;
     uint64_t min = 0; // raw bits, compared as the object's type
     uint64_t max = 0;
     unsigned bytes() const; // size in the object dictionary
+    bool packed() const
+    {
+        return !bits.empty();
+    }
 };
 
 struct SlavePdoEntry

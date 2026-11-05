@@ -123,7 +123,7 @@ has `lss`.
 
 ```json
 {
-  "version": 9,
+  "version": 11,
   "networks": [
     {
       "name": "CANopen 1",
@@ -186,7 +186,7 @@ change both together.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 8. Older files are refused; build the project again with a matching editor. |
+| `version` | Format version, 10. Older files are refused; build the project again with a matching editor. |
 | `networks`, `devices` | The master networks and the [slave devices](#canopen-slave); either list may be empty or left out, not both. |
 | `interface` | SocketCAN interface, unique per network. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
@@ -241,7 +241,7 @@ an object dictionary built from the file when the PLC starts.
 
 ```json
 {
-  "version": 9,
+  "version": 11,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "can1", "bitrate": 250000, "node_id": 5, "priority": 90,
@@ -260,6 +260,9 @@ an object dictionary built from the file when the PLC starts.
       {"index": 8192, "subindex": 3, "name": "Limit", "type": "UNSIGNED16",
        "direction": "from_master", "exchange": "sdo", "location": "%IW2",
        "default": 1000, "min": 100, "max": 30000},
+      {"index": 8192, "subindex": 4, "name": "Valves", "type": "UNSIGNED8",
+       "direction": "from_master", "exchange": "pdo",
+       "bits": ["%IX0.0", "%IX0.1", "%IX0.2", "%IX0.3", "%IX0.4", "%IX0.5", "%IX0.6", "%IX0.7"]},
       {"index": 8448, "subindex": 1, "name": "Actual", "type": "INTEGER16",
        "direction": "to_master", "exchange": "pdo", "location": "%QW0"},
       {"index": 8448, "subindex": 9, "name": "Firmware", "type": "VISIBLE_STRING",
@@ -287,6 +290,7 @@ an object dictionary built from the file when the PLC starts.
 | `lss` | `null` (default, LSS off) or the [LSS](#lss-in-the-slave) settings `{enabled, wait_for_master, serial, bitrate_change}`. |
 | `objects` | The application objects, index 0x2000-0x5FFF, sub-index 1-254, each with a `type` as for a PDO entry or `VISIBLE_STRING`, a `direction` (`from_master`: written by the master, read by the program from a `%I` location; `to_master`: written by the program to a `%Q` location, read by the master) and an `exchange`: `pdo` (may be mapped to a PDO), `sdo` (by SDO only) or `constant` (a fixed `value`, no location). A `VISIBLE_STRING` object (at most 255 characters) is always a constant. |
 | `default`, `min`, `max` | The object's value at start (default 0) and, for objects from the master, the range a write must keep (SDO aborts 0609 0031h above and 0609 0032h below it). |
+| `bits` | Instead of `location`: the object is an `UNSIGNED8` packed as 8 bits, and `bits` lists the 8 bit locations, bit 0 first (`%IX` from the master, `%QX` to the master). The master sees one byte; the program reads or writes each bit at its own location. Not with `location`, `min`, `max` or exchange `constant`. |
 | `rpdos`, `tpdos` | Up to four of each: PDO `number` 1-4, `cob_id`, `transmission` (0-240, 254 or 255; default 255), `event_timer_ms`, `inhibit_100us` (TPDOs only) and the mapped `entries` in order, at most 8 bytes, each a `pdo` object of the right direction. Unused PDOs are present and invalid. |
 
 Behaviour:

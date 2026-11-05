@@ -659,7 +659,13 @@ void Slave::copy_to_plc(const plugin_runtime_args_t &rt)
     const uint64_t *v = in_.latest();
     const auto &slots = impl_->od.from_master();
     for (size_t i = 0; i < slots.size(); ++i)
-        image_write_input(rt, slots[i].obj->location, v[i]);
+    {
+        const SlaveObject &o = *slots[i].obj;
+        if (!o.packed())
+            image_write_input(rt, o.location, v[i]);
+        for (size_t k = 0; k < o.bits.size(); ++k)
+            image_write_input(rt, o.bits[k], (v[i] >> k) & 1u);
+    }
 }
 
 void Slave::copy_from_plc(const plugin_runtime_args_t &rt)
@@ -671,7 +677,18 @@ void Slave::copy_from_plc(const plugin_runtime_args_t &rt)
     if (rt.image_lock)
         rt.image_lock();
     for (size_t i = 0; i < slots.size(); ++i)
-        back[i] = image_read_output(rt, slots[i].obj->location);
+    {
+        const SlaveObject &o = *slots[i].obj;
+        if (!o.packed())
+        {
+            back[i] = image_read_output(rt, o.location);
+            continue;
+        }
+        uint64_t byte = 0;
+        for (size_t k = 0; k < o.bits.size(); ++k)
+            byte |= (image_read_output(rt, o.bits[k]) & 1u) << k;
+        back[i] = byte;
+    }
     if (rt.image_unlock)
         rt.image_unlock();
     out_.publish();
