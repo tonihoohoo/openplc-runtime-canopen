@@ -249,6 +249,8 @@ def main() -> None:
     wait_object("NMT block refuses a reset", 0x2100, 5, WRONG_PARAMETER)
     expect("no boot-up after the refused reset", bus.count(start, is_heartbeat(0x00)), 0)
     write("command cleared", 0x2000, 1, 0, 1)
+    # The block acts on a rising edge of ENABLE, so a scan must see the cleared command first.
+    wait_object("NMT block error clears with the command", 0x2100, 5, 0)
 
     start = bus.mark()
     write("command pre-operational", 0x2000, 1, 1, 1)
@@ -262,6 +264,7 @@ def main() -> None:
     )
     wait_object("status block reports pre-operational again", 0x2100, 1, PRE_OPERATIONAL)
     write("command cleared after pre-operational", 0x2000, 1, 0, 1)
+    time.sleep(0.2)
     start = bus.mark()
     write("command operational", 0x2000, 1, 2, 1)
     expect(
