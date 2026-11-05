@@ -129,9 +129,9 @@ def main() -> None:
         True,
     )
     wait_status(
-        "status shows node 12 given by LSS and stored",
+        "status shows node 12 from the stored values",
         lambda s: s.get("node_id") == NODE
-        and lss_status(s).get("node_id_from") == "lss"
+        and lss_status(s).get("node_id_from") == "stored"
         and lss_status(s).get("stored_node_id") == NODE,
     )
     expect("serial number in 0x1018:4", sdo_read(bus, NODE, 0x1018, 4), 23)
