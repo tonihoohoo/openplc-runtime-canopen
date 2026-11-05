@@ -319,6 +319,70 @@ class NetworkStatus
     uint64_t gen_ = 0;
 };
 
+// What happened to a slave, for the status's events.
+enum class SlaveEventKind : uint8_t
+{
+    OnBus,     // node on the bus after a start or a link reopen
+    Nmt,       // NMT state change: state, by
+    Reset,     // reset node or communication by the master: what
+    SdoWrite,  // a master's SDO download: index, subindex, ok, abort_code
+    Heartbeat, // the master's heartbeat: seen
+    Emcy,      // EMCY sent: code, reg
+    EmcyReset, // EMCY 0000h sent: reg
+    Plc,       // PLC run or stop: running
+    BusState,  // bus state change: bus_state
+    BusReset   // link reset after a bus-off: outcome
+};
+
+// Who brought the slave to its NMT state.
+enum class SlaveNmtBy : uint8_t
+{
+    Boot,      // after its start or a reset
+    Master,    // an NMT command
+    Self,      // its error behaviour (0x1029)
+    StartAlone // started without a master
+};
+
+struct SlaveEvent
+{
+    int64_t time         = 0;
+    SlaveEventKind kind  = SlaveEventKind::OnBus;
+    uint8_t state        = 0; // Nmt: CiA 301 state
+    SlaveNmtBy by        = SlaveNmtBy::Boot;
+    bool node            = false; // Reset: node (true) or communication
+    uint16_t index       = 0;
+    uint8_t subindex     = 0;
+    bool ok              = false; // SdoWrite: taken; Heartbeat: seen; Plc: running
+    uint32_t abort_code  = 0;
+    uint16_t code        = 0;
+    uint8_t reg          = 0;
+    BusState bus_state   = BusState::Unknown;
+    ResetOutcome outcome = ResetOutcome::Done;
+};
+
+// A slave PDO as it runs now.
+struct SlavePdoStatus
+{
+    unsigned number        = 0; // 1-4
+    bool tpdo              = false;
+    uint32_t cob_id        = 0; // 0x1400/0x1800 sub 1, with the invalid bit
+    uint8_t transmission   = 0;
+    uint16_t inhibit_100us = 0;
+    uint16_t event_ms      = 0;
+    std::vector<uint32_t> mapping; // 0x1600/0x1A00 entries: index << 16 | subindex << 8 | bits
+    uint64_t frames = 0;
+    int64_t last    = 0; // wall time of the last frame, 0 for none
+};
+
+// A data object's value in the dictionary.
+struct SlaveValue
+{
+    uint16_t index   = 0;
+    uint8_t subindex = 0;
+    uint8_t bytes    = 0;
+    uint8_t data[8]{};
+};
+
 // The status of every network as the JSON answer of the status socket (version 1).
 // One CANopen slave of this runtime, as the status reports it.
 struct SlaveSnapshot
@@ -349,7 +413,24 @@ struct SlaveSnapshot
     unsigned project_bitrate = 0;
     unsigned stored_node_id  = 0; // 0: none stored
     unsigned stored_bitrate  = 0;
+    // Details for the editor's Online tab; `detailed` is false until the slave is first on the bus.
+    bool detailed = false;
+    BusStatus bus;
+    int64_t since          = 0; // wall time of the last NMT state change
+    SlaveNmtBy nmt_by      = SlaveNmtBy::Boot;
+    int64_t master_last    = 0; // wall time of the master's last heartbeat, 0 for none
+    uint8_t error_register = 0;
+    std::vector<uint16_t> emcy_active;   // error codes not yet reset, newest first
+    std::vector<uint32_t> error_history; // 0x1003, newest first
+    uint16_t heartbeat_ms    = 0;        // 0x1017
+    uint16_t master_watch_ms = 0;        // 0x1016 sub 1
+    uint8_t on_master_lost   = 0;        // 0x1029 sub 1
+    std::vector<SlavePdoStatus> pdos;
+    std::vector<SlaveValue> values;
+    std::deque<SlaveEvent> events; // newest first
 };
+
+constexpr size_t kSlaveEvents = 50;
 
 std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t now,
                         const std::vector<SlaveSnapshot> &slaves = {});

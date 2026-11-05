@@ -25,6 +25,16 @@ extern "C"
     (CO_CONFIG_HB_CONS_ENABLE | CO_CONFIG_HB_CONS_QUERY_FUNCT | CO_CONFIG_FLAG_OD_DYNAMIC)
 #define CO_CONFIG_NODE_GUARDING (0)
 #define CO_CONFIG_EM (CO_CONFIG_EM_PRODUCER | CO_CONFIG_EM_HISTORY)
+// Error register (CiA 301 7.5.2.2): the generic bit for any active error, the manufacturer bit
+// for the bits from CO_EM_MANUFACTURER_START on (the PLC stop is one).
+#define CO_CONFIG_ERR_CONDITION_GENERIC                                                            \
+    ((em->errorStatusBits[0] | em->errorStatusBits[1] | em->errorStatusBits[2] |                   \
+      em->errorStatusBits[3] | em->errorStatusBits[4] | em->errorStatusBits[5] |                   \
+      em->errorStatusBits[6] | em->errorStatusBits[7] | em->errorStatusBits[8] |                   \
+      em->errorStatusBits[9]) != 0U)
+#define CO_CONFIG_ERR_CONDITION_MANUFACTURER                                                       \
+    ((em->errorStatusBits[6] | em->errorStatusBits[7] | em->errorStatusBits[8] |                   \
+      em->errorStatusBits[9]) != 0U)
 #define CO_CONFIG_SDO_SRV (CO_CONFIG_SDO_SRV_SEGMENTED | CO_CONFIG_FLAG_OD_DYNAMIC)
 #define CO_CONFIG_SDO_SRV_BUFFER_SIZE 300
 #define CO_CONFIG_SDO_CLI (0)

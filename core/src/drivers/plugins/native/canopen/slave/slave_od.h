@@ -59,6 +59,11 @@ class SlaveOd
     };
     void restore_defaults(Restore what);
 
+    // The configuration it was built from (after build()).
+    const DeviceConfig &config() const
+    {
+        return *dev_;
+    }
     OD_t *od()
     {
         return &od_;

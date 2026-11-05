@@ -270,7 +270,16 @@ Behaviour:
   changed or removed slave leaves the bus and a changed one starts again with the new settings.
 - A failed interface is opened again every second. Service mode is refused (`busy`) on an
   interface a slave uses.
-- The status (below) lists each slave under `slaves`.
+- The slave watches its own link like a master network: error passive sends EMCY 8120h and bus-off
+  EMCY 8140h (both reset with EMCY 0000h when the link is back). A bus-off the kernel does not
+  restart is handled as for a network ([Link recovery](#link-recovery)): the plugin resets the link
+  and the slave goes on without a new boot-up; a runtime without the right to reset links logs
+  how to reset it by hand.
+- The error register (0x1001) has its generic bit set whenever an error is active (CiA 301
+  7.5.2.2), and the manufacturer bit for 6200h (PLC stopped).
+- The status (below) lists each slave under `slaves`, with what the master did to it: the NMT
+  state and who set it, the SDO writes and refusals, the PDOs in use with their frame counts, the
+  current values of its objects and its active emergencies.
 
 ### LSS in the slave
 
@@ -347,7 +356,16 @@ the CANopen device only when `status` is listed, and its online tools only when 
   "slaves": [{
     "name": "io", "interface": "can1", "node_id": 5, "bus_open": true, "state": "operational",
     "plc_running": true, "master_node_id": 127, "master_seen": true, "last_emcy": 0,
-    "rx_frames": 3201, "tx_frames": 3410
+    "rx_frames": 3201, "tx_frames": 3410,
+    "bus": {"state": "error_active", "tx_errors": 0, "rx_errors": 0, "link_resets": 0},
+    "since": 1793299992000, "nmt_by": "master", "master_last_seen": 1793299999950,
+    "error_register": 0, "emcy_active": [], "error_history": [],
+    "heartbeat_ms": 100, "master_watch_ms": 300, "on_master_lost": "pre_operational",
+    "pdos": [{"dir": "rx", "pdo": 1, "cob_id": 517, "valid": true, "transmission": 255,
+              "event_ms": 0, "mapping": [{"index": 8192, "subindex": 1, "bits": 16}],
+              "frames": 812, "last": 1793299999900}],
+    "values": [{"index": 8192, "subindex": 1, "data": "3412"}],
+    "events": [{"time": 1793299992000, "kind": "nmt", "state": "operational", "by": "master"}]
   }]
 }
 ```
@@ -368,7 +386,15 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `nodes[].emcy` | The last 8 emergencies, newest first; an emergency with code 0 (error reset) marks them inactive. |
 | `nodes[].late_pdos` | TPDOs with a receive timeout whose frames are late. |
 | `nodes[].sdo_skipped` | Configuration SDOs the node refused in its current boot that had `on_abort` `continue` or `jump`, with `index`, `subindex` and `abort_code`. |
-| `slaves[]` | One per [slave device](#canopen-slave): `state` is the slave's own NMT state (`boot_up`, `pre_operational`, `operational`, `stopped`) or `offline` while its interface is not open (with the reason in `problem`); `master_seen` whether the watched master heartbeat is there; `last_emcy` the code of the last emergency it sent. While no master network runs, the answer is `{"version": 1, "active": false, "slaves": [...]}`. |
+| `slaves[]` | One per [slave device](#canopen-slave): `state` is the slave's own NMT state (`boot_up`, `pre_operational`, `operational`, `stopped`) or `offline` while its interface is not open (with the reason in `problem`); `master_seen` whether the watched master heartbeat is there; `last_emcy` the code of the last emergency it sent. While no master network runs, the answer is `{"version": 1, "active": false, "now": ..., "slaves": [...]}`. |
+| `slaves[].bus` | The slave's link, as `bus` of a network. |
+| `slaves[].since`, `nmt_by` | When the slave entered its NMT state and why: `boot` (its boot-up), `master` (an NMT command), `self` (it left operational by itself, such as on the master's heartbeat lost) or `start_alone`. |
+| `slaves[].master_last_seen` | When the watched master heartbeat was last received; left out before the first one. |
+| `slaves[].error_register`, `emcy_active`, `error_history` | 0x1001, the emergency codes active now and 0x1003 (newest first, each entry with the code in its low 16 bits). |
+| `slaves[].heartbeat_ms`, `master_watch_ms`, `on_master_lost` | The values in use of 0x1017, 0x1016 sub 1 (0 when not watched) and 0x1029 sub 1 (`pre_operational`, `no_change`, `stopped` or `other`), as the master may have written them. |
+| `slaves[].pdos` | Every PDO with its parameters in use: `dir` `rx` or `tx`, `pdo` 1-4, `cob_id`, `valid`, `transmission`, `inhibit_100us` (TPDOs), `event_ms`, the `mapping` and the `frames` received or sent with the time of the `last` one. |
+| `slaves[].values` | The current value of every object except strings, `data` as little-endian hex bytes. |
+| `slaves[].events` | The last 50 events of the slave, newest first: `on_bus`, `nmt` (with `state` and `by`), `reset` (`what` `node` or `communication`), `sdo_write` (a master's SDO download, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `heartbeat` (the master's heartbeat, `seen` or lost), `emcy` (with `code` and `register`), `emcy_reset`, `plc` (`running`), `bus_state` and `bus_reset` (with `outcome`). |
 | `events` | The last 64 events of the network, newest first: `boot_ok` (with `waits` true when the node waits for the PLC program's start), `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort` (with `policy` `stop`, `continue` or `jump`), `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link, with `outcome` `done`, `not_permitted` or `failed`, and `cause` `bus_off`, `bit_rate` or `tx_stalled`), `sdo_write` (a client's SDO write, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `nmt_command` (an NMT command, with `command` and `source` `client` or `program`), `service` (service mode opened or closed, with `open`), `node_on` and `node_off` (the PLC program turned the node on or off). |
 
 Counters and lists start again when the PLC starts. The status thread never blocks the PLC scan
@@ -595,7 +621,7 @@ refuses a file with `devices`.
 pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), a node started by the program (waiting, started, waiting again after a reset) and a node turned on and off (booted, stopped, pulled without a loss, skipped by NMT to every node), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 | `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, a kept table that stays the same across reloads, and version 2's table serving version 1. |
 | `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states, the emergency ring, and the node control (wanted states, run states, network counts), with no allocation on the scan's side. |
-| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, and then the plugin's own master booting and running the slave. With LSS: silence while unconfigured, fastscan, configure, store, the stored values across restarts and reset node, reset communication taking a new node ID, forget, a refused bit rate, a failed store, and the stored file's checks. |
+| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, the status fields (NMT source, SDO writes and refusals, values, PDO counts and remap, active emergencies and the error register), error passive and bus-off on a stood-in link (EMCY 8120h and 8140h, the link reset without a new boot-up), the plugin's own master booting and running the slave, and with LSS: silence while unconfigured, fastscan, configure, store, the stored values across restarts and reset node, reset communication taking a new node ID, forget, a refused bit rate, a failed store, and the stored file's checks. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
@@ -613,7 +639,8 @@ checks (`canopen_sim_slave --blocks 1` reads the commands), stopping and startin
 runs and once while blocks are busy. Last it uploads `e2e/fixtures/canopen-slave`, a project
 that makes the runtime a slave on `vcan0`, and `.github/scripts/canopen_slave_e2e.py` plays its
 master over raw SocketCAN: SDOs with range checks, NMT start, an RPDO through the program back in a
-TPDO, the master's heartbeat lost, and a PLC stop and start, checking `slaves` in the status.
+TPDO, the master's heartbeat lost, and a PLC stop and start, checking `slaves` in the status
+(NMT source, SDO writes and refusals, values, PDO counts, active emergencies).
 `e2e/fixtures/canopen-slave-lss` is the same slave with LSS on, waiting for the master, and
 `.github/scripts/canopen_slave_lss_e2e.py` plays an LSS master: fastscan, node ID 12 configured
 and stored, the boot-up as node 12 with its COB-IDs following, a reset node, and the forget request.

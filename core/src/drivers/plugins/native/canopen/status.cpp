@@ -964,6 +964,179 @@ const char *slave_state_name(uint8_t nmt)
     }
 }
 
+const char *slave_nmt_by_name(SlaveNmtBy by)
+{
+    switch (by)
+    {
+    case SlaveNmtBy::Master:
+        return "master";
+    case SlaveNmtBy::Self:
+        return "self";
+    case SlaveNmtBy::StartAlone:
+        return "start_alone";
+    default:
+        return "boot";
+    }
+}
+
+const char *slave_event_name(SlaveEventKind k)
+{
+    switch (k)
+    {
+    case SlaveEventKind::OnBus:
+        return "on_bus";
+    case SlaveEventKind::Nmt:
+        return "nmt";
+    case SlaveEventKind::Reset:
+        return "reset";
+    case SlaveEventKind::SdoWrite:
+        return "sdo_write";
+    case SlaveEventKind::Heartbeat:
+        return "heartbeat";
+    case SlaveEventKind::Emcy:
+        return "emcy";
+    case SlaveEventKind::EmcyReset:
+        return "emcy_reset";
+    case SlaveEventKind::Plc:
+        return "plc";
+    case SlaveEventKind::BusState:
+        return "bus_state";
+    default:
+        return "bus_reset";
+    }
+}
+
+const char *on_master_lost_name(uint8_t v)
+{
+    switch (v)
+    {
+    case 0:
+        return "pre_operational";
+    case 1:
+        return "no_change";
+    case 2:
+        return "stopped";
+    default:
+        return "other";
+    }
+}
+
+std::string hex_bytes(const uint8_t *data, size_t n)
+{
+    static const char digits[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(n * 2);
+    for (size_t i = 0; i < n; ++i)
+    {
+        out.push_back(digits[data[i] >> 4]);
+        out.push_back(digits[data[i] & 0xF]);
+    }
+    return out;
+}
+
+cJSON *slave_event_json(const SlaveEvent &e)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddNumberToObject(o, "time", static_cast<double>(e.time));
+    cJSON_AddStringToObject(o, "kind", slave_event_name(e.kind));
+    switch (e.kind)
+    {
+    case SlaveEventKind::Nmt:
+        cJSON_AddStringToObject(o, "state", slave_state_name(e.state));
+        cJSON_AddStringToObject(o, "by", slave_nmt_by_name(e.by));
+        break;
+    case SlaveEventKind::Reset:
+        cJSON_AddStringToObject(o, "what", e.node ? "node" : "communication");
+        break;
+    case SlaveEventKind::SdoWrite:
+        add_uint(o, "index", e.index);
+        add_uint(o, "subindex", e.subindex);
+        cJSON_AddBoolToObject(o, "ok", e.ok);
+        if (!e.ok)
+            add_uint(o, "abort_code", e.abort_code);
+        break;
+    case SlaveEventKind::Heartbeat:
+        cJSON_AddBoolToObject(o, "seen", e.ok);
+        break;
+    case SlaveEventKind::Emcy:
+        add_uint(o, "code", e.code);
+        add_uint(o, "register", e.reg);
+        break;
+    case SlaveEventKind::EmcyReset:
+        add_uint(o, "register", e.reg);
+        break;
+    case SlaveEventKind::Plc:
+        cJSON_AddBoolToObject(o, "running", e.ok);
+        break;
+    case SlaveEventKind::BusState:
+        cJSON_AddStringToObject(o, "bus_state", bus_state_name(e.bus_state));
+        break;
+    case SlaveEventKind::BusReset:
+        cJSON_AddStringToObject(o, "outcome", reset_outcome_name(e.outcome));
+        break;
+    default:
+        break;
+    }
+    return o;
+}
+
+void add_slave_details(cJSON *o, const SlaveSnapshot &s)
+{
+    cJSON_AddItemToObject(o, "bus", bus_json(s.bus));
+    cJSON_AddNumberToObject(o, "since", static_cast<double>(s.since));
+    cJSON_AddStringToObject(o, "nmt_by", slave_nmt_by_name(s.nmt_by));
+    if (s.master_last)
+        cJSON_AddNumberToObject(o, "master_last_seen", static_cast<double>(s.master_last));
+    add_uint(o, "error_register", s.error_register);
+    cJSON *active = cJSON_AddArrayToObject(o, "emcy_active");
+    for (uint16_t c : s.emcy_active)
+        cJSON_AddItemToArray(active, cJSON_CreateNumber(c));
+    cJSON *history = cJSON_AddArrayToObject(o, "error_history");
+    for (uint32_t h : s.error_history)
+        cJSON_AddItemToArray(history, cJSON_CreateNumber(static_cast<double>(h)));
+    add_uint(o, "heartbeat_ms", s.heartbeat_ms);
+    add_uint(o, "master_watch_ms", s.master_watch_ms);
+    cJSON_AddStringToObject(o, "on_master_lost", on_master_lost_name(s.on_master_lost));
+    cJSON *pdos = cJSON_AddArrayToObject(o, "pdos");
+    for (const SlavePdoStatus &p : s.pdos)
+    {
+        cJSON *q = cJSON_CreateObject();
+        cJSON_AddStringToObject(q, "dir", p.tpdo ? "tx" : "rx");
+        add_uint(q, "pdo", p.number);
+        add_uint(q, "cob_id", p.cob_id & 0x7FF);
+        cJSON_AddBoolToObject(q, "valid", (p.cob_id & 0x80000000u) == 0);
+        add_uint(q, "transmission", p.transmission);
+        if (p.tpdo)
+            add_uint(q, "inhibit_100us", p.inhibit_100us);
+        add_uint(q, "event_ms", p.event_ms);
+        cJSON *map = cJSON_AddArrayToObject(q, "mapping");
+        for (uint32_t m : p.mapping)
+        {
+            cJSON *e = cJSON_CreateObject();
+            add_uint(e, "index", m >> 16);
+            add_uint(e, "subindex", (m >> 8) & 0xFF);
+            add_uint(e, "bits", m & 0xFF);
+            cJSON_AddItemToArray(map, e);
+        }
+        add_uint(q, "frames", p.frames);
+        if (p.last)
+            cJSON_AddNumberToObject(q, "last", static_cast<double>(p.last));
+        cJSON_AddItemToArray(pdos, q);
+    }
+    cJSON *values = cJSON_AddArrayToObject(o, "values");
+    for (const SlaveValue &v : s.values)
+    {
+        cJSON *e = cJSON_CreateObject();
+        add_uint(e, "index", v.index);
+        add_uint(e, "subindex", v.subindex);
+        cJSON_AddStringToObject(e, "data", hex_bytes(v.data, v.bytes).c_str());
+        cJSON_AddItemToArray(values, e);
+    }
+    cJSON *events = cJSON_AddArrayToObject(o, "events");
+    for (const SlaveEvent &e : s.events)
+        cJSON_AddItemToArray(events, slave_event_json(e));
+}
+
 void add_slaves(cJSON *root, const std::vector<SlaveSnapshot> &slaves)
 {
     cJSON *list = cJSON_AddArrayToObject(root, "slaves");
@@ -1009,6 +1182,8 @@ void add_slaves(cJSON *root, const std::vector<SlaveSnapshot> &slaves)
             if (s.stored_bitrate)
                 cJSON_AddNumberToObject(l, "stored_bitrate", s.stored_bitrate);
         }
+        if (s.detailed)
+            add_slave_details(o, s);
         cJSON_AddItemToArray(list, o);
     }
 }
@@ -1029,6 +1204,7 @@ std::string inactive_status_json(const std::vector<SlaveSnapshot> &slaves)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "version", 1);
     cJSON_AddBoolToObject(root, "active", false);
+    cJSON_AddNumberToObject(root, "now", static_cast<double>(wall_ms()));
     if (!slaves.empty())
         add_slaves(root, slaves);
     return print(root);
