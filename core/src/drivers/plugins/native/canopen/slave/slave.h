@@ -134,15 +134,15 @@ class Slave
     // LSS: pending node ID (0xFF unconfigured) and bit rate (kbit/s) as CANopenNode sees them, the
     // serial number, the stored values and the bit rate the link runs at. Slave thread only after
     // start().
-    uint8_t pending_node_  = 0;
-    uint16_t pending_kbit_ = 0;
-    uint32_t serial_       = 0;
-    bool serial_auto_      = false;
-    uint8_t start_node_     = 0xFF;    // the node ID this start began with
+    uint8_t pending_node_   = 0;
+    uint16_t pending_kbit_  = 0;
+    uint32_t serial_        = 0;
+    bool serial_auto_       = false;
+    uint8_t start_node_     = 0xFF; // the node ID this start began with
     const char *start_from_ = "project";
-    unsigned link_bitrate_ = 0;
-    unsigned stored_node_  = 0;
-    unsigned stored_rate_  = 0;
+    unsigned link_bitrate_  = 0;
+    unsigned stored_node_   = 0;
+    unsigned stored_rate_   = 0;
     std::string store_path_;
     std::thread thread_;
     mutable PiMutex status_mutex_;
