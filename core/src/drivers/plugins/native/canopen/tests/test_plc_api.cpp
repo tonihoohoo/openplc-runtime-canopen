@@ -24,7 +24,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 8,
+  "version": 9,
   "networks": [
     {"name": "a", "interface": "cotest-none0", "bitrate": 0, "master_node_id": 100,
      "nodes": [{"node_id": 2, "start": "master", "enabled": true,
@@ -103,11 +103,14 @@ int main()
     // Its presence tells the runtime the plugin takes per-table image sizes.
     CHECK(dlsym(plugin, "set_image_sizes") != nullptr);
     entry_t entry = reinterpret_cast<entry_t>(dlsym(plugin, "canopen_plc_api"));
-    CHECK(entry && entry(3) == nullptr);
+    CHECK(entry && entry(4) == nullptr);
     // Version 1 callers get the same table, which starts with version 1's functions.
     CHECK(entry && entry(1) == api);
     const canopen_plc_api_v2 *api2 = static_cast<const canopen_plc_api_v2 *>(entry(2));
-    CHECK(api2 && api2->v1.size >= sizeof(canopen_plc_api_v2) && api2->v1.version == 2);
+    CHECK(api2 && api2->v1.size >= sizeof(canopen_plc_api_v2) && api2->v1.version == 3);
+    const canopen_plc_api_v3 *api3 = static_cast<const canopen_plc_api_v3 *>(entry(3));
+    CHECK(api3 && static_cast<const void *>(api3) == static_cast<const void *>(api) &&
+          api3->v2.v1.size >= sizeof(canopen_plc_api_v3));
     // The table says it stays valid, so a block may keep it across PLC runs.
     CHECK(api->size >= offsetof(canopen_plc_api_v1, flags) + sizeof(api->flags));
     CHECK((api->flags & CANOPEN_PLC_FLAG_PERMANENT) != 0);
@@ -137,6 +140,20 @@ int main()
     CHECK(api->node_state(1, 2, &state) == CANOPEN_PLC_NO_DRIVER);
     CHECK(api->poll(0x1234567800010000ull, &res, nullptr, 0) == 2 &&
           res.error == CANOPEN_PLC_NO_DRIVER);
+    // The slave functions answer the same with no device running.
+    if (api3)
+    {
+        canopen_plc_slave_status ss{};
+        CHECK(api3->slave_status(1, &ss) == CANOPEN_PLC_NO_DRIVER);
+        CHECK(api3->slave_nmt(1, 1) == CANOPEN_PLC_NO_DRIVER);
+        uint8_t done = 1;
+        CHECK(api3->slave_nmt_done(1, 1, &done) == CANOPEN_PLC_NO_DRIVER);
+        uint32_t handle = 0;
+        CHECK(api3->slave_emcy_claim(1, &handle) == CANOPEN_PLC_NO_DRIVER);
+        CHECK(api3->slave_emcy(1, handle, 1, 0x4210, 0) == CANOPEN_PLC_NO_DRIVER);
+        uint32_t count = 0;
+        CHECK(api3->slave_written(1, 0x2000, 0, &count) == CANOPEN_PLC_NO_DRIVER);
+    }
 
     char dir[] = "/tmp/canopen-plcapi-XXXXXX";
     CHECK(mkdtemp(dir) != nullptr);

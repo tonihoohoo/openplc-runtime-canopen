@@ -1248,6 +1248,19 @@ bool Parser::parse_device(const cJSON *j, size_t pos, DeviceConfig &dev)
         else
             error(where, "\"on_plc_stop\" \"" + text + "\" is not one of hold, zero");
     }
+    text.clear();
+    if (get_string(j, "on_plc_stop_state", where, text, true))
+    {
+        if (text == "none")
+            dev.on_plc_stop_state = SlaveStopState::NoChange;
+        else if (text == "pre_operational")
+            dev.on_plc_stop_state = SlaveStopState::PreOperational;
+        else if (text == "stopped")
+            dev.on_plc_stop_state = SlaveStopState::Stopped;
+        else
+            error(where, "\"on_plc_stop_state\" \"" + text +
+                             "\" is not one of none, pre_operational, stopped");
+    }
     get_bool(j, "start_alone", where, dev.start_alone);
     parse_slave_lss(j, where, dev.lss);
 

@@ -362,10 +362,12 @@ enum class SlaveEventKind : uint8_t
 // Who brought the slave to its NMT state.
 enum class SlaveNmtBy : uint8_t
 {
-    Boot,      // after its start or a reset
-    Master,    // an NMT command
-    Self,      // its error behaviour (0x1029)
-    StartAlone // started without a master
+    Boot,       // after its start or a reset
+    Master,     // an NMT command
+    Self,       // its error behaviour (0x1029)
+    StartAlone, // started without a master
+    Program,    // the PLC program (CANOPEN_SLAVE_NMT)
+    PlcStop     // the NMT state set for a PLC stop (0x1029 sub 2)
 };
 
 struct SlaveEvent
@@ -381,6 +383,7 @@ struct SlaveEvent
     uint32_t abort_code  = 0;
     uint16_t code        = 0;
     uint8_t reg          = 0;
+    bool program         = false; // Emcy: raised by the PLC program
     BusState bus_state   = BusState::Unknown;
     ResetOutcome outcome = ResetOutcome::Done;
 };
@@ -446,10 +449,12 @@ struct SlaveSnapshot
     int64_t master_last    = 0; // wall time of the master's last heartbeat, 0 for none
     uint8_t error_register = 0;
     std::vector<uint16_t> emcy_active;   // error codes not yet reset, newest first
+    std::vector<uint16_t> emcy_program;  // those of them the PLC program raised
     std::vector<uint32_t> error_history; // 0x1003, newest first
-    uint16_t heartbeat_ms    = 0;        // 0x1017
-    uint16_t master_watch_ms = 0;        // 0x1016 sub 1
-    uint8_t on_master_lost   = 0;        // 0x1029 sub 1
+    uint16_t heartbeat_ms     = 0;       // 0x1017
+    uint16_t master_watch_ms  = 0;       // 0x1016 sub 1
+    uint8_t on_master_lost    = 0;       // 0x1029 sub 1
+    uint8_t on_plc_stop_state = 1;       // 0x1029 sub 2
     std::vector<SlavePdoStatus> pdos;
     std::vector<SlaveValue> values;
     std::deque<SlaveEvent> events; // newest first

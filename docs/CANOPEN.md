@@ -123,7 +123,7 @@ has `lss`.
 
 ```json
 {
-  "version": 8,
+  "version": 9,
   "networks": [
     {
       "name": "CANopen 1",
@@ -241,7 +241,7 @@ an object dictionary built from the file when the PLC starts.
 
 ```json
 {
-  "version": 8,
+  "version": 9,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "can1", "bitrate": 250000, "node_id": 5, "priority": 90,
@@ -251,6 +251,7 @@ an object dictionary built from the file when the PLC starts.
     "master_watch": {"node_id": 127, "time_ms": 300},
     "on_master_lost": "pre_operational",
     "on_plc_stop": "hold",
+    "on_plc_stop_state": "none",
     "start_alone": false,
     "lss": null,
     "objects": [
@@ -281,6 +282,7 @@ an object dictionary built from the file when the PLC starts.
 | `master_watch` | `null` or `{node_id, time_ms}`: the heartbeat consumer (0x1016) for the master's heartbeat. |
 | `on_master_lost` | What the slave does when the watched heartbeat is lost, written to 0x1029 sub 1: `pre_operational` (default), `no_change` or `stopped`. It also sends EMCY 8130h. |
 | `on_plc_stop` | The values to the master while the PLC is stopped: `hold` (default, the last values) or `zero`. |
+| `on_plc_stop_state` | The slave's own NMT state on a PLC stop, written to 0x1029 sub 2: `none` (it stays in its state), `pre_operational` (from operational only) or `stopped`. A master may write 0x1029 sub 2 (0-2) to change it until the next start. |
 | `start_alone` | `true`: the slave goes operational by itself after its boot-up (NMT startup); default `false`, it waits for the master's NMT start. |
 | `lss` | `null` (default, LSS off) or the [LSS](#lss-in-the-slave) settings `{enabled, wait_for_master, serial, bitrate_change}`. |
 | `objects` | The application objects, index 0x2000-0x5FFF, sub-index 1-254, each with a `type` as for a PDO entry or `VISIBLE_STRING`, a `direction` (`from_master`: written by the master, read by the program from a `%I` location; `to_master`: written by the program to a `%Q` location, read by the master) and an `exchange`: `pdo` (may be mapped to a PDO), `sdo` (by SDO only) or `constant` (a fixed `value`, no location). A `VISIBLE_STRING` object (at most 255 characters) is always a constant. |
@@ -299,8 +301,15 @@ Behaviour:
   synchronous ones on the SYNC. RPDOs are taken in operational only.
 - The slave stays on the bus while the PLC is stopped. A stop sends EMCY 6200h (and zeroes the
   values to the master with `on_plc_stop: zero`); the next start sends EMCY 0000h and puts the
-  objects from the master back to their defaults. NMT reset node restores every object, reset
+  objects from the master back to their defaults. With `on_plc_stop_state` the stop also changes
+  the slave's NMT state (to pre-operational from operational, or to stopped); the master's NMT start
+  brings it back. NMT reset node restores every object, reset
   communication the communication objects.
+- The PLC program can control the slave through the [slave blocks](#plc-function-blocks): a local
+  NMT start, stop or pre-operational (CiA 301 7.3.2.3; resets are refused), up to 31 emergencies
+  of its own, each on one manufacturer error-status bit and sent as EMCY with the program's code
+  and bytes 4-7, and a write counter per object from the master. The program's emergencies are
+  cleared (EMCY 0000h) on a PLC stop.
 - A new upload keeps a slave whose settings did not change running, without a new boot-up; a
   changed or removed slave leaves the bus and a changed one starts again with the new settings.
 - A failed interface is opened again every second. Service mode is refused (`busy`) on an
@@ -425,13 +434,14 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `nodes[].sdo_skipped` | Configuration SDOs the node refused in its current boot that had `on_abort` `continue` or `jump`, with `index`, `subindex` and `abort_code`. |
 | `slaves[]` | One per [slave device](#canopen-slave): `state` is the slave's own NMT state (`boot_up`, `pre_operational`, `operational`, `stopped`) or `offline` while its interface is not open (with the reason in `problem`); `master_seen` whether the watched master heartbeat is there; `last_emcy` the code of the last emergency it sent. While no master network runs, the answer is `{"version": 1, "active": false, "now": ..., "slaves": [...]}`. |
 | `slaves[].bus` | The slave's link, as `bus` of a network. |
-| `slaves[].since`, `nmt_by` | When the slave entered its NMT state and why: `boot` (its boot-up), `master` (an NMT command), `self` (it left operational by itself, such as on the master's heartbeat lost) or `start_alone`. |
+| `slaves[].since`, `nmt_by` | When the slave entered its NMT state and why: `boot` (its boot-up), `master` (an NMT command), `self` (it left operational by itself, such as on the master's heartbeat lost), `start_alone`, `program` (the PLC program's slave NMT block) or `plc_stop` (`on_plc_stop_state` on a PLC stop). |
 | `slaves[].master_last_seen` | When the watched master heartbeat was last received; left out before the first one. |
-| `slaves[].error_register`, `emcy_active`, `error_history` | 0x1001, the emergency codes active now and 0x1003 (newest first, each entry with the code in its low 16 bits). |
+| `slaves[].error_register`, `emcy_active`, `emcy_program`, `error_history` | 0x1001, the emergency codes active now, those of them the PLC program raised, and 0x1003 (newest first, each entry with the code in its low 16 bits). |
+| `slaves[].on_plc_stop_state` | The value in use of 0x1029 sub 2: `none`, `pre_operational`, `stopped` or `other`. |
 | `slaves[].heartbeat_ms`, `master_watch_ms`, `on_master_lost` | The values in use of 0x1017, 0x1016 sub 1 (0 when not watched) and 0x1029 sub 1 (`pre_operational`, `no_change`, `stopped` or `other`), as the master may have written them. |
 | `slaves[].pdos` | Every PDO with its parameters in use: `dir` `rx` or `tx`, `pdo` 1-4, `cob_id`, `valid`, `transmission`, `inhibit_100us` (TPDOs), `event_ms`, the `mapping` and the `frames` received or sent with the time of the `last` one. |
 | `slaves[].values` | The current value of every object except strings, `data` as little-endian hex bytes. |
-| `slaves[].events` | The last 50 events of the slave, newest first: `on_bus`, `nmt` (with `state` and `by`), `reset` (`what` `node` or `communication`), `sdo_write` (a master's SDO download, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `heartbeat` (the master's heartbeat, `seen` or lost), `emcy` (with `code` and `register`), `emcy_reset`, `plc` (`running`), `bus_state` and `bus_reset` (with `outcome`). |
+| `slaves[].events` | The last 50 events of the slave, newest first: `on_bus`, `nmt` (with `state` and `by`), `reset` (`what` `node` or `communication`), `sdo_write` (a master's SDO download, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `heartbeat` (the master's heartbeat, `seen` or lost), `emcy` (with `code`, `register` and `program` true for the program's own), `emcy_reset`, `plc` (`running`), `bus_state` and `bus_reset` (with `outcome`). |
 | `events` | The last 64 events of the network, newest first: `boot_ok` (with `waits` true when the node waits for the PLC program's start), `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort` (with `policy` `stop`, `continue` or `jump`), `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link, with `outcome` `done`, `not_permitted` or `failed`, and `cause` `bus_off`, `bit_rate` or `tx_stalled`), `sdo_write` (a client's SDO write, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `nmt_command` (an NMT command, with `command` and `source` `client` or `program`), `service` (service mode opened or closed, with `open`), `node_on` and `node_off` (the PLC program turned the node on or off), `lss` (a node ID given over LSS or the device not found, with the node's `lss` fields; a device still not found is not repeated). |
 
 Counters and lists start again when the PLC starts. The status thread never blocks the PLC scan
@@ -529,8 +539,8 @@ own `CANOPEN_NODE_ENABLE`, `CANOPEN_NODE_STATUS`, `CANOPEN_NETWORK_STATE`) lets 
 read and write a node's objects, send NMT commands, turn nodes on and off, and read node and
 network states and emergencies while it runs. The editor's CANopen documentation describes the blocks; this is what the plugin does for them.
 
-- The plugin exports `canopen_plc_api(version)`, a table of C functions (`plc_api.h`, version 2;
-  version 1 callers get the same table, which starts with version 1's functions). The blocks find
+- The plugin exports `canopen_plc_api(version)`, a table of C functions (`plc_api.h`, version 3;
+  version 1 and 2 callers get the same table, which starts with their functions). The blocks find
   the loaded plugin by its SONAME `libcanopen_plugin.so`. The plugin is linked with `-z nodelete`,
   so the runtime's reload at each PLC start never unmaps it, and the table's `flags` say so
   (`CANOPEN_PLC_FLAG_PERMANENT`): the blocks then look the table up once and keep it. Without that
@@ -559,6 +569,16 @@ network states and emergencies while it runs. The editor's CANopen documentation
 - NMT from a block is handled as from the online tools (a manual stop or pre-operational is not a
   loss). Block writes and NMT commands are logged and recorded as `sdo_write` and `nmt_command`
   events, at most once a second per node and object.
+- The slave blocks `CANOPEN_SLAVE_STATUS`, `CANOPEN_SLAVE_NMT`, `CANOPEN_SLAVE_EMCY` and
+  `CANOPEN_SLAVE_WRITTEN` name a [slave device](#canopen-slave) by its place in `devices` (from 1);
+  an unknown one answers `NET_ID_UNKNOWN`, and no slave running `NO_DRIVER`. The status is read
+  from a copy the slave's thread updates every 100 ms and on each NMT change (state, node ID, master heartbeat, link state,
+  error register, active emergencies). An NMT request or emergency is taken by the slave's thread
+  on its next tick (1 ms). An emergency keeps one of 31 slots from its first call to the PLC stop;
+  0000h, 6200h and 8130h are refused (`WRONG_PARAMETER`); a slot from an earlier PLC run, or a
+  claim with all 31 taken, is answered `REQUEST_ERROR`. The error register follows the codes' class (CiA 301 7.5.2.2). The write
+  counter counts every accepted write of an object from the master, by SDO or RPDO, also of the
+  same value.
 
 ## Installing a release
 
@@ -691,9 +711,9 @@ refuses a file with `devices`.
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
 | `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, a running node that missed the master's reset, emergencies, late PDOs, the status and its socket, the online tools (SDO reads and writes, a refused write,
 pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), a node started by the program (waiting, started, waiting again after a reset) and a node turned on and off (booted, stopped, pulled without a loss, skipped by NMT to every node), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
-| `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, a kept table that stays the same across reloads, and version 2's table serving version 1. |
+| `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, a kept table that stays the same across reloads, version 3's table serving versions 1 and 2, and the slave functions with no slave running. |
 | `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states, the emergency ring, and the node control (wanted states, run states, network counts), with no allocation on the scan's side. |
-| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, the status fields (NMT source, SDO writes and refusals, values, PDO counts and remap, active emergencies and the error register), error passive and bus-off on a stood-in link (EMCY 8120h and 8140h, the link reset without a new boot-up), the plugin's own master booting and running the slave, and with LSS: silence while unconfigured, fastscan, configure, store, the stored values across restarts and reset node, reset communication taking a new node ID, forget, a refused bit rate, a failed store, and the stored file's checks. |
+| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, the status fields (NMT source, SDO writes and refusals, values, PDO counts and remap, active emergencies and the error register), the program's NMT requests, emergencies and write counters across a PLC restart, 0x1029 sub 2 on a PLC stop, error passive and bus-off on a stood-in link (EMCY 8120h and 8140h, the link reset without a new boot-up), the plugin's own master booting and running the slave, and with LSS: silence while unconfigured, fastscan, configure, store, the stored values across restarts and reset node, reset communication taking a new node ID, forget, a refused bit rate, a failed store, and the stored file's checks. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
