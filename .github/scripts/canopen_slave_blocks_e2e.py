@@ -291,6 +291,13 @@ def main() -> None:
         and not program_codes(s),
     )
 
+    # A start sent while the PLC is still stopping is ignored, so wait for STOPPED.
+    end = time.monotonic() + 20
+    while "STOPPED" not in str(call("/status", token).get("status", "")):
+        if time.monotonic() > end:
+            sys.exit("FAIL: PLC stopped")
+        time.sleep(0.3)
+    print("ok: PLC stopped")
     start = bus.mark()
     call("/start-plc", token)
     expect("EMCY 0000h when the PLC starts", bus.wait(start, is_emcy(0x0000), 20) is not None, True)
