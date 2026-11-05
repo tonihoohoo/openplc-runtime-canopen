@@ -1,12 +1,15 @@
 # OpenPLC Runtime v4
 
-> **CANopen edition.** This is an unofficial fork of the OpenPLC Runtime that adds a CANopen master.
+> **CANopen edition.** This is an unofficial fork of the OpenPLC Runtime that adds a CANopen master
+> and slave.
 > It is not made or supported by the upstream OpenPLC project.
 >
 > The `canopen` plugin drives CANopen nodes on a Linux SocketCAN interface (such as `can0`): it checks
 > and configures each node at start-up with SDOs, exchanges PDOs with the PLC program's located
 > variables every scan cycle, supervises the nodes (heartbeat, reboot of a lost node, bus-off and
-> stall recovery) and reports their status to the editor. The configuration is made in the
+> stall recovery) and reports their status to the editor. On another interface it can make the
+> runtime a CANopen slave whose objects the program reads and writes
+> ([CANopen slave](docs/CANOPEN.md#canopen-slave)). The configuration is made in the
 > [OpenPLC Editor (CANopen edition)](https://github.com/tonihoohoo/openplc-editor-canopen); everything
 > else works as in upstream OpenPLC Runtime.
 >
@@ -163,7 +166,7 @@ The processes communicate via Unix domain sockets (`/run/runtime/plc_runtime.soc
 - [Debug Protocol](docs/DEBUG_PROTOCOL.md) - WebSocket debug interface
 - [Security](docs/SECURITY.md) - Authentication, TLS, and file validation
 - [Plugin System](docs/PLUGIN_VENV_GUIDE.md) - Hardware I/O plugins
-- [CANopen](docs/CANOPEN.md) - CANopen master plugin on SocketCAN
+- [CANopen](docs/CANOPEN.md) - CANopen master and slave plugin on SocketCAN
 - [CANopen releases](docs/CANOPEN_RELEASES.md) - Publishing and installing this fork's releases
 - [Development Guide](docs/DEVELOPMENT.md) - Contributing and development setup
 

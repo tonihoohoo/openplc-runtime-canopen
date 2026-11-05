@@ -38,6 +38,7 @@
 #include "plugin_types.h"
 #include "process_image.h"
 #include "requests.h"
+#include "slave.h"
 #include "status.h"
 #include "status_server.h"
 
@@ -55,6 +56,7 @@ struct Running
     std::vector<std::unique_ptr<ProcessImage>> images;
     std::vector<std::unique_ptr<NetworkStatus>> statuses;
     std::vector<std::unique_ptr<Bus>> buses;
+    std::vector<Slave *> slaves; // owned by g_slaves
 };
 
 plugin_runtime_args_t g_args;
@@ -67,6 +69,9 @@ bool g_starting = false; // a PLC start is under way; service mode stays closed
 std::chrono::steady_clock::time_point g_last_request;
 std::atomic<bool> g_active{false};
 std::unique_ptr<StatusServer> g_server;
+// The slaves stay on the bus while the PLC is stopped; changed under g_mutex at a PLC start, or
+// in init when the new program has another configuration.
+std::vector<std::unique_ptr<Slave>> g_slaves;
 
 constexpr std::chrono::minutes kServiceIdle{5};
 
@@ -107,13 +112,60 @@ bool write_file(const std::string &path, const std::string &text)
     return static_cast<bool>(out);
 }
 
+std::vector<SlaveSnapshot> slave_snapshots()
+{
+    std::vector<SlaveSnapshot> out;
+    for (const auto &s : g_slaves)
+        out.push_back(s->snapshot());
+    return out;
+}
+
 std::string status_answer(const Running &run)
 {
     std::vector<NetworkSnapshot> nets;
     nets.reserve(run.statuses.size());
     for (const auto &s : run.statuses)
         nets.push_back(s->snapshot());
-    return status_json(nets, wall_ms());
+    return status_json(nets, wall_ms(), slave_snapshots());
+}
+
+// Stops the slaves the configuration `cfg` does not run unchanged (all of them without one).
+void drop_changed_slaves(const Config *cfg)
+{
+    std::vector<std::unique_ptr<Slave>> gone;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (auto it = g_slaves.begin(); it != g_slaves.end();)
+        {
+            bool keep = false;
+            if (cfg)
+                for (const auto &dev : cfg->devices)
+                    keep = keep || dev.source == (*it)->config().source;
+            if (keep)
+                ++it;
+            else
+            {
+                gone.push_back(std::move(*it));
+                it = g_slaves.erase(it);
+            }
+        }
+    }
+    for (auto &s : gone)
+        s->stop();
+}
+
+// After a new upload: slaves the new program no longer runs leave the bus before it starts.
+void check_slaves_at_init()
+{
+    if (g_slaves.empty())
+        return;
+    Config cfg;
+    std::vector<std::string> errors;
+    const char *path = g_args.plugin_specific_config_file_path;
+    if (path && *path && load_config(path, cfg, errors))
+        drop_changed_slaves(&cfg);
+    else
+        drop_changed_slaves(nullptr);
 }
 
 // Stops the buses of a run taken out of g_run or g_service.
@@ -181,7 +233,7 @@ class PluginRequests : public Requests
             return status_answer(*g_run);
         if (g_service)
             return status_answer(*g_service);
-        return R"({"version":1,"active":false})";
+        return inactive_status_json(slave_snapshots());
     }
 
     Lookup network(size_t net, unsigned node, ClientQueue *&queue) override
@@ -220,6 +272,9 @@ class PluginRequests : public Requests
             return "plc_running";
         if (g_service)
             return "busy";
+        for (const auto &s : g_slaves)
+            if (s->config().interface == req.interface)
+                return "busy";
         return open_service(req);
     }
 
@@ -272,6 +327,7 @@ int do_init(void *args)
     g_have_args = true;
     set_log_sink(runtime_sink);
     route_lely_diagnostics();
+    check_slaves_at_init();
     if (!g_server)
     {
         std::unique_ptr<StatusServer> server(
@@ -349,6 +405,35 @@ int do_start_loop()
     for (const auto &w : run->cfg.warnings)
         log_warn("%s", w.c_str());
 
+    // Slaves: the unchanged ones go on, the others are replaced.
+    drop_changed_slaves(&run->cfg);
+    for (const DeviceConfig &dev : run->cfg.devices)
+    {
+        Slave *found = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            for (auto &s : g_slaves)
+                if (s->config().source == dev.source)
+                    found = s.get();
+        }
+        if (!found)
+        {
+            std::unique_ptr<Slave> slave(
+                new Slave(dev, socket_slave_link(dev.interface, dev.bitrate)));
+            std::string problem;
+            if (!slave->start(problem))
+            {
+                log_error("%s: %s", dev.label().c_str(), problem.c_str());
+                return -1;
+            }
+            found = slave.get();
+            std::lock_guard<std::mutex> lock(g_mutex);
+            g_slaves.push_back(std::move(slave));
+        }
+        found->set_plc_running(true);
+        run->slaves.push_back(found);
+    }
+
     const size_t count = run->cfg.networks.size();
     run->layouts.reserve(count);
     for (size_t i = 0; i < count; ++i)
@@ -387,7 +472,7 @@ int do_start_loop()
         g_run = std::move(run);
     }
     g_active.store(true, std::memory_order_release);
-    log_info("CANopen master running, %zu network(s)", count);
+    log_info("CANopen running, %zu network(s), %zu slave(s)", count, g_run->slaves.size());
     return 0;
 }
 
@@ -401,8 +486,10 @@ void do_stop_loop()
         std::lock_guard<std::mutex> lock(g_mutex);
         run = std::move(g_run);
     }
+    for (Slave *s : run->slaves)
+        s->set_plc_running(false);
     stop_run(std::move(run));
-    log_info("CANopen master stopped");
+    log_info("CANopen stopped");
 }
 
 // The function block side. Called from the PLC scan, which only runs between start_loop and
@@ -652,6 +739,8 @@ CANOPEN_EXPORT void cycle_start(void)
     {
         for (auto &image : g_run->images)
             image->copy_to_plc(g_args);
+        for (Slave *s : g_run->slaves)
+            s->copy_to_plc(g_args);
     }
     catch (...)
     {
@@ -666,6 +755,8 @@ CANOPEN_EXPORT void cycle_end(void)
     {
         for (auto &image : g_run->images)
             image->copy_from_plc(g_args);
+        for (Slave *s : g_run->slaves)
+            s->copy_from_plc(g_args);
     }
     catch (...)
     {

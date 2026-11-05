@@ -17,7 +17,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 5;
+constexpr int kConfigVersion = 6;
 
 // One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
 // location: its bits are skipped on receive and sent as zeros.
@@ -156,11 +156,113 @@ struct NetworkConfig
     std::string label() const; // "network \"CANopen 1\" (can0)"
 };
 
+// ---- slave (the `devices` list) ----
+
+enum class SlaveDirection
+{
+    FromMaster, // the master writes, the slave's PLC reads (%I)
+    ToMaster    // the slave's PLC writes, the master reads (%Q)
+};
+
+enum class SlaveExchange
+{
+    Pdo,     // mappable into a PDO, also read or written by SDO
+    Sdo,     // by SDO only
+    Constant // a fixed value, no IEC location
+};
+
+// One application object of the slave (0x2000-0x5FFF).
+struct SlaveObject
+{
+    uint16_t index   = 0;
+    uint8_t subindex = 0;
+    std::string name;
+    CoType type        = CoType::UNSIGNED8;
+    bool string        = false; // VISIBLE_STRING: constants only
+    SlaveDirection dir = SlaveDirection::FromMaster;
+    SlaveExchange exch = SlaveExchange::Pdo;
+    IecLocation location; // not for constants
+    uint64_t value = 0;   // raw little-endian bits of the default or constant value
+    std::string text;     // the value of a string constant
+    bool has_min = false;
+    bool has_max = false;
+    uint64_t min = 0; // raw bits, compared as the object's type
+    uint64_t max = 0;
+    unsigned bytes() const; // size in the object dictionary
+};
+
+struct SlavePdoEntry
+{
+    uint16_t index   = 0;
+    uint8_t subindex = 0;
+};
+
+// A PDO as the slave sees it: an RPDO is received from the master, a TPDO sent to it.
+struct SlavePdo
+{
+    unsigned number         = 0; // 1-4
+    uint32_t cob_id         = 0; // 11-bit
+    unsigned transmission   = 255;
+    unsigned inhibit_100us  = 0; // TPDO only
+    unsigned event_timer_ms = 0;
+    std::vector<SlavePdoEntry> entries;
+};
+
+enum class OnMasterLost
+{
+    PreOperational,
+    NoChange,
+    Stopped
+};
+
+enum class SlaveOnStop
+{
+    Hold,
+    Zero
+};
+
+constexpr unsigned kSlavePdos = 4;
+
+struct DeviceConfig
+{
+    std::string name;
+    std::string interface;
+    unsigned bitrate = 0; // bit/s; 0 leaves the link as it is
+    unsigned node_id = 0;
+    int priority     = kDefaultPriority;
+    std::string device_name;
+    std::string software_version;
+    uint32_t vendor_id          = 0;
+    uint32_t product_code       = 0;
+    uint32_t revision           = 0;
+    unsigned heartbeat_ms       = 1000;
+    unsigned master_node_id     = 0; // 0: the master's heartbeat is not watched
+    unsigned master_watch_ms    = 0;
+    OnMasterLost on_master_lost = OnMasterLost::PreOperational;
+    SlaveOnStop on_plc_stop     = SlaveOnStop::Hold;
+    bool start_alone            = false;
+    std::vector<SlaveObject> objects;
+    std::vector<SlavePdo> rpdos;
+    std::vector<SlavePdo> tpdos;
+    // The entry's JSON text: a running slave with the same text is kept across a PLC restart.
+    std::string source;
+    std::string label() const; // "slave \"io\" (can1)"
+    const SlaveObject *find(uint16_t index, uint8_t subindex) const;
+};
+
 struct Config
 {
     std::vector<NetworkConfig> networks;
+    std::vector<DeviceConfig> devices;
     std::vector<std::string> warnings;
 };
+
+// Whether this build has the CANopen slave (CANopenNode); without it a file with devices is
+// refused.
+bool slave_supported();
+
+// Compares two raw values of `type` as that type: <0, 0 or >0.
+int compare_raw(CoType type, uint64_t a, uint64_t b);
 
 // Parses and validates the JSON text. Returns false with one message per problem in `errors`;
 // warnings go to cfg.warnings.

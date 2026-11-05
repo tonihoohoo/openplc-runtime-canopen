@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// slave.h - one CANopen slave of the runtime, on CANopenNode: its own thread receives the frames,
+// runs the stack and sends, and exchanges values with the PLC scan through triple buffers, so the
+// scan never waits for it. The slave stays on the bus while the PLC is stopped (heartbeat, NMT,
+// SDO), sends EMCY 6200h on a PLC stop and 0000h when the PLC runs again, and is replaced only when
+// a PLC start brings a different configuration.
+
+#ifndef CANOPEN_SLAVE_H
+#define CANOPEN_SLAVE_H
+
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+
+#include "config.h"
+#include "image_io.h"
+#include "pi_mutex.h"
+#include "plugin_types.h"
+#include "status.h"
+
+namespace lely
+{
+namespace io
+{
+class VirtualCanController;
+}
+} // namespace lely
+
+namespace canopen_plugin
+{
+
+// The slave's way to the bus. read() returns 1 with a frame, 0 on timeout, -1 on an error.
+class SlaveLink
+{
+  public:
+    struct Frame
+    {
+        uint32_t id = 0; // 11-bit; kRtr for a remote frame
+        uint8_t dlc = 0;
+        uint8_t data[8]{};
+    };
+    static constexpr uint32_t kRtr = 0x8000;
+
+    virtual ~SlaveLink() = default;
+    // Opens the link; false with a reason (the slave retries).
+    virtual bool open(std::string &problem)        = 0;
+    virtual void close()                           = 0;
+    virtual int read(Frame &frame, int timeout_ms) = 0;
+    // 0 when the frame was queued.
+    virtual int write(const Frame &frame) = 0;
+};
+
+// A SocketCAN interface, brought up at `bitrate` (0 keeps the link's own) like a network's.
+std::unique_ptr<SlaveLink> socket_slave_link(const std::string &interface, unsigned bitrate);
+// Lely's in-process bus, for the tests.
+std::unique_ptr<SlaveLink> virtual_slave_link(std::shared_ptr<lely::io::VirtualCanController> bus);
+
+class Slave
+{
+  public:
+    Slave(const DeviceConfig &dev, std::unique_ptr<SlaveLink> link);
+    ~Slave();
+    Slave(const Slave &)            = delete;
+    Slave &operator=(const Slave &) = delete;
+
+    // Builds the object dictionary and starts the thread. False with a reason.
+    bool start(std::string &problem);
+    // Ends the thread (the slave leaves the bus). Idempotent.
+    void stop();
+
+    const DeviceConfig &config() const
+    {
+        return dev_;
+    }
+
+    // ---- PLC scan (no allocation, blocking or logging) ----
+    // Values from the master into %I.
+    void copy_to_plc(const plugin_runtime_args_t &rt);
+    // %Q into the values to the master.
+    void copy_from_plc(const plugin_runtime_args_t &rt);
+
+    // PLC start and stop (EMCY 0000h and 6200h, and the values to the master on a stop).
+    void set_plc_running(bool running);
+
+    SlaveSnapshot snapshot() const;
+
+  private:
+    struct Impl;
+    void thread_main();
+
+    DeviceConfig dev_;
+    std::unique_ptr<SlaveLink> link_;
+    std::unique_ptr<Impl> impl_;
+    TripleBuffer in_;  // values from the master, slave thread -> scan
+    TripleBuffer out_; // values to the master, scan -> slave thread
+    std::atomic<bool> plc_running_{false};
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+    mutable PiMutex status_mutex_;
+    SlaveSnapshot status_;
+};
+
+} // namespace canopen_plugin
+
+#endif // CANOPEN_SLAVE_H
