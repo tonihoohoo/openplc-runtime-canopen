@@ -3,9 +3,11 @@
 
 Needs the slave e2e project running in the runtime: node 5 on the interface, a program that copies
 0x2000:1 (from the master) to 0x2100:1, the parameter 0x2000:3 to 0x2100:2 and the eight bits of the
-packed 0x2000:4 to those of the packed 0x2100:3, RPDO1 0x205 and an event TPDO1 0x185, a heartbeat
-of 100 ms and a watch of master node 127. This script plays the master: SDO reads and writes with
-range checks, NMT start, an RPDO in and the TPDO back (packed bits included), the master
+packed 0x2000:4 to those of the packed 0x2100:3, RPDO1 0x205 and an event TPDO1 0x185, the copy
+0x2100:4 of 0x2000:1 in an event TPDO5 whose COB-ID the master gives, a heartbeat of 100 ms and a
+watch of master node 127. This script plays the master: SDO reads and writes with
+range checks, NMT start, an RPDO in and the TPDO back (packed bits included), TPDO5 enabled by a
+COB-ID written by SDO, the master
 heartbeat lost and back, the PLC stopped and started, and the slave in /api/canopen/status with its
 NMT source, SDO writes, PDO counts, values and active EMCY codes.
 
@@ -28,6 +30,7 @@ CONTEXT = ssl.create_default_context()
 CONTEXT.check_hostname = False
 CONTEXT.verify_mode = ssl.CERT_NONE
 NODE = 5
+TPDO5_COB_ID = 0x1C5
 MASTER = 127
 FRAME = struct.Struct("=IB3x8s")
 
@@ -197,6 +200,8 @@ def main() -> None:
     expect("parameter above its maximum", sdo_write(bus, 0x2000, 3, 40000, 2), 0x06090031)
     expect("object to the master is read-only", sdo_write(bus, 0x2100, 1, 1, 2), 0x06010002)
     expect("store parameters is refused", sdo_write(bus, 0x1010, 1, 0x65766173, 4), 0x06020000)
+    expect("TPDO5 starts without a COB-ID", sdo_read(bus, 0x1804, 1), (0, 0x80000000))
+    expect("TPDO5 given a COB-ID by the master", sdo_write(bus, 0x1804, 1, TPDO5_COB_ID, 4), 0)
     wait_status(
         "status lists the SDO writes, the refusals and the written value",
         lambda s: written(s, 0x2000, 3, True)
@@ -233,6 +238,12 @@ def main() -> None:
             lambda f: f[0] == 0x180 + NODE and f[1][:5] == struct.pack("<hHB", 0x1234, 1234, 0xA5),
             5,
         )
+        is not None,
+        True,
+    )
+    expect(
+        "TPDO5 on the COB-ID the master gave carries the RPDO value",
+        bus.wait(start, lambda f: f[0] == TPDO5_COB_ID and f[1][:2] == struct.pack("<h", 0x1234), 5)
         is not None,
         True,
     )
