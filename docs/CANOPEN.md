@@ -90,7 +90,7 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 
 ```json
 {
-  "version": 7,
+  "version": 8,
   "networks": [
     {
       "name": "CANopen 1",
@@ -153,7 +153,7 @@ change both together.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 7. Older files are refused; build the project again with a matching editor. |
+| `version` | Format version, 8. Older files are refused; build the project again with a matching editor. |
 | `networks`, `devices` | The master networks and the [slave devices](#canopen-slave); either list may be empty or left out, not both. |
 | `interface` | SocketCAN interface, unique per network. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
@@ -206,7 +206,7 @@ an object dictionary built from the file when the PLC starts.
 
 ```json
 {
-  "version": 7,
+  "version": 8,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "can1", "bitrate": 250000, "node_id": 5, "priority": 90,

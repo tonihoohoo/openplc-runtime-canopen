@@ -45,7 +45,7 @@ namespace
 {
 
 const char *const kConfig = R"({
-  "version": 7,
+  "version": 8,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "vcan-slave", "bitrate": 0, "node_id": 5,
@@ -819,7 +819,7 @@ void check_bus_off(const DeviceConfig &dev)
 
 // Our master boots the slave and exchanges PDOs with it.
 const char *const kMasterConfig = R"({
-  "version": 7,
+  "version": 8,
   "networks": [{
     "name": "line", "interface": "vcan-master", "bitrate": 0, "master_node_id": 127,
     "heartbeat_producer_ms": 100,
@@ -898,7 +898,7 @@ constexpr uint32_t kLssMaster = 0x7E5;
 constexpr uint32_t kLssSlave  = 0x7E4;
 
 const char *const kLssConfig = R"({
-  "version": 7,
+  "version": 8,
   "networks": [],
   "devices": [{
     "name": "lss", "interface": "vcan-lss", "bitrate": 500000, "node_id": 5,
