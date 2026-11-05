@@ -367,8 +367,33 @@ jobs:
           python3 .github/scripts/canopen_slave_e2e.py --user ci --password ci-canopen-e2e \
             --interface vcan0
 
+      - name: Upload the slave LSS project with the editor CLI
+        id: slave_lss
+        working-directory: editor
+        env:
+          OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
+        run: |
+          # An editor branch without LSS in the slave has no such project; the check is skipped.
+          if [ ! -d ./e2e/fixtures/canopen-slave-lss/project ]; then
+            echo "::notice::The editor branch has no slave LSS project; skipped"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli upload \
+            ./e2e/fixtures/canopen-slave-lss/project --host 127.0.0.1 --yes \
+            --user-data "$RUNNER_TEMP/editor-data" --json
+          sudo cat ../build/plugins/canopen.json
+
+      - name: LSS in the slave under a host LSS master
+        if: steps.slave_lss.outputs.present == 'true'
+        run: |
+          python3 .github/scripts/canopen_slave_lss_e2e.py --user ci --password ci-canopen-e2e \
+            --interface vcan0
+
       - name: Upload the first project again
-        if: steps.control.outputs.present == 'true' || steps.slave.outputs.present == 'true'
+        if: >-
+          steps.control.outputs.present == 'true' || steps.slave.outputs.present == 'true' ||
+          steps.slave_lss.outputs.present == 'true'
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e

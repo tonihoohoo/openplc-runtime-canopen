@@ -275,6 +275,12 @@ struct FakeRequests : Requests
     {
         ++closes;
     }
+    std::string slave_lss_forget(const std::string &name) override
+    {
+        forgotten = name;
+        return name == "io" ? "" : "unknown_slave";
+    }
+    std::string forgotten;
 };
 
 uint64_t job_id(const std::string &answer)
@@ -404,6 +410,12 @@ void test_requests()
          R"({"op":"service_open","interface":"","bitrate":0,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2]})"})
         CHECK(handle_request(bad, t) == "{\"error\":\"bad_request\"}");
     CHECK(handle_request("{\"op\":\"service_close\"}", t) == "{\"ok\":true}" && t.closes == 1);
+    CHECK(handle_request(R"({"op":"slave_lss_forget","slave":"io"})", t) == "{\"ok\":true}" &&
+          t.forgotten == "io");
+    CHECK(handle_request(R"({"op":"slave_lss_forget","slave":"x"})", t) ==
+          "{\"error\":\"unknown_slave\"}");
+    CHECK(handle_request(R"({"op":"slave_lss_forget","slave":5})", t) ==
+          "{\"error\":\"bad_request\"}");
 
     std::vector<uint8_t> bytes;
     CHECK(from_hex("00ff7F", bytes) && to_hex(bytes) == "00ff7f");

@@ -9,7 +9,8 @@
 > variables every scan cycle, supervises the nodes (heartbeat, reboot of a lost node, bus-off and
 > stall recovery) and reports their status to the editor. On another interface it can make the
 > runtime a CANopen slave whose objects the program reads and writes
-> ([CANopen slave](docs/CANOPEN.md#canopen-slave)). The configuration is made in the
+> ([CANopen slave](docs/CANOPEN.md#canopen-slave)), which an LSS master can give its node ID and
+> bit rate ([LSS in the slave](docs/CANOPEN.md#lss-in-the-slave)). The configuration is made in the
 > [OpenPLC Editor (CANopen edition)](https://github.com/tonihoohoo/openplc-editor-canopen); everything
 > else works as in upstream OpenPLC Runtime.
 >
@@ -136,7 +137,7 @@ The runtime compiles uploaded programs into shared libraries and loads them dyna
 - **Real-Time Execution** - Deterministic scan cycles with SCHED_FIFO priority scheduling
 - **WebSocket Debug Interface** - Real-time variable inspection and forcing via Editor
 - **Plugin System** - Extensible I/O drivers for various hardware platforms
-- **Multi-Architecture** - Prebuilt binaries for x86_64, ARM64, and ARM32 platforms. Can run on virtually anything that can run Linux 
+- **Multi-Architecture** - Prebuilt binaries for x86_64, ARM64, and ARM32 platforms. Can run on virtually anything that can run Linux
 - **Docker Support** - Multi-arch container images
 - **Security** - TLS encryption, JWT authentication, comprehensive file upload validation
 

@@ -75,7 +75,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [{
     "name": "test", "interface": "vcan-test", "bitrate": 0,
     "sync": {"mode": "plc_cycle"},
@@ -365,7 +365,7 @@ NodeStatus node_status(const NetworkStatus &status, unsigned id)
 }
 
 const char *kWatchConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [{
     "name": "watch", "interface": "vcan-test", "bitrate": 0,
     "heartbeat_producer_ms": 50,
@@ -423,7 +423,7 @@ void check_master_watch(std::shared_ptr<lely::io::VirtualCanController> vbus,
 }
 
 const char *kOptionsConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [{
     "name": "options", "interface": "vcan-test", "bitrate": 0,
     "on_node_error": "stop", "boot_timeout_ms": 1000, "sdo_timeout_ms": 500,
@@ -1075,6 +1075,10 @@ class BusRequests : public Requests
         return "plc_running";
     }
     void service_close() override {}
+    std::string slave_lss_forget(const std::string &name) override
+    {
+        return name == "io" ? "lss_off" : "unknown_slave";
+    }
 
   private:
     NetworkStatus &status_;
@@ -1121,7 +1125,7 @@ std::string nmt_request(unsigned node, const char *command)
 }
 
 const char *kPlcConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [{
     "name": "plc", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
@@ -1289,7 +1293,7 @@ void check_plc_blocks(std::shared_ptr<lely::io::VirtualCanController> vbus, cons
 }
 
 const char *kControlConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [{
     "name": "control", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
@@ -1582,7 +1586,7 @@ void check_session_failure(std::shared_ptr<lely::io::VirtualCanController> vbus,
 }
 
 const char *kBootConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [{
     "name": "boot", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
@@ -1880,6 +1884,10 @@ int main()
         }
         CHECK(ask(sock, R"({"op":"nmt"})") == R"({"error":"bad_request"})");
         CHECK(ask(sock, R"({"op":"teleport"})") == R"({"error":"unknown_op"})");
+        CHECK(ask(sock, R"({"op":"slave_lss_forget","slave":"pump"})") ==
+              R"({"error":"unknown_slave"})");
+        CHECK(ask(sock, R"({"op":"slave_lss_forget","slave":"io"})") == R"({"error":"lss_off"})");
+        CHECK(ask(sock, R"({"op":"slave_lss_forget"})") == R"({"error":"bad_request"})");
         CHECK(ask(sock, "nonsense").find("error") != std::string::npos);
     }
 

@@ -17,8 +17,8 @@ extern "C"
 {
 #endif
 
-// The stack's features. Everything else (SDO client, TIME, LSS, LEDs, storage, gateway, node
-// guarding, SRDO, GFC) is left out.
+// The stack's features. Everything else (SDO client, TIME, LSS master, LEDs, storage, gateway,
+// node guarding, SRDO, GFC) is left out. The LSS slave runs only when the slave's LSS is on.
 #define CO_MULTIPLE_OD
 #define CO_CONFIG_NMT (0)
 #define CO_CONFIG_HB_CONS                                                                          \
@@ -36,7 +36,7 @@ extern "C"
      CO_CONFIG_FLAG_OD_DYNAMIC)
 // Application objects have sub-indexes up to 254; each may request its event-driven TPDO.
 #define OD_FLAGS_PDO_SIZE 32U
-#define CO_CONFIG_LSS (0)
+#define CO_CONFIG_LSS (CO_CONFIG_LSS_SLAVE)
 #define CO_CONFIG_LEDS (0)
 #define CO_CONFIG_STORAGE (0)
 #define CO_CONFIG_GTW (0)

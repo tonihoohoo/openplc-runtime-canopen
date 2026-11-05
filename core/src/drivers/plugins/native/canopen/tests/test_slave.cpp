@@ -5,7 +5,10 @@
 // fake PLC image on the scan side: boot-up and heartbeat, identity, SDO range checks and abort
 // codes, a segmented string upload, PDOs both ways, SYNC TPDOs, remapping by the CiA 301 procedure,
 // master loss and return, PLC stop and start, and reset node. Then our own master boots the slave
-// from the configuration the slave's EDS would give and exchanges PDOs with it.
+// from the configuration the slave's EDS would give and exchanges PDOs with it. Last, LSS: an LSS
+// master on raw frames finds an unconfigured slave by fastscan, gives it a node ID and a bit rate
+// and stores them; selective switch, inquire, a node ID change on a configured slave, store
+// failure, bit rate refused, forget and LSS off.
 
 #include <atomic>
 #include <chrono>
@@ -27,6 +30,7 @@
 #include "check.h"
 #include "config.h"
 #include "log.h"
+#include "lss_store.h"
 #include "master_dcf.h"
 #include "process_image.h"
 #include "slave.h"
@@ -40,7 +44,7 @@ namespace
 {
 
 const char *const kConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "vcan-slave", "bitrate": 0, "node_id": 5,
@@ -277,13 +281,13 @@ uint32_t le32(const uint8_t *p)
 }
 
 // An expedited SDO upload: true with the value, false with the abort code in `value`.
-bool sdo_read(Probe &p, uint16_t index, uint8_t sub, uint32_t &value)
+bool sdo_read(Probe &p, uint16_t index, uint8_t sub, uint32_t &value, uint32_t node = kNode)
 {
     size_t m = p.mark();
-    p.send(kSdoRx,
+    p.send(0x600 + node,
            {0x40, static_cast<uint8_t>(index), static_cast<uint8_t>(index >> 8), sub, 0, 0, 0, 0});
     Frame f;
-    if (!p.wait_id(m, kSdoTx, milliseconds(500), &f))
+    if (!p.wait_id(m, 0x580 + node, milliseconds(500), &f))
     {
         value = 0xFFFFFFFF;
         return false;
@@ -372,6 +376,13 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
 
     // Boot-up, then the heartbeat in pre-operational.
     Frame f;
+    // LSS is off: no LSS answer.
+    {
+        size_t lm = p.mark();
+        p.send(0x7E5, {0x04, 1, 0, 0, 0, 0, 0, 0});
+        p.send(0x7E5, {0x5E, 0, 0, 0, 0, 0, 0, 0});
+        CHECK(!p.wait_id(lm, 0x7E4, milliseconds(200)));
+    }
     CHECK(p.wait(
         m0, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; }, milliseconds(1000)));
     CHECK(p.wait(
@@ -571,7 +582,7 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
 
 // Our master boots the slave and exchanges PDOs with it.
 const char *const kMasterConfig = R"({
-  "version": 6,
+  "version": 7,
   "networks": [{
     "name": "line", "interface": "vcan-master", "bitrate": 0, "master_node_id": 127,
     "heartbeat_producer_ms": 100,
@@ -645,6 +656,237 @@ void check_with_master(const DeviceConfig &dev, const plugin_runtime_args_t &rt,
     slave.stop();
 }
 
+// ---- LSS (CiA 305) on raw frames ----
+constexpr uint32_t kLssMaster = 0x7E5;
+constexpr uint32_t kLssSlave  = 0x7E4;
+
+const char *const kLssConfig = R"({
+  "version": 7,
+  "networks": [],
+  "devices": [{
+    "name": "lss", "interface": "vcan-lss", "bitrate": 500000, "node_id": 5,
+    "identity": {"device_name": "test-node", "vendor_id": 4660, "product_code": 1,
+                 "revision": 65536},
+    "heartbeat_ms": 100,
+    "lss": {"enabled": true, "wait_for_master": true, "serial": 23},
+    "objects": [
+      {"index": 8448, "subindex": 1, "name": "Status", "type": "UNSIGNED16",
+       "direction": "to_master", "exchange": "pdo", "location": "%QW0"}
+    ],
+    "rpdos": [],
+    "tpdos": [{"number": 1, "cob_id": 389, "transmission": 255, "inhibit_100us": 0,
+               "event_timer_ms": 0, "entries": [{"index": 8448, "subindex": 1}]}]
+  }]
+})";
+
+// Sends an LSS request; with `answer`, waits for the slave's answer with the same command.
+bool lss(Probe &p, std::vector<uint8_t> data, Frame *answer = nullptr,
+         milliseconds timeout = milliseconds(200))
+{
+    data.resize(8, 0);
+    const uint8_t cs = data[0];
+    size_t m         = p.mark();
+    p.send(kLssMaster, data);
+    if (!answer)
+        return true;
+    return p.wait(
+        m, [cs](const Frame &f) { return f.id == kLssSlave && (f.data[0] == cs || cs >= 0x40); },
+        timeout, answer);
+}
+
+// One fastscan step: true when some slave answered.
+bool fastscan(Probe &p, uint32_t id, uint8_t bit, uint8_t sub, uint8_t next)
+{
+    size_t m = p.mark();
+    p.send(kLssMaster,
+           {0x51, static_cast<uint8_t>(id), static_cast<uint8_t>(id >> 8),
+            static_cast<uint8_t>(id >> 16), static_cast<uint8_t>(id >> 24), bit, sub, next});
+    return p.wait(
+        m, [](const Frame &f) { return f.id == kLssSlave && f.data[0] == 0x4F; }, milliseconds(30));
+}
+
+// The whole fastscan: the found LSS address, or false when no unconfigured slave answers.
+bool fastscan_all(Probe &p, uint32_t (&address)[4])
+{
+    if (!fastscan(p, 0, 0x80, 0, 0))
+        return false;
+    for (uint8_t sub = 0; sub < 4; ++sub)
+    {
+        uint32_t id = 0;
+        for (int bit = 31; bit >= 0; --bit)
+            if (!fastscan(p, id, static_cast<uint8_t>(bit), sub, sub))
+                id |= 1u << bit;
+        address[sub] = id;
+        if (!fastscan(p, id, 0, sub, static_cast<uint8_t>(sub < 3 ? sub + 1 : 0)))
+            return false;
+    }
+    return true;
+}
+
+bool no_frame_in(Probe &p, uint32_t lo, uint32_t hi, milliseconds window)
+{
+    size_t m = p.mark();
+    return !p.wait(m, [lo, hi](const Frame &f) { return f.id >= lo && f.id <= hi; }, window);
+}
+
+std::string read_file(const std::string &path)
+{
+    std::string text;
+    if (FILE *f = std::fopen(path.c_str(), "r"))
+    {
+        char buf[256];
+        size_t n = std::fread(buf, 1, sizeof(buf), f);
+        text.assign(buf, n);
+        std::fclose(f);
+    }
+    return text;
+}
+
+void check_lss_store(const std::string &dir)
+{
+    const std::string path = dir + "/sub/lss-x.json";
+    LssStored in;
+    in.serial  = 0xDEADBEEF;
+    in.node_id = 12;
+    in.bitrate = 250000;
+    std::string problem;
+    CHECK(lss_save(path, in, problem));
+    LssStored out;
+    CHECK(lss_load(path, out, problem));
+    CHECK(out.serial == 0xDEADBEEF && out.node_id == 12 && out.bitrate == 250000);
+    CHECK(!lss_load(dir + "/missing.json", out, problem) && problem.empty());
+    FILE *f = std::fopen(path.c_str(), "w");
+    std::fputs("{\"node_id\": 300}", f);
+    std::fclose(f);
+    CHECK(!lss_load(path, out, problem) && !problem.empty() && out.node_id == 0);
+    CHECK(lss_random_serial() != 0);
+    setenv("OPENPLC_PERSISTENT_DATA_DIR", dir.c_str(), 1);
+    CHECK(lss_store_path("can1") == dir + "/canopen/lss-can1.json");
+}
+
+void check_lss(const plugin_runtime_args_t &rt, const std::string &dir)
+{
+    setenv("OPENPLC_PERSISTENT_DATA_DIR", dir.c_str(), 1);
+    const std::string file = dir + "/canopen/lss-vcan-lss.json";
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(kLssConfig, cfg, errors));
+    for (const auto &e : errors)
+        std::fprintf(stderr, "%s\n", e.c_str());
+    if (!errors.empty())
+        return;
+    const DeviceConfig &dev = cfg.devices[0];
+    auto vbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
+    Probe p(vbus);
+    Frame f;
+    uint32_t v = 0;
+    {
+        Slave slave(dev, virtual_slave_link(vbus));
+        std::string problem;
+        CHECK(slave.start(problem));
+        // Unconfigured: silent apart from LSS.
+        CHECK(no_frame_in(p, 0x080, 0x77F, milliseconds(300)));
+        CHECK(slave.snapshot().unconfigured && slave.snapshot().serial == 23);
+        // Fastscan finds it with its full address.
+        uint32_t address[4] = {};
+        CHECK(fastscan_all(p, address));
+        CHECK(address[0] == 4660 && address[1] == 1 && address[2] == 65536 && address[3] == 23);
+        CHECK(lss(p, {0x5E}, &f) && f.data[1] == 0xFF);
+        // Node ID 12 and 250 kbit/s (table index 3), stored.
+        CHECK(lss(p, {0x11, 12}, &f) && f.data[1] == 0);
+        CHECK(lss(p, {0x11, 200}, &f) && f.data[1] == 1);
+        CHECK(lss(p, {0x13, 0, 3}, &f) && f.data[1] == 0);
+        CHECK(lss(p, {0x17}, &f) && f.data[1] == 0);
+        const std::string text = read_file(file);
+        CHECK(text.find("\"node_id\":12") != std::string::npos);
+        CHECK(text.find("\"bitrate\":250000") != std::string::npos);
+        // Back to waiting: the slave takes node ID 12 at once.
+        size_t m = p.mark();
+        lss(p, {0x04, 0});
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x70C && x.data[0] == 0x00; },
+            milliseconds(1000)));
+        CHECK(sdo_read(p, 0x1018, 4, v, 12) && v == 23);
+        CHECK(sdo_read(p, 0x1800, 1, v, 12) && (v & 0x7FF) == 0x18C);
+        CHECK(sdo_read(p, 0x1014, 0, v, 12) && (v & 0x7FF) == 0x8C);
+        CHECK(slave.snapshot().node_id == 12 && !slave.snapshot().unconfigured);
+        // Its TPDO follows the new node ID.
+        m = p.mark();
+        p.send(0x000, {0x01, 12});
+        g_int_out[0] = 0x1234;
+        CHECK(scan_until(slave, rt, [&] { return p.count(m, 0x18C) > 0; }, milliseconds(1000)));
+        slave.stop();
+    }
+    {
+        // A restart uses the stored values; the link is asked for 250 kbit/s.
+        Slave slave(dev, virtual_slave_link(vbus));
+        std::string problem;
+        size_t m = p.mark();
+        CHECK(slave.start(problem));
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x70C && x.data[0] == 0x00; },
+            milliseconds(1000)));
+        SlaveSnapshot s = slave.snapshot();
+        CHECK(s.node_id == 12 && std::string(s.node_from) == "stored" && s.bitrate == 250000 &&
+              std::string(s.rate_from) == "stored" && s.stored_node_id == 12);
+        const std::string json = status_json({}, 0, {s});
+        CHECK(json.find("\"node_id_from\":\"stored\"") != std::string::npos);
+        // Selective switch, inquire, and a node ID change active after reset communication.
+        CHECK(lss(p, {0x40, 0x34, 0x12}));
+        CHECK(lss(p, {0x41, 1}));
+        CHECK(lss(p, {0x42, 0, 0, 1}));
+        CHECK(lss(p, {0x43, 23}, &f) && f.data[0] == 0x44);
+        CHECK(lss(p, {0x5D}, &f) && le32(f.data + 1) == 23);
+        CHECK(lss(p, {0x11, 13}, &f) && f.data[1] == 0);
+        lss(p, {0x04, 0});
+        m = p.mark();
+        p.send(0x000, {0x82, 12});
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x70D && x.data[0] == 0x00; },
+            milliseconds(1000)));
+        CHECK(std::string(slave.snapshot().node_from) == "lss");
+        // Reset node: the unsaved 13 is gone, the stored 12 is back.
+        m = p.mark();
+        p.send(0x000, {0x81, 13});
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x70C && x.data[0] == 0x00; },
+            milliseconds(2000)));
+        // Forget: back to the project, which waits for the master.
+        CHECK(slave.forget_lss());
+        CHECK(scan_until(
+            slave, rt, [&] { return slave.snapshot().unconfigured; }, milliseconds(2000)));
+        const std::string text = read_file(file);
+        CHECK(text.find("node_id") == std::string::npos);
+        CHECK(text.find("\"serial\":23") == std::string::npos);
+        slave.stop();
+    }
+    {
+        // Bit rate change not allowed, and a store that cannot be written.
+        const std::string blocked = dir + "/not-a-folder";
+        FILE *f2                  = std::fopen(blocked.c_str(), "w");
+        std::fclose(f2);
+        setenv("OPENPLC_PERSISTENT_DATA_DIR", blocked.c_str(), 1);
+        DeviceConfig fixed        = dev;
+        fixed.lss.wait_for_master = false;
+        fixed.lss.bitrate_change  = false;
+        Slave slave(fixed, virtual_slave_link(vbus));
+        std::string problem;
+        size_t m = p.mark();
+        CHECK(slave.start(problem));
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; },
+            milliseconds(1000)));
+        CHECK(lss(p, {0x04, 1}));
+        CHECK(lss(p, {0x5E}, &f) && f.data[1] == 5);
+        CHECK(lss(p, {0x13, 0, 3}, &f) && f.data[1] == 0xFF && f.data[2] == 1);
+        CHECK(lss(p, {0x17}, &f) && f.data[1] == 2);
+        lss(p, {0x04, 0});
+        CHECK(!fastscan(p, 0, 0x80, 0, 0)); // configured and waiting: no fastscan answer
+        slave.stop();
+        setenv("OPENPLC_PERSISTENT_DATA_DIR", dir.c_str(), 1);
+    }
+}
+
 } // namespace
 
 int main()
@@ -654,6 +896,7 @@ int main()
     prepare_wake_signal();
     const std::string dir = "/tmp/canopen_slave_test_" + std::to_string(getpid());
     CHECK(system(("mkdir -p " + dir).c_str()) == 0);
+    setenv("OPENPLC_PERSISTENT_DATA_DIR", dir.c_str(), 1);
 
     Config cfg;
     std::vector<std::string> errors;
@@ -667,6 +910,8 @@ int main()
     std::memset(g_int_in, 0, sizeof(g_int_in));
     std::memset(g_byte_in, 0, sizeof(g_byte_in));
     check_with_master(cfg.devices[0], rt, dir);
+    check_lss_store(dir);
+    check_lss(rt, dir);
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
 }

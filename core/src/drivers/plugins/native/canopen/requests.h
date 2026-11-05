@@ -50,6 +50,8 @@ class Requests
     // Opens service mode; an empty string on success, else the refusal reason.
     virtual std::string service_open(const ServiceRequest &req) = 0;
     virtual void service_close()                                = 0;
+    // Forgets the stored LSS values of slave `name`; an empty string on success, else the reason.
+    virtual std::string slave_lss_forget(const std::string &name) = 0;
 };
 
 // The network service mode runs: the request's interface and nodes, nothing configured or

@@ -44,8 +44,10 @@ class SlaveOd
     SlaveOd(const SlaveOd &)            = delete;
     SlaveOd &operator=(const SlaveOd &) = delete;
 
-    // Builds the dictionary of `dev` (kept by reference). False with a reason on failure.
-    bool build(const DeviceConfig &dev, std::string &problem);
+    // Builds the dictionary of `dev` (kept by reference) with `serial` in 0x1018 sub 4. Default
+    // COB-IDs hold their base (EMCY 80h, PDO 1-4), so they follow the node ID in use. False with a
+    // reason on failure.
+    bool build(const DeviceConfig &dev, uint32_t serial, std::string &problem);
     // Restores the values to their configured defaults: all of them (a reset node), or only the
     // application objects (a PLC start), or only the communication objects (a reset
     // communication).
