@@ -58,6 +58,7 @@
 #include "client.h"
 #include "config.h"
 #include "link_stall.h"
+#include "lss_online.h"
 #include "master_dcf.h"
 #include "plc_port.h"
 #include "process_image.h"
@@ -249,6 +250,11 @@ class Network : public lely::canopen::BasicMaster
     void ClientRead(const ClientJob &job);
     void ClientWrite(ClientJob &job);
     void ClientNmt(const ClientJob &job);
+    // A client's LSS request (lss_online.h): find devices, give one a node ID or a bit rate.
+    void ClientLss(const ClientJob &job);
+    void WatchLss();
+    static int OnLssFrame(const can_msg *msg, void *data) noexcept;
+    void SendLss(const LssOnline::Frame &frame);
     void ManualNmt(uint8_t id, NmtRequest cmd);
     void ServiceNmtSeen(uint8_t id, NmtRequest cmd);
     void WatchServiceHeartbeats();
@@ -312,6 +318,9 @@ class Network : public lely::canopen::BasicMaster
     bool lss_busy_ = false;            // an LSS sequence runs
     // Lely's start-up waits for the LSS assignment: no boot or poll may start meanwhile.
     bool lss_starting_ = false;
+    // A client's LSS request, on the frames of its own receiver; it holds lss_busy_ while it runs.
+    LssOnline lss_online_;
+    ::__can_recv *lss_recv_ = nullptr;
 };
 
 } // namespace canopen_plugin

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// client.h - SDO and NMT requests from a client of the plugin's socket (the editor's online tools).
-// The socket thread queues a job per request; the network's bus thread takes the jobs one at a
-// time and records each result, which the client collects later with the job's id. Nothing here
-// runs in the PLC scan.
+// client.h - SDO, NMT and LSS requests from a client of the plugin's socket (the editor's online
+// tools). The socket thread queues a job per request; the network's bus thread takes the jobs one
+// at a time and records each result, which the client collects later with the job's id. Nothing
+// here runs in the PLC scan.
 
 #ifndef CANOPEN_CLIENT_H
 #define CANOPEN_CLIENT_H
@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "lss_online.h"
 #include "pi_mutex.h"
 
 namespace canopen_plugin
@@ -39,7 +40,8 @@ struct ClientJob
     {
         Read,
         Write,
-        Nmt
+        Nmt,
+        Lss
     };
     Kind kind        = Kind::Read;
     uint64_t id      = 0;
@@ -48,6 +50,7 @@ struct ClientJob
     uint8_t subindex = 0;
     std::vector<uint8_t> data; // Write
     NmtRequest command = NmtRequest::Start;
+    LssOnline::Request lss; // Lss
 };
 
 struct JobResult
@@ -63,6 +66,7 @@ struct JobResult
     bool has_abort      = false;
     uint32_t abort_code = 0;
     std::string reason; // Failed without an abort code: booting, not_running, ...
+    std::string json;   // more members of the answer object, such as "devices":[...] (Lss)
 };
 
 class ClientQueue
@@ -86,6 +90,8 @@ class ClientQueue
     bool next(ClientJob &job);
     // Bus thread: records the result of a job taken with next().
     void finish(uint64_t id, JobResult r);
+    // Bus thread: what a running job has so far (the `json` of its pending answer).
+    void progress(uint64_t id, const std::string &json);
 
   private:
     struct Entry

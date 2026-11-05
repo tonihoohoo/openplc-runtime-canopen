@@ -172,7 +172,7 @@ jobs:
       - name: The runtime reports CANopen support
         run: |
           curl -ks https://127.0.0.1:8443/api/capabilities | tee /dev/stderr \
-            | python3 -c 'import json, sys; c = json.load(sys.stdin)["canopen"]; assert 7 in c["configVersions"] and {"status", "sdo", "nmt", "service"} <= set(c["features"])'
+            | python3 -c 'import json, sys; c = json.load(sys.stdin)["canopen"]; assert 7 in c["configVersions"] and {"status", "sdo", "nmt", "service", "lss"} <= set(c["features"])'
 
       - name: Upload the project with the editor CLI
         working-directory: editor
@@ -220,6 +220,38 @@ jobs:
           kill "$sim" 2>/dev/null || true
           wait "$sim" 2>/dev/null || true
           cat "$RUNNER_TEMP/sim-online.log"
+          exit "$status"
+
+      - name: LSS tools through the web API
+        run: |
+          # Node 2 runs; two devices without a node ID wait for one. Each keeps its LSS store in a file.
+          sim="$PLUGIN_DIR/build-sim/tests/canopen_sim_slave"
+          rm -f "$RUNNER_TEMP/lss-first" "$RUNNER_TEMP/lss-second"
+          "$sim" --interface vcan0 --node 2 --steps 1 --timeout 180 --linger 300 \
+            > "$RUNNER_TEMP/sim-lss-node2.log" 2>&1 &
+          node2=$!
+          "$sim" --interface vcan0 --node 255 --lss-serial 0x5678 --steps 0 --linger 300 \
+            --lss-store "$RUNNER_TEMP/lss-first" > "$RUNNER_TEMP/sim-lss-first.log" 2>&1 &
+          first=$!
+          "$sim" --interface vcan0 --node 255 --lss-serial 0x5679 --steps 0 --linger 300 \
+            --lss-store "$RUNNER_TEMP/lss-second" > "$RUNNER_TEMP/sim-lss-second.log" 2>&1 &
+          second=$!
+          status=0
+          python3 .github/scripts/canopen_lss_e2e.py --user ci --password ci-canopen-e2e \
+            --interface vcan0 || status=$?
+          kill "$node2" "$first" "$second" 2>/dev/null || true
+          wait 2>/dev/null || true
+          if [ "$status" -eq 0 ]; then
+            # The first device stored node ID 4; the second takes 125 kbit/s at its next start.
+            grep -q '^4 ' "$RUNNER_TEMP/lss-first" || { echo "::error::node ID 4 not stored"; status=1; }
+            timeout 10 "$sim" --interface vcan0 --node 255 --lss-serial 0x5679 --steps 0 \
+              --lss-store "$RUNNER_TEMP/lss-second" > "$RUNNER_TEMP/sim-lss-restart.log" 2>&1 || true
+            grep -q 'bit rate from the store: 125000' "$RUNNER_TEMP/sim-lss-restart.log" \
+              || { echo "::error::the bit rate was not taken at the restart"; status=1; }
+          fi
+          for f in node2 first second restart; do
+            echo "== sim-lss-$f"; cat "$RUNNER_TEMP/sim-lss-$f.log" 2>/dev/null || true
+          done
           exit "$status"
 
       - name: Upload the PLC function block project with the editor CLI

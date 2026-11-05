@@ -5,7 +5,10 @@
 // without a node ID gets the node's and boots; one that already has it is left as it is; one with
 // another ID gets the node's and is reset to boot with it; a device not on the bus is reported and
 // looked for again; store only when asked, and once when the ID was already right; a revision
-// that is not configured is found with a slowscan; the result in the status JSON.
+// that is not configured is found with a slowscan; the result in the status JSON. Then a client's
+// LSS requests: find two devices without a node ID on a running network, give one a node ID with
+// store, refuse an ID in use, a bit rate outside service mode and any request during the start-up
+// assignment; in service mode set and store a device's bit rate.
 
 #include <chrono>
 #include <cstdlib>
@@ -28,6 +31,7 @@
 #include "log.h"
 #include "master_dcf.h"
 #include "process_image.h"
+#include "requests.h"
 #include "sim_slave.h"
 #include "status.h"
 
@@ -223,6 +227,44 @@ SimSlaveSpec lss_spec(unsigned node_id, uint32_t serial)
     return s;
 }
 
+// Submits a client job and waits for its end.
+JobResult run_job(ClientQueue &q, ClientJob job, std::chrono::seconds timeout)
+{
+    std::string reason;
+    uint64_t id = 0;
+    auto end    = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!(id = q.submit(job, reason)) && std::chrono::steady_clock::now() < end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    JobResult r;
+    if (!id)
+    {
+        r.state  = JobResult::State::Failed;
+        r.reason = reason;
+        return r;
+    }
+    end = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < end && q.result(id, r) &&
+           r.state == JobResult::State::Pending)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return r;
+}
+
+ClientJob lss_job(LssOnline::Action action, uint32_t serial = 0, unsigned node_id = 0,
+                  bool store = false, unsigned bitrate = 0)
+{
+    ClientJob j;
+    j.kind                     = ClientJob::Kind::Lss;
+    j.lss.action               = action;
+    j.lss.address.vendor_id    = 1;
+    j.lss.address.product_code = 2;
+    j.lss.address.revision     = 3;
+    j.lss.address.serial_number = serial;
+    j.lss.node_id              = node_id;
+    j.lss.store                = store;
+    j.lss.bitrate              = bitrate;
+    return j;
+}
+
 const std::string kAddr2 =
     R"("vendor_id": 1, "product_code": 2, "revision": 3, "serial_number": 4097)";
 
@@ -362,10 +404,113 @@ int main()
         auto r = start_master(text, dir, vbus);
         if (!r)
             return TEST_RESULT();
+        // The start-up assignment runs (its slowscan takes seconds): a client waits.
+        JobResult busy = run_job(r->bus->client(), lss_job(LssOnline::Action::Find),
+                                 std::chrono::seconds(5));
+        CHECK(busy.state == JobResult::State::Failed && busy.reason == "busy");
         CHECK(scan_until(*r, rt, operational(10), std::chrono::seconds(30)));
         CHECK(dev.node_id() == 2);
         CHECK(node_status(*r, 2).lss.outcome == LssOutcome::Given);
         r->bus->stop();
+        dev.stop();
+    }
+
+    // 6. A client finds the two devices without a node ID while node 2 runs, gives one node ID 4
+    //    with store; node 2's ID and a bit rate outside service mode are refused.
+    {
+        SimSlave dev(lss_spec(255, 0x1001), dir + "/dev6.dcf", vbus, wire);
+        SimSlave new1(lss_spec(255, 0x5678), dir + "/new1.dcf", vbus, wire);
+        SimSlave new2(lss_spec(255, 0x5679), dir + "/new2.dcf", vbus, wire);
+        dev.start();
+        new1.start();
+        new2.start();
+        auto r = start_master(config_text(name, kAddr2, false), dir, vbus);
+        if (!r)
+            return TEST_RESULT();
+        CHECK(scan_until(*r, rt, operational(10), std::chrono::seconds(15)));
+        ClientQueue &q = r->bus->client();
+        JobResult found;
+        std::thread find([&] { found = run_job(q, lss_job(LssOnline::Action::Find),
+                                                std::chrono::seconds(60)); });
+        // Node 2 keeps running meanwhile.
+        bool stayed = true;
+        scan_until(*r, rt,
+                   [&]
+                   {
+                       stayed = stayed && g_byte_in[10] == 5;
+                       return found.state != JobResult::State::Pending;
+                   },
+                   std::chrono::seconds(60));
+        find.join();
+        CHECK(stayed);
+        CHECK(found.state == JobResult::State::Done);
+        CHECK(found.json.find("\"serial_number\":22136") != std::string::npos);
+        CHECK(found.json.find("\"serial_number\":22137") != std::string::npos);
+        CHECK(found.json.find("\"serial_number\":4097") == std::string::npos);
+        CHECK(dev.node_id() == 2 && new1.node_id() == 255 && new2.node_id() == 255);
+
+        JobResult used = run_job(q, lss_job(LssOnline::Action::SetId, 0x5678, 2),
+                                 std::chrono::seconds(5));
+        CHECK(used.state == JobResult::State::Failed && used.reason == "node_in_use");
+        CHECK(new1.node_id() == 255);
+        JobResult rate = run_job(q, lss_job(LssOnline::Action::SetBitrate, 0x5678, 0, true,
+                                            250000),
+                                 std::chrono::seconds(5));
+        CHECK(rate.state == JobResult::State::Failed && rate.reason == "needs_service_mode");
+
+        JobResult given = run_job(q, lss_job(LssOnline::Action::SetId, 0x5678, 4, true),
+                                  std::chrono::seconds(5));
+        CHECK(given.state == JobResult::State::Done);
+        CHECK(given.json == "\"previous_id\":255,\"stored\":true");
+        CHECK(scan_until(*r, rt, [&] { return new1.node_id() == 4; }, std::chrono::seconds(2)));
+        CHECK(new1.lss_stores() == 1 && new2.node_id() == 255);
+        // No device with that address.
+        JobResult none = run_job(q, lss_job(LssOnline::Action::SetId, 0x9999, 5),
+                                 std::chrono::seconds(5));
+        CHECK(none.state == JobResult::State::Failed && none.reason == "not_found");
+        CHECK(g_byte_in[10] == 5);
+        r->bus->stop();
+        new2.stop();
+        new1.stop();
+        dev.stop();
+    }
+
+    // 7. Service mode: a device's bit rate set and stored; its node ID given without store.
+    {
+        SimSlave dev(lss_spec(255, 0x5678), dir + "/dev7.dcf", vbus, wire);
+        dev.start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        ServiceRequest req;
+        req.interface           = name;
+        req.nodes               = {2};
+        const NetworkConfig net = service_network(req);
+        MasterLayout layout     = master_layout(net);
+        ProcessImage image;
+        std::vector<std::string> errors;
+        CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
+        const std::string dcf = dir + "/service.dcf";
+        FILE *f               = std::fopen(dcf.c_str(), "w");
+        const std::string t   = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+        NetworkStatus status(net);
+        status.set_service(true);
+        Bus bus(net, layout, image, status, dcf, vbus, nullptr, true);
+        bus.start();
+        JobResult rate = run_job(bus.client(), lss_job(LssOnline::Action::SetBitrate, 0x5678, 0,
+                                                       true, 250000),
+                                 std::chrono::seconds(5));
+        CHECK(rate.state == JobResult::State::Done && rate.json == "\"stored\":true");
+        CHECK(dev.lss_stores() == 1 && dev.lss_bitrate() == 250000);
+        JobResult given = run_job(bus.client(), lss_job(LssOnline::Action::SetId, 0x5678, 2),
+                                  std::chrono::seconds(5));
+        CHECK(given.state == JobResult::State::Done);
+        CHECK(given.json == "\"previous_id\":255,\"stored\":false");
+        auto end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (dev.node_id() != 2 && std::chrono::steady_clock::now() < end)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(dev.node_id() == 2 && dev.lss_stores() == 1);
+        bus.stop();
         dev.stop();
     }
 

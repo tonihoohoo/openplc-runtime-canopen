@@ -78,7 +78,7 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
                                                                 OnTick();
                                                         }),
       cfg_(cfg), layout_(layout), image_(image), status_(status), client_(client),
-      service_(service), plc_(plc)
+      service_(service), plc_(plc), lss_online_([this](const LssOnline::Frame &f) { SendLss(f); })
 {
     for (size_t slot = 0; slot < cfg_.nodes.size(); ++slot)
     {
@@ -122,6 +122,9 @@ Network::~Network()
         for (__can_recv *r : service_recv_)
             can_recv_destroy(r);
         service_recv_.clear();
+        if (lss_recv_)
+            can_recv_destroy(lss_recv_);
+        lss_recv_ = nullptr;
     }
     tick_.cancel_wait(tick_wait_);
     if (scan_.watched)
@@ -137,6 +140,7 @@ void Network::Start()
         // Never reset: the master sends no boot-up, heartbeat or NMT command of its own.
         status_.begin_session();
         WatchServiceHeartbeats();
+        WatchLss();
         log_info("%s: service mode, %zu node(s)", cfg_.label().c_str(), nodes_.size());
         tick_.settime(kTick, kTick);
         tick_.submit_wait(tick_wait_);
@@ -157,6 +161,7 @@ void Network::Start()
     SetTimeout(std::chrono::milliseconds(cfg_.sdo_timeout_ms));
     log_info("%s: starting, %zu node(s), %zu input and %zu output PDO(s)", cfg_.label().c_str(),
              nodes_.size(), layout_.rpdos.size(), layout_.tpdos.size());
+    WatchLss();
     Reset();
     // The reset restored 0x1F81 from the DCF; the boot-ups it causes are handled after this.
     for (auto &it : nodes_)
@@ -972,6 +977,8 @@ void Network::ReadFoundIdentity(uint8_t id, IdentityField field)
 void Network::OnTick()
 {
     tick_.submit_wait(tick_wait_);
+    if (lss_online_.running())
+        lss_online_.tick(clock::now());
     ServeClient();
     if (!running_)
         return;
@@ -1255,6 +1262,9 @@ void Network::ServeClient()
         break;
     case ClientJob::Kind::Nmt:
         ClientNmt(job);
+        break;
+    case ClientJob::Kind::Lss:
+        ClientLss(job);
         break;
     }
 }
