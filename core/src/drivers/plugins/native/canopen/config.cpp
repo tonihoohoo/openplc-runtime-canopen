@@ -136,6 +136,7 @@ class Parser
   private:
     bool parse_network(const cJSON *j, size_t pos, NetworkConfig &net);
     bool parse_node(const cJSON *j, const NetworkConfig &net, NodeConfig &node);
+    void parse_lss(const cJSON *j, const std::string &where, NodeConfig &node);
     bool parse_sdo(const cJSON *j, const std::string &where, SdoWrite &sdo);
     bool parse_pdo(const cJSON *j, const std::string &where, IecArea area, PdoConfig &pdo);
     void check_cob_ids(const NetworkConfig &net);
@@ -392,6 +393,14 @@ bool Parser::parse_network(const cJSON *j, size_t pos, NetworkConfig &net)
             ids[node.node_id] = node.label();
         if (node.node_id == net.master_node_id)
             error(where, node.label() + " has the master's node ID");
+        for (const NodeConfig &other : net.nodes)
+            if (node.has_lss && other.has_lss && other.lss.vendor_id == node.lss.vendor_id &&
+                other.lss.product_code == node.lss.product_code &&
+                other.lss.revision == node.lss.revision &&
+                other.lss.serial_number == node.lss.serial_number)
+                error(where, node.label() + " and " + other.label() +
+                                 " have the same LSS address (vendor ID, product code, revision "
+                                 "and serial number)");
         net.nodes.push_back(std::move(node));
     }
     size_t in = 0, out = 0, master_rpdos = 0, master_tpdos = 0;
@@ -483,6 +492,9 @@ bool Parser::parse_node(const cJSON *j, const NetworkConfig &net, NodeConfig &no
                 node.revision = static_cast<uint32_t>(v);
         }
     }
+
+    if (const cJSON *lss = cJSON_GetObjectItemCaseSensitive(j, "lss"))
+        parse_lss(lss, where, node);
 
     const cJSON *sup = cJSON_GetObjectItemCaseSensitive(j, "supervision");
     if (sup)
@@ -585,6 +597,43 @@ bool Parser::parse_node(const cJSON *j, const NetworkConfig &net, NodeConfig &no
         }
     }
     return errors_.size() == failed;
+}
+
+void Parser::parse_lss(const cJSON *j, const std::string &where, NodeConfig &node)
+{
+    const std::string w = where + ": lss";
+    if (!cJSON_IsObject(j))
+    {
+        error(where, "\"lss\" must be an object");
+        return;
+    }
+    static const char *const kKeys[] = {"vendor_id", "product_code", "revision", "serial_number",
+                                        "store"};
+    const cJSON *item                = nullptr;
+    cJSON_ArrayForEach(item, j)
+    {
+        bool known = false;
+        for (const char *k : kKeys)
+            known = known || std::strcmp(item->string, k) == 0;
+        if (!known)
+            error(w, std::string("unknown field \"") + item->string + "\"");
+    }
+    uint64_t v          = 0;
+    const uint64_t zero = 0;
+    if (get_uint(j, "vendor_id", w, 0, 0xFFFFFFFF, v))
+        node.lss.vendor_id = static_cast<uint32_t>(v);
+    if (get_uint(j, "product_code", w, 0, 0xFFFFFFFF, v))
+        node.lss.product_code = static_cast<uint32_t>(v);
+    if (get_uint(j, "revision", w, 0, 0xFFFFFFFF, v, &zero))
+        node.lss.revision = static_cast<uint32_t>(v);
+    if (get_uint(j, "serial_number", w, 0, 0xFFFFFFFF, v))
+    {
+        if (v == 0)
+            error(w, "\"serial_number\" must not be 0");
+        node.lss.serial_number = static_cast<uint32_t>(v);
+    }
+    get_bool(j, "store", w, node.lss.store);
+    node.has_lss = true;
 }
 
 bool Parser::parse_sdo(const cJSON *j, const std::string &where, SdoWrite &sdo)

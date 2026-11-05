@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // requests.h - the JSON requests of the plugin's socket (docs/CANOPEN.md): the status, SDO read
-// and write, NMT commands, job results, and opening and closing service mode. This file parses and
-// answers them; what they act on is behind the Requests interface, which the plugin implements.
+// and write, NMT commands, LSS requests, job results, and opening and closing service mode. This
+// file parses and answers them; what they act on is behind the Requests interface, which the
+// plugin implements.
 
 #ifndef CANOPEN_REQUESTS_H
 #define CANOPEN_REQUESTS_H

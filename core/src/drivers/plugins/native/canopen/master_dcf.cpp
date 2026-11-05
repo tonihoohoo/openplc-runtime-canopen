@@ -63,7 +63,7 @@ class DcfWriter
                "BaudRate_10=1\nBaudRate_20=1\nBaudRate_50=1\nBaudRate_125=1\nBaudRate_250=1\n"
                "BaudRate_500=1\nBaudRate_800=1\nBaudRate_1000=1\nSimpleBootUpMaster=1\n"
                "SimpleBootUpSlave=0\nGranularity=8\nNrOfRXPDO="
-            << rpdos_ << "\nNrOfTXPDO=" << tpdos_ << "\nLSS_Supported=0\n\n";
+            << rpdos_ << "\nNrOfTXPDO=" << tpdos_ << "\nLSS_Supported=" << (lss_ ? 1 : 0) << "\n\n";
         out << "[DeviceComissioning]\nNodeID=" << node_id << "\n\n";
         section(out, "MandatoryObjects", mandatory_);
         section(out, "OptionalObjects", optional_);
@@ -74,6 +74,7 @@ class DcfWriter
 
     unsigned rpdos_ = 0;
     unsigned tpdos_ = 0;
+    bool lss_       = false; // Lely runs its LSS master only when the master's DCF supports LSS
 
   private:
     void entry(const char *name, unsigned object_type, CoType type, const char *access,
@@ -180,6 +181,8 @@ std::string master_dcf(const NetworkConfig &net, const MasterLayout &layout)
     DcfWriter w;
     w.rpdos_ = static_cast<unsigned>(layout.rpdos.size());
     w.tpdos_ = static_cast<unsigned>(layout.tpdos.size());
+    for (const auto &n : net.nodes)
+        w.lss_ = w.lss_ || n.has_lss;
     w.var(0x1000, "Device type", CoType::UNSIGNED32, "ro", 0);
     w.var(0x1001, "Error register", CoType::UNSIGNED8, "ro", 0);
     // SYNC: produced by Lely at the period, or sent by the plugin once per PLC cycle.

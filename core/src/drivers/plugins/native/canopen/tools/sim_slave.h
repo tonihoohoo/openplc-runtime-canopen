@@ -47,6 +47,10 @@ struct SimSlaveSpec
     unsigned heartbeat_ms    = 50;
     bool parameter_read_only = false;
     bool restore_refused     = false; // 0x1011 aborts every write
+    // An LSS device (LSS_Supported=1) with this serial number in 0x1018:04; its COB-IDs follow
+    // its node ID. node_id 255 starts it without a node ID, waiting for a master's LSS.
+    bool lss               = false;
+    uint32_t serial_number = 0;
 };
 
 // The slave's DCF text.
@@ -99,6 +103,21 @@ class SimSlave
     {
         return saves_.load();
     }
+    // LSS 'store configuration' requests accepted since start().
+    unsigned lss_stores() const
+    {
+        return lss_stores_.load();
+    }
+    // The bit rate (bit/s) of the last LSS 'store configuration', 0 before any.
+    int lss_bitrate() const
+    {
+        return lss_bitrate_.load();
+    }
+    // The node ID in use: 255 while it has none.
+    unsigned node_id() const
+    {
+        return node_id_.load();
+    }
 
   private:
     struct Impl;
@@ -124,6 +143,9 @@ class SimSlave
     std::atomic<unsigned> restores_{0};
     std::atomic<unsigned> saves_{0};
     std::atomic<unsigned> output_writes_{0};
+    std::atomic<unsigned> lss_stores_{0};
+    std::atomic<int> lss_bitrate_{0};
+    std::atomic<unsigned> node_id_{0};
 };
 
 } // namespace canopen_sim

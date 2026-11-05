@@ -66,6 +66,8 @@ void test_layout_and_dcf()
     CHECK(l.tpdos[1].master_number == 2 && l.tpdos[1].first_entry == 1);
 
     std::string text = master_dcf(net, l);
+    // No node over LSS: Lely creates no LSS master.
+    CHECK(text.find("LSS_Supported=0") != std::string::npos);
     co_dev_t *dev    = co_dev_create_from_dcf_text(text.data(), text.data() + text.size(), nullptr);
     CHECK(dev != nullptr);
     if (!dev)

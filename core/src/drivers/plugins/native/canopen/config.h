@@ -75,6 +75,17 @@ enum class OnLoss
     Zero
 };
 
+// A node whose device gets its node ID from the master over LSS (CiA 305), found by its LSS
+// address: the four values of its object 0x1018. Revision 0 means any revision.
+struct LssConfig
+{
+    uint32_t vendor_id     = 0;
+    uint32_t product_code  = 0;
+    uint32_t revision      = 0;
+    uint32_t serial_number = 0;
+    bool store             = false; // LSS 'store configuration' after giving the ID
+};
+
 struct NodeConfig
 {
     unsigned node_id = 0;
@@ -92,6 +103,9 @@ struct NodeConfig
     bool program_start = false;
     // false: the node is off at PLC start (not booted, supervised or reported) until turned on.
     bool enabled = true;
+    // Node ID given over LSS before the boot.
+    bool has_lss = false;
+    LssConfig lss;
     // 0x1011 sub-index written with "load" before the configuration SDOs; 0 for none.
     unsigned restore_defaults      = 0;
     Supervision supervision        = Supervision::None;

@@ -78,7 +78,7 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
                                                                 OnTick();
                                                         }),
       cfg_(cfg), layout_(layout), image_(image), status_(status), client_(client),
-      service_(service), plc_(plc)
+      service_(service), plc_(plc), lss_online_([this](const LssOnline::Frame &f) { SendLss(f); })
 {
     for (size_t slot = 0; slot < cfg_.nodes.size(); ++slot)
     {
@@ -100,6 +100,12 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
     for (const MasterPdo &m : layout_.tpdos)
         periodic_ = periodic_ || m.pdo->send_period_ms > 0;
     rpdo_error_.assign(layout_.rpdos.size(), 0);
+    bool lss = false;
+    for (const NodeConfig &n : cfg_.nodes)
+        lss = lss || n.has_lss;
+    // Without LSS nodes Lely's start-up has no LSS step and sends no LSS frame.
+    if (lss && !service_)
+        lss_.reset(new LssAssigner(exec, *this));
     scan_.watch   = IO_POLL_WATCH_INIT(&Network::OnScanEvent);
     scan_.task    = EV_TASK_INIT(exec, &Network::OnScanTask);
     scan_.net     = this;
@@ -109,11 +115,16 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
 
 Network::~Network()
 {
+    if (lss_)
+        lss_->AbortAll();
     {
         std::lock_guard<lely::util::BasicLockable> lock(*this);
         for (__can_recv *r : service_recv_)
             can_recv_destroy(r);
         service_recv_.clear();
+        if (lss_recv_)
+            can_recv_destroy(lss_recv_);
+        lss_recv_ = nullptr;
     }
     tick_.cancel_wait(tick_wait_);
     if (scan_.watched)
@@ -129,6 +140,7 @@ void Network::Start()
         // Never reset: the master sends no boot-up, heartbeat or NMT command of its own.
         status_.begin_session();
         WatchServiceHeartbeats();
+        WatchLss();
         log_info("%s: service mode, %zu node(s)", cfg_.label().c_str(), nodes_.size());
         tick_.settime(kTick, kTick);
         tick_.submit_wait(tick_wait_);
@@ -149,6 +161,7 @@ void Network::Start()
     SetTimeout(std::chrono::milliseconds(cfg_.sdo_timeout_ms));
     log_info("%s: starting, %zu node(s), %zu input and %zu output PDO(s)", cfg_.label().c_str(),
              nodes_.size(), layout_.rpdos.size(), layout_.tpdos.size());
+    WatchLss();
     Reset();
     // The reset restored 0x1F81 from the DCF; the boot-ups it causes are handled after this.
     for (auto &it : nodes_)
@@ -605,6 +618,12 @@ void Network::HandleLoss(uint8_t id, ProblemKind kind)
              stop ? "stopping it until the next PLC start" : "booting it again");
     n->last_problem = why;
     n->restored     = false;
+    // A device that lost power without a stored ID comes back without one.
+    if (n->cfg->has_lss)
+    {
+        n->lss_due  = true;
+        n->lss_next = clock::now();
+    }
     Problem p;
     p.kind = kind;
     status_.lost(id, p);
@@ -958,10 +977,14 @@ void Network::ReadFoundIdentity(uint8_t id, IdentityField field)
 void Network::OnTick()
 {
     tick_.submit_wait(tick_wait_);
+    if (lss_online_.running())
+        lss_online_.tick(clock::now());
     ServeClient();
     if (!running_)
         return;
     ServeNodeControl();
+    if (lss_starting_)
+        return;
     auto now = clock::now();
     for (auto &it : nodes_)
     {
@@ -985,6 +1008,13 @@ void Network::OnTick()
         }
         if (n.up || n.stopped || n.held || n.booting || n.manual)
             continue;
+        if (n.lss_due)
+        {
+            // The device gets its node ID first; the boot or the poll follows when it has it.
+            if (!n.lss_running)
+                LssRecover(n, it.first, now);
+            continue;
+        }
         if (!n.retry_pending)
         {
             // Also a node heard only by its heartbeat: it missed the NMT reset (frames lost) and
@@ -1232,6 +1262,9 @@ void Network::ServeClient()
         break;
     case ClientJob::Kind::Nmt:
         ClientNmt(job);
+        break;
+    case ClientJob::Kind::Lss:
+        ClientLss(job);
         break;
     }
 }
@@ -1574,6 +1607,8 @@ void Network::TurnOn(NodeState &n, uint8_t id)
     n.backoff       = kRetryMin;
     n.next_poll     = clock::now();
     n.looked_since  = n.next_poll;
+    n.lss_due       = n.cfg->has_lss;
+    n.lss_next      = n.next_poll;
     SetListed(n, id, true);
     status_.set_enabled(id, true, true);
     log_info("%s turned on by the PLC program", n.cfg->label().c_str());

@@ -100,6 +100,66 @@ std::string nmt(const cJSON *req, Requests &target)
     return queue_job(req, target, std::move(job), true);
 }
 
+// A 32-bit field of an LSS address.
+bool get_u32(const cJSON *o, const char *key, uint32_t &out)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (!cJSON_IsNumber(v))
+        return false;
+    double d = v->valuedouble;
+    if (d != std::floor(d) || d < 0 || d > 4294967295.0)
+        return false;
+    out = static_cast<uint32_t>(d);
+    return true;
+}
+
+std::string lss(const cJSON *req, Requests &target)
+{
+    ClientJob job;
+    job.kind             = ClientJob::Kind::Lss;
+    const cJSON *action  = cJSON_GetObjectItemCaseSensitive(req, "action");
+    LssOnline::Request &r = job.lss;
+    if (!cJSON_IsString(action))
+        return error("bad_request");
+    const std::string a = action->valuestring;
+    if (a == "find")
+        r.action = LssOnline::Action::Find;
+    else if (a == "set_id" || a == "set_bitrate")
+    {
+        if (!get_u32(req, "vendor_id", r.address.vendor_id) ||
+            !get_u32(req, "product_code", r.address.product_code) ||
+            !get_u32(req, "revision", r.address.revision) ||
+            !get_u32(req, "serial_number", r.address.serial_number))
+            return error("bad_request");
+        if (a == "set_id")
+        {
+            r.action           = LssOnline::Action::SetId;
+            const cJSON *store = cJSON_GetObjectItemCaseSensitive(req, "store");
+            if (!get_uint(req, "node_id", 1, 127, r.node_id) || (store && !cJSON_IsBool(store)))
+                return error("bad_request");
+            r.store = cJSON_IsTrue(store);
+        }
+        else
+        {
+            r.action = LssOnline::Action::SetBitrate;
+            r.store  = true;
+            if (!get_uint(req, "bitrate", 1, 1000000, r.bitrate) ||
+                lss_bitrate_index(r.bitrate) < 0)
+                return error("bad_request");
+        }
+    }
+    else
+        return error("bad_request");
+    return queue_job(req, target, std::move(job), false);
+}
+
+std::string with_json(std::string head, const std::string &json)
+{
+    if (!json.empty())
+        head += "," + json;
+    return head + "}";
+}
+
 std::string job_answer(const cJSON *req, Requests &target)
 {
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(req, "job");
@@ -111,15 +171,15 @@ std::string job_answer(const cJSON *req, Requests &target)
     switch (r.state)
     {
     case JobResult::State::Pending:
-        return "{\"state\":\"pending\"}";
+        return with_json("{\"state\":\"pending\"", r.json);
     case JobResult::State::Done:
         if (r.data.empty())
-            return "{\"state\":\"done\"}";
+            return with_json("{\"state\":\"done\"", r.json);
         return "{\"state\":\"done\",\"data\":\"" + to_hex(r.data) + "\"}";
     case JobResult::State::Failed:
         if (r.has_abort)
             return "{\"state\":\"failed\",\"abort_code\":" + std::to_string(r.abort_code) + "}";
-        return "{\"state\":\"failed\",\"reason\":\"" + r.reason + "\"}";
+        return with_json("{\"state\":\"failed\",\"reason\":\"" + r.reason + "\"", r.json);
     }
     return error("bad_request");
 }
@@ -199,6 +259,8 @@ std::string handle_request(const std::string &request, Requests &target)
         answer = sdo(req, target, true);
     else if (std::strcmp(op->valuestring, "nmt") == 0)
         answer = nmt(req, target);
+    else if (std::strcmp(op->valuestring, "lss") == 0)
+        answer = lss(req, target);
     else if (std::strcmp(op->valuestring, "job") == 0)
         answer = job_answer(req, target);
     else if (std::strcmp(op->valuestring, "service_open") == 0)
