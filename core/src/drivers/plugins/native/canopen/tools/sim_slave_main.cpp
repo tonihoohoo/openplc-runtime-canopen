@@ -6,7 +6,11 @@
 //   canopen_sim_slave --interface vcan0 [--node 2] [--steps 5] [--timeout 60]
 //                     [--expect-parameter 0x12345678] [--expect-master-loss 5] [--linger 10]
 //                     [--blocks 1] [--parameter-read-only 1] [--expect-resends 10]
+//                     [--lss-serial 0x1001] [--expect-lss-stores 1]
 //
+// With --lss-serial the module answers LSS with that serial number; with --node 255 it starts
+// without a node ID and waits for one over LSS. --expect-lss-stores N needs exactly N LSS
+// 'store configuration' requests by the end.
 // It sets its digital inputs to 1, 2, ... and waits each time until its outputs follow. With
 // --expect-master-loss it then prints "watching the master" and waits up to that many seconds
 // for its master watch (0x1016) to put it in pre-operational. With --linger it stays on the bus
@@ -117,6 +121,7 @@ int main(int argc, char **argv)
     int linger_s        = 0;
     bool blocks         = false;
     int resends         = 0;
+    int expect_stores   = -1;
     for (int i = 1; i + 1 < argc; i += 2)
     {
         std::string opt = argv[i];
@@ -125,6 +130,13 @@ int main(int argc, char **argv)
             iface = val;
         else if (opt == "--node")
             spec.node_id = static_cast<unsigned>(std::strtoul(val, nullptr, 0));
+        else if (opt == "--lss-serial")
+        {
+            spec.lss           = true;
+            spec.serial_number = static_cast<uint32_t>(std::strtoul(val, nullptr, 0));
+        }
+        else if (opt == "--expect-lss-stores")
+            expect_stores = std::atoi(val);
         else if (opt == "--steps")
             steps = std::atoi(val);
         else if (opt == "--timeout")
@@ -178,6 +190,12 @@ int main(int argc, char **argv)
         }
         std::printf("step %d: outputs follow the inputs\n", step);
         std::fflush(stdout);
+    }
+    std::printf("node ID in use: %u\n", slave.node_id());
+    if (expect_stores >= 0 && slave.lss_stores() != static_cast<unsigned>(expect_stores))
+    {
+        std::printf("FAIL: %u LSS stores, expected %d\n", slave.lss_stores(), expect_stores);
+        return 1;
     }
     if (check_param && slave.parameter() != param)
     {

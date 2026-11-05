@@ -62,6 +62,7 @@ NetworkStatus::NetworkStatus(const NetworkConfig &cfg)
         s.optional      = n.optional;
         s.program_start = n.program_start;
         s.enabled       = n.enabled;
+        s.has_lss       = n.has_lss;
         s.since         = now;
         data_.nodes.push_back(s);
     }
@@ -491,6 +492,27 @@ void NetworkStatus::set_enabled(unsigned node, bool on, bool by_program)
     push(e);
 }
 
+void NetworkStatus::lss_result(unsigned node, LssOutcome outcome, unsigned previous_id, bool stored)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    NodeStatus *n = find(node);
+    if (!n)
+        return;
+    ++gen_;
+    const bool repeat  = n->lss.outcome == outcome && outcome == LssOutcome::NotFound;
+    n->lss.outcome     = outcome;
+    n->lss.previous_id = previous_id;
+    n->lss.stored      = stored;
+    n->lss.time        = wall_ms();
+    if (repeat)
+        return;
+    Event e;
+    e.node = node;
+    e.kind = EventKind::Lss;
+    e.lss  = n->lss;
+    push(e);
+}
+
 uint64_t NetworkStatus::generation() const
 {
     std::lock_guard<PiMutex> lock(mutex_);
@@ -704,6 +726,8 @@ const char *event_name(EventKind k)
         return "node_on";
     case EventKind::NodeOff:
         return "node_off";
+    case EventKind::Lss:
+        return "lss";
     }
     return "boot_ok";
 }
@@ -711,6 +735,38 @@ const char *event_name(EventKind k)
 void add_uint(cJSON *o, const char *key, uint64_t v)
 {
     cJSON_AddNumberToObject(o, key, static_cast<double>(v));
+}
+
+const char *lss_outcome_name(LssOutcome o)
+{
+    switch (o)
+    {
+    case LssOutcome::None:
+        return "none";
+    case LssOutcome::Given:
+        return "given";
+    case LssOutcome::Already:
+        return "already";
+    case LssOutcome::NotFound:
+        return "not_found";
+    case LssOutcome::Refused:
+        return "refused";
+    case LssOutcome::StoreRefused:
+        return "store_refused";
+    }
+    return "none";
+}
+
+cJSON *lss_json(const LssResult &r)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "result", lss_outcome_name(r.outcome));
+    if (r.outcome == LssOutcome::None)
+        return o;
+    add_uint(o, "previous_id", r.previous_id);
+    cJSON_AddBoolToObject(o, "stored", r.stored);
+    cJSON_AddNumberToObject(o, "time", static_cast<double>(r.time));
+    return o;
 }
 
 cJSON *problem_json(const Problem &p)
@@ -823,6 +879,8 @@ cJSON *node_json(const NodeStatus &n)
         add_uint(e, "abort_code", k.abort_code);
         cJSON_AddItemToArray(skipped, e);
     }
+    if (n.has_lss)
+        cJSON_AddItemToObject(o, "lss", lss_json(n.lss));
     return o;
 }
 
@@ -883,6 +941,9 @@ cJSON *event_json(const Event &ev)
         break;
     case EventKind::Service:
         cJSON_AddBoolToObject(o, "open", ev.open);
+        break;
+    case EventKind::Lss:
+        cJSON_AddItemToObject(o, "lss", lss_json(ev.lss));
         break;
     default:
         break;

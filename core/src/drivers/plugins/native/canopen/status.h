@@ -162,7 +162,27 @@ enum class EventKind : uint8_t
     NmtCommand, // an NMT command from a client or the PLC program
     Service,    // service mode opened or closed
     NodeOn,     // the PLC program turned a node on
-    NodeOff     // the PLC program turned a node off
+    NodeOff,    // the PLC program turned a node off
+    Lss         // the outcome of giving a node its ID over LSS
+};
+
+// The outcome of giving a node its node ID over LSS (CiA 305).
+enum class LssOutcome : uint8_t
+{
+    None,
+    Given,       // the device had another node ID or none, and got the node's
+    Already,     // the device already had the node's ID
+    NotFound,    // no device with the node's LSS address answered
+    Refused,     // the device refused the node ID
+    StoreRefused // the ID was given, but the device refused to store it
+};
+
+struct LssResult
+{
+    LssOutcome outcome   = LssOutcome::None;
+    unsigned previous_id = 0; // the device's node ID before; 255: none
+    bool stored          = false;
+    int64_t time         = 0;
 };
 
 enum class ResetOutcome : uint8_t
@@ -202,6 +222,7 @@ struct Event
     bool waits         = false;              // BootOk: waits for the PLC program's start
     bool open          = false;              // Service
     OnAbort policy     = OnAbort::Stop;      // SdoAbort
+    LssResult lss;                           // Lss
 };
 
 struct NodeStatus
@@ -223,6 +244,8 @@ struct NodeStatus
     std::vector<Emcy> emcy; // newest first
     std::vector<LatePdo> late;
     std::vector<SkippedSdo> skipped; // refused writes of the current boot
+    bool has_lss = false;            // the node gets its ID over LSS
+    LssResult lss;                   // the last LSS outcome
 
     // An operational node with an active emergency or a late PDO.
     bool warning() const;
@@ -302,6 +325,8 @@ class NetworkStatus
     // The node is turned on or off; `by_program` records an event, otherwise it is the
     // configuration's setting at PLC start.
     void set_enabled(unsigned node, bool on, bool by_program);
+    // The outcome of giving the node its ID over LSS; recorded as an event when it changes.
+    void lss_result(unsigned node, LssOutcome outcome, unsigned previous_id, bool stored);
     // Changes with every node's state or problem, for readers that copy only on a change.
     uint64_t generation() const;
     // The node's run state, hold and problem; false for an unknown node.

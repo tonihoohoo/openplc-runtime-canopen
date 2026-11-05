@@ -4,14 +4,14 @@ add_library(canopen_sim STATIC ${CMAKE_CURRENT_SOURCE_DIR}/../tools/sim_slave.cp
 target_include_directories(canopen_sim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../tools)
 target_link_libraries(canopen_sim PUBLIC canopen_core)
 
-foreach(name test_bus_off_recovery test_can_link test_config test_link_stall test_master_dcf test_network test_plc_port
+foreach(name test_bus_off_recovery test_can_link test_config test_link_stall test_lss test_master_dcf test_network test_plc_port
              test_status)
     add_executable(${name} ${CMAKE_CURRENT_SOURCE_DIR}/${name}.cpp)
     target_compile_options(${name} PRIVATE -Wall -Wextra -Wno-unused-parameter)
     target_link_libraries(${name} PRIVATE canopen_core canopen_sim)
     add_test(NAME ${name} COMMAND ${name})
 endforeach()
-set_tests_properties(test_network PROPERTIES TIMEOUT 120)
+set_tests_properties(test_network test_lss PROPERTIES TIMEOUT 120)
 
 if(CANOPEN_HAVE_SLAVE)
     add_executable(test_slave ${CMAKE_CURRENT_SOURCE_DIR}/test_slave.cpp)

@@ -29,6 +29,8 @@
 // reported; turning it off stops it, turning it on looks for it again.
 // Service mode (PLC stopped): the master is never started, so it sends nothing of its own; client
 // SDOs use a client SDO of their own per node and NMT commands are sent as plain frames.
+// LSS (lss.cpp): a node with an LSS address gets its node ID over LSS before Lely boots any node,
+// and again before boot attempts while its device is missing or after it was lost.
 // With a TIME producer, the TIME object carries the host's clock at the configured period.
 // A received PDO with a receive timeout that is late has its inputs held or zeroed in the same
 // way; the node keeps running. Everything seen is also recorded in the network's status.
@@ -40,11 +42,13 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include <lely/coapp/lss_master.hpp>
 #include <lely/coapp/master.hpp>
 #include <lely/coapp/sdo.hpp>
 #include <lely/ev/task.h>
@@ -67,6 +71,23 @@ namespace canopen_plugin
 // Little-endian bit field access in PDO data. Exposed for tests.
 uint64_t pdo_get_bits(const uint8_t *data, size_t len, unsigned offset, unsigned bits);
 void pdo_set_bits(uint8_t *data, unsigned offset, unsigned bits, uint64_t value);
+
+class Network;
+
+// Lely's LSS master on the network's NMT service. Lely calls OnStart() at every reset
+// communication of the master, before any node boots, and holds the start-up until it reports
+// back (lss.cpp).
+class LssAssigner : public lely::canopen::LssMaster
+{
+  public:
+    LssAssigner(ev_exec_t *exec, Network &net);
+
+  protected:
+    void OnStart(std::function<void(std::error_code ec)> res) noexcept override;
+
+  private:
+    Network &net_;
+};
 
 class Network : public lely::canopen::BasicMaster
 {
@@ -126,6 +147,7 @@ class Network : public lely::canopen::BasicMaster
     void on_write_error(std::error_code ec, std::size_t errcnt) noexcept override;
 
   private:
+    friend class LssAssigner;
     using clock = std::chrono::steady_clock;
 
     struct NodeState
@@ -160,9 +182,30 @@ class Network : public lely::canopen::BasicMaster
         size_t run = 0;              // the run being written
         std::vector<const MasterPdo *> in_pdos;
         std::vector<const MasterPdo *> out_pdos;
+        // LSS: the node's ID is given again before its next boot attempt.
+        bool lss_due     = false;
+        bool lss_running = false;
+        clock::time_point lss_next{};
+        std::chrono::milliseconds lss_backoff{kRetryMin};
+    };
+
+    // A run of LSS assignments: the node IDs in order, at start or before a boot attempt.
+    struct LssJob
+    {
+        std::vector<unsigned> ids;
+        size_t next = 0;
+        std::function<void()> done;
     };
 
     template <class F> void Defer(F &&f);
+
+    void LssOnStart(std::function<void(std::error_code)> res);
+    void LssRun(std::shared_ptr<LssJob> job);
+    void LssFound(std::shared_ptr<LssJob> job, unsigned id);
+    void LssDone(std::shared_ptr<LssJob> job, unsigned id, LssOutcome outcome, unsigned previous,
+                 bool stored);
+    // Runs the assignment of one node that is due, from the tick; true when one started.
+    bool LssRecover(NodeState &node, unsigned id, clock::time_point now);
 
     void HandleBoot(uint8_t id, lely::canopen::NmtState st, char es, const std::string &what);
     void HandleConfig(uint8_t id);
@@ -265,6 +308,10 @@ class Network : public lely::canopen::BasicMaster
     clock::time_point started_{};
     uint64_t published_gen_ = ~uint64_t{0}; // the status generation last published to the blocks
     clock::time_point next_time_{};
+    std::unique_ptr<LssAssigner> lss_; // only when a node gets its ID over LSS
+    bool lss_busy_ = false;            // an LSS sequence runs
+    // Lely's start-up waits for the LSS assignment: no boot or poll may start meanwhile.
+    bool lss_starting_ = false;
 };
 
 } // namespace canopen_plugin
