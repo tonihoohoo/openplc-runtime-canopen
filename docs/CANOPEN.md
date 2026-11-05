@@ -116,7 +116,7 @@ with an LSS slowscan, the other three values fixed.
   program, gets the assignment again before it boots.
 - **Refused.** A device that refuses the node ID is reported (`refused`) and tried again as above.
 
-The master never changes a device's bit rate over LSS, and only nodes with `lss` take part. Lely's LSS master is created only when at least one node
+The master never changes a device's bit rate over LSS by itself (see [LSS tools](#lss-tools)), and only nodes with `lss` take part. Lely's LSS master is created only when at least one node
 has `lss`.
 
 ## conf/canopen.json
@@ -435,6 +435,37 @@ gives no usable answer.
 - Each write and NMT command is logged and recorded as an `sdo_write` or `nmt_command` event.
 - Saving to and restoring from a node's non-volatile memory is a plain write to 0x1010 ("save",
   73617665) or 0x1011 ("load", 6c6f6164). The master itself never writes 0x1010.
+
+### LSS tools
+
+The `lss` request finds the devices on a network that have no node ID, gives one of them a node
+ID, or sets one device's bit rate. It runs on a running network and in service mode, takes a few
+seconds and is a job like an SDO request; `job` answers with the members below added.
+
+| Request | Result (`job`) |
+|---|---|
+| `{"op": "lss", "network": 0, "action": "find"}` | `{"state": "done", "devices": [{"vendor_id": 1, "product_code": 2, "revision": 3, "serial_number": 22136}]}` |
+| `{"op": "lss", "network": 0, "action": "set_id", "vendor_id": 1, "product_code": 2, "revision": 3, "serial_number": 22136, "node_id": 4, "store": true}` | `{"state": "done", "previous_id": 255, "stored": true}` |
+| `{"op": "lss", "network": 0, "action": "set_bitrate", "vendor_id": 1, "product_code": 2, "revision": 3, "serial_number": 22136, "bitrate": 125000}` | `{"state": "done", "stored": true}` |
+
+- **find** searches with LSS fastscan until no device answers, at most 64 devices. Some devices
+  take part in a fastscan although they have a node ID, so each device found is then asked its
+  node ID on its own and only those without one (255) are in `devices`. While the job is
+  `pending`, `devices` lists the devices that have answered so far. The nodes already running
+  are not disturbed.
+- **set_id** selects the device by its LSS address, gives it the node ID (1 to 127) and, with
+  `store`, stores it. `previous_id` is the ID it had (255: none). The device starts with the new ID
+  when it is switched back to waiting at the end; a device that had another ID keeps using the old
+  one until it is reset. A node ID that a running node of the network uses is refused.
+- **set_bitrate** only runs in service mode, and always stores: the device uses the new bit rate
+  after its next reset or power-off, so it is then no longer heard at the old one. `bitrate` is one
+  of 1000000, 800000, 500000, 250000, 125000, 50000, 20000 or 10000.
+- Every request ends with all devices in the LSS waiting state.
+- Failed: `not_found` (no device has the address), `no_answer`, `refused` (the device refused the
+  value), `store_refused` (set but not stored), `too_many` (find stopped after 64 devices).
+  Refused at once: `busy` (another LSS sequence, the start-up assignment included, is running),
+  `needs_service_mode`, `node_in_use`, `bad_request`.
+- Each request and its result are logged.
 
 ### Service mode
 

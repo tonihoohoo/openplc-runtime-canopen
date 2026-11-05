@@ -262,10 +262,11 @@ class Slave : public lely::canopen::BasicSlave
     // LSS device: counts accepted 'store configuration' requests, and watches the master's
     // 'switch state global: waiting' (0x7E5 04 00), at which a device that had no node ID starts
     // with the one it was given (CiA 305); Lely's LSS slave needs a reset communication for that.
-    void WatchLss(std::atomic<unsigned> &stores)
+    void WatchLss(std::atomic<unsigned> &stores, std::atomic<int> &bitrate)
     {
         std::lock_guard<lely::util::BasicLockable> lock(*this);
-        stores_ = &stores;
+        stores_  = &stores;
+        bitrate_ = &bitrate;
         recv_   = can_recv_create();
         if (!recv_)
             return;
@@ -292,9 +293,11 @@ class Slave : public lely::canopen::BasicSlave
     {
         nmt_ = static_cast<uint8_t>(cs);
     }
-    // LSS 'store configuration': counted; the node ID is kept only in memory.
-    void OnStore(uint8_t, int) override
+    // LSS 'store configuration': counted with the bit rate stored; nothing is kept on disk.
+    void OnStore(uint8_t, int bitrate) override
     {
+        if (bitrate_)
+            *bitrate_ = bitrate;
         if (stores_)
             ++*stores_;
     }
@@ -309,6 +312,7 @@ class Slave : public lely::canopen::BasicSlave
 
     std::atomic<uint8_t> &nmt_;
     std::atomic<unsigned> *stores_ = nullptr;
+    std::atomic<int> *bitrate_     = nullptr;
     std::atomic<bool> waiting_{false};
     __can_recv *recv_ = nullptr;
 };
@@ -337,6 +341,7 @@ void SimSlave::start()
     restores_   = 0;
     saves_      = 0;
     lss_stores_ = 0;
+    lss_bitrate_ = 0;
     thread_     = std::thread([this] { thread_main(); });
     while (!ready_ && !stop_)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -402,7 +407,7 @@ void SimSlave::thread_main()
         Slave slave(exec, timer, *base, dcf_path_, nmt_state_, restores_, saves_, output_writes_,
                     spec_.restore_refused);
         if (spec_.lss)
-            slave.WatchLss(lss_stores_);
+            slave.WatchLss(lss_stores_, lss_bitrate_);
         slave.Reset();
         node_id_ = spec_.node_id;
         ready_   = true;

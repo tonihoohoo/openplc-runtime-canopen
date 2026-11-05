@@ -108,6 +108,11 @@ class SimSlave
     {
         return lss_stores_.load();
     }
+    // The bit rate (bit/s) of the last LSS 'store configuration', 0 before any.
+    int lss_bitrate() const
+    {
+        return lss_bitrate_.load();
+    }
     // The node ID in use: 255 while it has none.
     unsigned node_id() const
     {
@@ -139,6 +144,7 @@ class SimSlave
     std::atomic<unsigned> saves_{0};
     std::atomic<unsigned> output_writes_{0};
     std::atomic<unsigned> lss_stores_{0};
+    std::atomic<int> lss_bitrate_{0};
     std::atomic<unsigned> node_id_{0};
 };
 

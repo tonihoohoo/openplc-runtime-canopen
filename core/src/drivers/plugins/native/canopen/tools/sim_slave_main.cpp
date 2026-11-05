@@ -6,11 +6,14 @@
 //   canopen_sim_slave --interface vcan0 [--node 2] [--steps 5] [--timeout 60]
 //                     [--expect-parameter 0x12345678] [--expect-master-loss 5] [--linger 10]
 //                     [--blocks 1] [--parameter-read-only 1] [--expect-resends 10]
-//                     [--lss-serial 0x1001] [--expect-lss-stores 1]
+//                     [--lss-serial 0x1001] [--expect-lss-stores 1] [--lss-store <file>]
 //
 // With --lss-serial the module answers LSS with that serial number; with --node 255 it starts
 // without a node ID and waits for one over LSS. --expect-lss-stores N needs exactly N LSS
-// 'store configuration' requests by the end.
+// 'store configuration' requests by the end. With --lss-store each LSS store writes the node ID
+// and bit rate to the file ("stored node ID <id>, bit rate <bit/s>"), and a start with the file
+// present takes that node ID and prints "bit rate from the store: <bit/s>", as a device does at
+// power-on.
 // It sets its digital inputs to 1, 2, ... and waits each time until its outputs follow. With
 // --expect-master-loss it then prints "watching the master" and waits up to that many seconds
 // for its master watch (0x1016) to put it in pre-operational. With --linger it stays on the bus
@@ -30,6 +33,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <string>
 #include <thread>
 
@@ -122,6 +126,7 @@ int main(int argc, char **argv)
     bool blocks         = false;
     int resends         = 0;
     int expect_stores   = -1;
+    std::string store_file;
     for (int i = 1; i + 1 < argc; i += 2)
     {
         std::string opt = argv[i];
@@ -135,6 +140,8 @@ int main(int argc, char **argv)
             spec.lss           = true;
             spec.serial_number = static_cast<uint32_t>(std::strtoul(val, nullptr, 0));
         }
+        else if (opt == "--lss-store")
+            store_file = val;
         else if (opt == "--expect-lss-stores")
             expect_stores = std::atoi(val);
         else if (opt == "--steps")
@@ -168,12 +175,61 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    if (!store_file.empty())
+        if (FILE *f = std::fopen(store_file.c_str(), "r"))
+        {
+            unsigned id = 0;
+            int rate    = 0;
+            if (std::fscanf(f, "%u %d", &id, &rate) == 2)
+            {
+                spec.node_id = id;
+                std::printf("bit rate from the store: %d\n", rate);
+            }
+            std::fclose(f);
+        }
+
     canopen_plugin::prepare_wake_signal();
-    SimSlave slave(spec, "/tmp/canopen_sim_node" + std::to_string(spec.node_id) + ".dcf", nullptr,
-                   iface);
+    const std::string dcf = "/tmp/canopen_sim_node" + std::to_string(spec.node_id) + "_" +
+                            std::to_string(spec.serial_number) + ".dcf";
+    SimSlave slave(spec, dcf, nullptr, iface);
     slave.start();
     std::printf("simulated node %u on %s\n", spec.node_id, iface.c_str());
     std::fflush(stdout);
+
+    // Each LSS store, as the device's memory.
+    std::atomic<bool> running{true};
+    std::thread store_watch(
+        [&]
+        {
+            unsigned seen = 0;
+            while (running)
+            {
+                // The node ID once the device has switched to it.
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                if (store_file.empty() || slave.lss_stores() == seen)
+                    continue;
+                seen = slave.lss_stores();
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (FILE *f = std::fopen(store_file.c_str(), "w"))
+                {
+                    std::fprintf(f, "%u %d\n", slave.node_id(), slave.lss_bitrate());
+                    std::fclose(f);
+                }
+                std::printf("stored node ID %u, bit rate %d\n", slave.node_id(),
+                            slave.lss_bitrate());
+                std::fflush(stdout);
+            }
+        });
+    struct Join
+    {
+        std::atomic<bool> &running;
+        std::thread &t;
+        ~Join()
+        {
+            running = false;
+            t.join();
+        }
+    } join{running, store_watch};
 
     auto end = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
     for (int step = 1; step <= steps; ++step)

@@ -116,6 +116,14 @@ void ClientQueue::finish(uint64_t id, JobResult r)
     it->second.finished = clock::now();
 }
 
+void ClientQueue::progress(uint64_t id, const std::string &json)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    auto it = jobs_.find(id);
+    if (it != jobs_.end() && it->second.result.state == JobResult::State::Pending)
+        it->second.result.json = json;
+}
+
 void ClientQueue::expire(clock::time_point now)
 {
     for (auto it = jobs_.begin(); it != jobs_.end();)

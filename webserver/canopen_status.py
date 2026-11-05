@@ -23,7 +23,9 @@ MAX_ANSWER = 4 * 1024 * 1024
 MAX_REQUEST = 160 * 1024
 
 # Requests a client may send through POST /api/canopen/request.
-REQUEST_OPS = frozenset({"sdo_read", "sdo_write", "nmt", "job", "service_open", "service_close"})
+REQUEST_OPS = frozenset(
+    {"sdo_read", "sdo_write", "nmt", "job", "service_open", "service_close", "lss"}
+)
 
 JsonObject = Dict[str, object]
 
