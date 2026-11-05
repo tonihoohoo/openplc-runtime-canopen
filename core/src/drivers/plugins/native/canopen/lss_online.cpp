@@ -194,12 +194,19 @@ void LssOnline::answered(const uint8_t *data, size_t len, clock::time_point now)
             a.product_code  = id_[1];
             a.revision      = id_[2];
             a.serial_number = id_[3];
+            // A device answering out of turn (in the configuration state) makes the search read
+            // an address of zeros or one already found: the others may be hidden behind it.
+            bool ghost = a == LssAddress4();
             for (const LssAddress4 &d : found_list_)
-                if (d == a)
-                {
-                    finish(false, "too_many");
-                    return;
-                }
+                ghost = ghost || d == a;
+            if (ghost)
+            {
+                out_.reason = "incomplete";
+                queue({kSwitchGlobal, 0x00});
+                check_ = 0;
+                check_next(now);
+                return;
+            }
             found_list_.push_back(a);
             if (found_)
                 found_(a);
