@@ -5,7 +5,7 @@ Needs the slave e2e project running in the runtime: node 5 on the interface, a p
 0x2000:1 (from the master) to 0x2100:1 and the parameter 0x2000:3 to 0x2100:2, RPDO1 0x205 and an
 event TPDO1 0x185, a heartbeat of 100 ms and a watch of master node 127. This script plays the
 master: SDO reads and writes with range checks, NMT start, an RPDO in and the TPDO back, the master
-heartbeat lost, the PLC stopped and started, and the slave in /api/canopen/status.
+heartbeat lost and back, the PLC stopped and started, and the slave in /api/canopen/status.
 
     canopen_slave_e2e.py --user ci --password secret --interface vcan0
 """
@@ -208,6 +208,13 @@ def main() -> None:
     )
 
     start = bus.mark()
+    beating.set()
+    beater = threading.Thread(target=beat, daemon=True)
+    beater.start()
+    emcy = bus.wait(start, lambda f: f[0] == 0x80 + NODE and f[1][:2] == b"\x00\x00", 5)
+    expect("EMCY 0000h when the master heartbeat is back", emcy is not None, True)
+
+    start = bus.mark()
     call("/stop-plc", token)
     emcy = bus.wait(start, lambda f: f[0] == 0x80 + NODE and f[1][:2] == b"\x00\x62", 10)
     expect("EMCY 6200h when the PLC stops", emcy is not None, True)
@@ -221,6 +228,8 @@ def main() -> None:
     emcy = bus.wait(start, lambda f: f[0] == 0x80 + NODE and f[1][:2] == b"\x00\x00", 20)
     expect("EMCY 0000h when the PLC starts again", emcy is not None, True)
     expect("parameter back to its default after the PLC start", sdo_read(bus, 0x2000, 3), (0, 1000))
+    beating.clear()
+    beater.join()
     bus.stop = True
     print("slave e2e passed")
 
