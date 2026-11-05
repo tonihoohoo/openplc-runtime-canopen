@@ -10,12 +10,14 @@
 #define CANOPEN_SLAVE_H
 
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 
+#include "can_link.h"
 #include "config.h"
 #include "image_io.h"
 #include "pi_mutex.h"
@@ -52,6 +54,23 @@ class SlaveLink
     virtual int read(Frame &frame, int timeout_ms) = 0;
     // 0 when the frame was queued.
     virtual int write(const Frame &frame) = 0;
+    // A reading of the CAN interface for the bus status; false when there is none (in-process bus).
+    virtual bool info(LinkInfo &out)
+    {
+        (void)out;
+        return false;
+    }
+    // Takes the interface down for a reset after a bus-off: 0 or a negative errno. The next
+    // open() brings it up again.
+    virtual int take_down()
+    {
+        return -EOPNOTSUPP;
+    }
+    // The driver refused a bus-off auto-restart when the link was set up.
+    virtual bool restart_refused() const
+    {
+        return false;
+    }
 };
 
 // A SocketCAN interface, brought up at `bitrate` (0 keeps the link's own) like a network's.
