@@ -11,7 +11,7 @@
 > at start-up ([Node IDs over LSS](docs/CANOPEN.md#node-ids-over-lss)), and find the devices without a node ID,
 > give one an ID or set its bit rate on request ([LSS tools](docs/CANOPEN.md#lss-tools)). On another interface it can make the
 > runtime a CANopen slave whose objects the program reads and writes (a byte can also be packed as 8
-> separate bits), with its state and what the
+> separate bits) in up to 16 PDOs each way, with its state and what the
 > master changed reported to the editor ([CANopen slave](docs/CANOPEN.md#canopen-slave)), and which an
 > LSS master can give its node ID and bit rate ([LSS in the slave](docs/CANOPEN.md#lss-in-the-slave)); the
 > program can read the slave's state, change its NMT state, raise its own emergencies and see each

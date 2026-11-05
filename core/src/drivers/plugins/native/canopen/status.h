@@ -391,7 +391,7 @@ struct SlaveEvent
 // A slave PDO as it runs now.
 struct SlavePdoStatus
 {
-    unsigned number        = 0; // 1-4
+    unsigned number        = 0; // 1-16
     bool tpdo              = false;
     uint32_t cob_id        = 0; // 0x1400/0x1800 sub 1, with the invalid bit
     uint8_t transmission   = 0;
