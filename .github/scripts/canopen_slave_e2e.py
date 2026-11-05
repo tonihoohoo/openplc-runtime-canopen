@@ -93,14 +93,14 @@ class Bus:
 
 
 def sdo_read(bus: Bus, index: int, sub: int) -> tuple[int, int]:
-    """Returns (value, abort code); an abort code of 0 means success."""
+    """Returns (abort code, value); an abort code of 0 means success."""
     start = bus.mark()
     bus.send(0x600 + NODE, struct.pack("<BHB4x", 0x40, index, sub))
     frame = bus.wait(start, lambda f: f[0] == 0x580 + NODE, 2)
     if frame is None:
         sys.exit(f"FAIL: no SDO answer for 0x{index:04X}:{sub}")
     cmd, _, _, value = struct.unpack("<BHBI", frame[1])
-    return (0, value) if cmd == 0x80 else (value, 0)
+    return (value, 0) if cmd == 0x80 else (0, value)
 
 
 def sdo_write(bus: Bus, index: int, sub: int, value: int, size: int) -> int:
