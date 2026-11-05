@@ -5,7 +5,8 @@ Needs the slave e2e project running in the runtime: node 5 on the interface, a p
 0x2000:1 (from the master) to 0x2100:1 and the parameter 0x2000:3 to 0x2100:2, RPDO1 0x205 and an
 event TPDO1 0x185, a heartbeat of 100 ms and a watch of master node 127. This script plays the
 master: SDO reads and writes with range checks, NMT start, an RPDO in and the TPDO back, the master
-heartbeat lost and back, the PLC stopped and started, and the slave in /api/canopen/status.
+heartbeat lost and back, the PLC stopped and started, and the slave in /api/canopen/status with its
+NMT source, SDO writes, PDO counts, values and active EMCY codes.
 
     canopen_slave_e2e.py --user ci --password secret --interface vcan0
 """
@@ -143,6 +144,41 @@ def main() -> None:
             time.sleep(0.3)
         sys.exit(f"FAIL: {what}: {last}")
 
+    def items(s: Json, key: str) -> list[Json]:
+        found = s.get(key)
+        return [e for e in found if isinstance(e, dict)] if isinstance(found, list) else []
+
+    def written(s: Json, index: int, sub: int, ok: bool, code: int = 0) -> bool:
+        return any(
+            e.get("kind") == "sdo_write"
+            and e.get("index") == index
+            and e.get("subindex") == sub
+            and e.get("ok") is ok
+            and (ok or e.get("abort_code") == code)
+            for e in items(s, "events")
+        )
+
+    def value(s: Json, index: int, sub: int) -> object:
+        for v in items(s, "values"):
+            if v.get("index") == index and v.get("subindex") == sub:
+                return v.get("data")
+        return None
+
+    def active_codes(s: Json) -> list[object]:
+        found = s.get("emcy_active")
+        return list(found) if isinstance(found, list) else []
+
+    def register_set(s: Json, bits: int) -> bool:
+        reg = s.get("error_register")
+        return isinstance(reg, int) and reg & bits == bits
+
+    def frames(s: Json, direction: str) -> int:
+        for p in items(s, "pdos"):
+            if p.get("dir") == direction and p.get("pdo") == 1:
+                count = p.get("frames")
+                return count if isinstance(count, int) else 0
+        return 0
+
     heartbeat = bus.wait(0, lambda f: f[0] == 0x700 + NODE, 30)
     if heartbeat is None:
         sys.exit("FAIL: no heartbeat from node 5")
@@ -160,6 +196,14 @@ def main() -> None:
     expect("parameter above its maximum", sdo_write(bus, 0x2000, 3, 40000, 2), 0x06090031)
     expect("object to the master is read-only", sdo_write(bus, 0x2100, 1, 1, 2), 0x06010002)
     expect("store parameters is refused", sdo_write(bus, 0x1010, 1, 0x65766173, 4), 0x06020000)
+    wait_status(
+        "status lists the SDO writes, the refusals and the written value",
+        lambda s: written(s, 0x2000, 3, True)
+        and written(s, 0x2000, 3, False, 0x06090032)
+        and written(s, 0x1010, 1, False, 0x06020000)
+        and value(s, 0x2000, 3) == "d204"
+        and s.get("nmt_by") == "boot",
+    )
 
     beating = threading.Event()
     beating.set()
@@ -195,6 +239,13 @@ def main() -> None:
         "status shows the slave operational and the master seen",
         lambda s: s.get("state") == "operational" and s.get("master_seen") is True,
     )
+    wait_status(
+        "status shows the master as the NMT source and the PDO frames counted",
+        lambda s: s.get("nmt_by") == "master"
+        and frames(s, "rx") >= 1
+        and frames(s, "tx") >= 1
+        and isinstance(s.get("master_last_seen"), int),
+    )
 
     start = bus.mark()
     beating.clear()
@@ -205,6 +256,10 @@ def main() -> None:
         "pre-operational after the master is lost",
         bus.wait(start, lambda f: f[0] == 0x700 + NODE and f[1] == b"\x7f", 5) is not None,
         True,
+    )
+    wait_status(
+        "status shows the slave left operational by itself with 8130h active",
+        lambda s: s.get("nmt_by") == "self" and 0x8130 in active_codes(s),
     )
 
     start = bus.mark()
@@ -218,7 +273,12 @@ def main() -> None:
     call("/stop-plc", token)
     emcy = bus.wait(start, lambda f: f[0] == 0x80 + NODE and f[1][:2] == b"\x00\x62", 10)
     expect("EMCY 6200h when the PLC stops", emcy is not None, True)
-    wait_status("status shows the PLC stopped", lambda s: s.get("plc_running") is False)
+    wait_status(
+        "status shows the PLC stopped with 6200h active and the error register set",
+        lambda s: s.get("plc_running") is False
+        and 0x6200 in active_codes(s)
+        and register_set(s, 0x81),
+    )
     expect(
         "the slave stays on the bus while the PLC is stopped", sdo_read(bus, 0x1017, 0), (0, 100)
     )

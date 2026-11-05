@@ -8,8 +8,8 @@
 > and configures each node at start-up with SDOs, exchanges PDOs with the PLC program's located
 > variables every scan cycle, supervises the nodes (heartbeat, reboot of a lost node, bus-off and
 > stall recovery) and reports their status to the editor. On another interface it can make the
-> runtime a CANopen slave whose objects the program reads and writes
-> ([CANopen slave](docs/CANOPEN.md#canopen-slave)). The configuration is made in the
+> runtime a CANopen slave whose objects the program reads and writes, with its state and what the
+> master changed reported to the editor ([CANopen slave](docs/CANOPEN.md#canopen-slave)). The configuration is made in the
 > [OpenPLC Editor (CANopen edition)](https://github.com/tonihoohoo/openplc-editor-canopen); everything
 > else works as in upstream OpenPLC Runtime.
 >
