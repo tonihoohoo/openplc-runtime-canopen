@@ -58,11 +58,6 @@ constexpr uint8_t kRegVoltage       = 0x04;
 constexpr uint8_t kRegTemperature   = 0x08;
 constexpr uint8_t kRegCommunication = 0x10;
 constexpr uint8_t kRegManufacturer  = 0x80;
-// Byte 3 of an EMCY: the error status bit that raised it, as the earlier slave sent it.
-constexpr uint8_t kBitPassive = 0x07;
-constexpr uint8_t kBitBusOff  = 0x12;
-constexpr uint8_t kPlcStopBit = 0x30;
-constexpr uint8_t kProgramBit = 0x31; // one per program slot after it
 // 0x1029 values (CiA 301): what the slave does on a communication error.
 constexpr uint8_t kErrorPreOperational = 0;
 constexpr uint8_t kErrorNoChange       = 1;
@@ -73,7 +68,6 @@ constexpr int kTickMs                  = 1;
 constexpr uint32_t kLssMasterId        = 0x7E5;
 constexpr uint32_t kLssSlaveId         = 0x7E4;
 constexpr uint8_t kLssSwitchGlobal     = 0x04;
-constexpr uint8_t kLssConfigBitTiming  = 0x13;
 constexpr uint8_t kLssSwitchSelected   = 0x44;
 constexpr uint8_t kLssFastscan         = 0x51;
 constexpr uint8_t kLssFastscanAnswer   = 0x4F;
@@ -296,13 +290,14 @@ struct Slave::Impl
         co_emcy_t *e = emcy();
         return e && co_emcy_find(e, code) >= 0;
     }
-    void emcy_raise(uint16_t code, uint8_t reg, uint8_t bit, uint32_t info = 0)
+    // Sends `code` with `info` in EMCY bytes 4-7; byte 3 stays 0.
+    void emcy_raise(uint16_t code, uint8_t reg, uint32_t info = 0)
     {
         co_emcy_t *e = emcy();
         if (!e)
             return;
         co_unsigned8_t msef[5] = {
-            bit, static_cast<co_unsigned8_t>(info), static_cast<co_unsigned8_t>(info >> 8),
+            0, static_cast<co_unsigned8_t>(info), static_cast<co_unsigned8_t>(info >> 8),
             static_cast<co_unsigned8_t>(info >> 16), static_cast<co_unsigned8_t>(info >> 24)};
         co_emcy_push(e, code, reg, msef);
     }
@@ -325,17 +320,17 @@ struct Slave::Impl
         if (!emcy() || node_id == 0)
             return;
         if (plc_stop_on && !emcy_active(kEmcyPlcStop))
-            emcy_raise(kEmcyPlcStop, kRegManufacturer, kPlcStopBit);
+            emcy_raise(kEmcyPlcStop, kRegManufacturer);
         for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
         {
             const ProgramEmcy &p = program[i];
             if (p.on && !emcy_active(p.code))
-                emcy_raise(p.code, p.klass, static_cast<uint8_t>(kProgramBit + i), p.info);
+                emcy_raise(p.code, p.klass, p.info);
         }
         if (passive_on && !emcy_active(kEmcyPassive))
-            emcy_raise(kEmcyPassive, 0, kBitPassive);
+            emcy_raise(kEmcyPassive, 0);
         if (bus_off_on && !emcy_active(kEmcyBusOff))
-            emcy_raise(kEmcyBusOff, kRegCommunication, kBitBusOff);
+            emcy_raise(kEmcyBusOff, kRegCommunication);
     }
 
     void set_plc_stop(bool on)
@@ -371,7 +366,7 @@ struct Slave::Impl
                 p.code  = code;
                 p.info  = info;
                 p.klass = Slave::error_class_bit(code);
-                emcy_raise(code, p.klass, static_cast<uint8_t>(kProgramBit + i), info);
+                emcy_raise(code, p.klass, info);
             }
             else if (p.on)
             {
@@ -538,13 +533,6 @@ struct Slave::Impl
         std::memcpy(f.data, msg->data, f.dlc);
         if (im->mute_emcy && (f.id & 0x7FF) == im->emcy_id)
             return 0;
-        // A refused bit rate answers "implementation specific: not allowed", as before.
-        if (f.id == kLssSlaveId && f.data[0] == kLssConfigBitTiming && f.data[1] == 1 &&
-            !im->self->dev_.lss.bitrate_change)
-        {
-            f.data[1] = 0xFF;
-            f.data[2] = 1;
-        }
         if (im->link->write(f) != 0)
         {
             ++im->write_failures;
@@ -1419,7 +1407,7 @@ void Slave::thread_main()
             if (passv && !im.passive_on)
             {
                 im.passive_on = true;
-                im.emcy_raise(kEmcyPassive, 0, kBitPassive);
+                im.emcy_raise(kEmcyPassive, 0);
             }
             else if (!passv && im.passive_on)
             {
@@ -1430,8 +1418,7 @@ void Slave::thread_main()
             {
                 im.bus_off_on = true;
                 // A communication error: 0x1029 sub 1 applies, as for a lost master.
-                const co_unsigned8_t msef[5] = {kBitBusOff, 0, 0, 0, 0};
-                co_nmt_on_err(im.nmt, kEmcyBusOff, kRegCommunication, msef);
+                co_nmt_on_err(im.nmt, kEmcyBusOff, kRegCommunication, nullptr);
             }
             else if (!off && im.bus_off_on)
             {
