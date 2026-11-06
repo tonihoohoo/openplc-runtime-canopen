@@ -20,12 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         v:
-          - { name: psram-1, flags: "", qemu: "-m 4M" }
-          - { name: psram-2, flags: "", qemu: "-m 4M" }
-          - { name: psram-3, flags: "", qemu: "-m 4M" }
           - { name: icount-1, flags: "", qemu: "-m 4M -icount shift=3,align=off,sleep=on" }
           - { name: icount-2, flags: "", qemu: "-m 4M -icount shift=3,align=off,sleep=on" }
           - { name: icount-3, flags: "", qemu: "-m 4M -icount shift=3,align=off,sleep=on" }
+          - { name: icount-4, flags: "", qemu: "-m 4M -icount shift=3,align=off,sleep=on" }
+          - { name: icount-5, flags: "", qemu: "-m 4M -icount shift=3,align=off,sleep=on" }
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -230,7 +229,7 @@ jobs:
         run: |
           b="$RUNNER_TEMP/board"
           candump -t d vcan0 > qemu-candump.log 2>&1 &
-          ~/qemu/bin/qemu-system-xtensa -nographic -machine esp32 -m 4M \
+          ~/qemu/bin/qemu-system-xtensa -nographic -machine esp32 -m 4M -icount shift=3,align=off,sleep=on \
             -drive file="$b/flash.bin",if=mtd,format=raw \
             -object can-bus,id=canbus0 \
             -object can-host-socketcan,id=canhost0,if=vcan0,canbus=canbus0 \
