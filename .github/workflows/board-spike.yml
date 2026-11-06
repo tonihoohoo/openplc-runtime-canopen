@@ -190,7 +190,10 @@ jobs:
           start=$(date +%s)
           npx electron --no-sandbox ./release/app/dist/main/main.js --cli compile \
             ./e2e/fixtures/canopen-slave-board/project --target "ESP32 Generic" \
-            --user-data "$RUNNER_TEMP/editor-data" 2>&1 | tail -80
+            --user-data "$RUNNER_TEMP/editor-data" > compile.log 2>&1 || {
+            echo "--- first errors"; grep -n -m 12 -B 3 -A 6 'error' compile.log | grep -v 'Could not refresh\|arduino-cli: not found' | head -150
+            echo "--- tail"; tail -30 compile.log; exit 1; }
+          tail -30 compile.log
           echo "compile $(( $(date +%s) - start )) s"
           od=$(find / -name canopen_slave_od.h -newer catalog.json -not -path '*/editor/resources/*' 2>/dev/null | head -1)
           bin=$(find / -name "*.merged.bin" -newer catalog.json 2>/dev/null | head -1)
