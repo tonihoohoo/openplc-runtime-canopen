@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// slave.h - one CANopen slave of the runtime, on CANopenNode: its own thread receives the frames,
-// runs the stack and sends, and exchanges values with the PLC scan through triple buffers, so the
-// scan never waits for it. The slave stays on the bus while the PLC is stopped (heartbeat, NMT,
-// SDO), sends EMCY 6200h on a PLC stop and 0000h when the PLC runs again, and is replaced only when
-// a PLC start brings a different configuration. The PLC program reads and steers it through the
-// plc_* functions (plc_api.h version 3).
+// slave.h - one CANopen slave of the runtime, on Lely's CANopen stack: its own thread receives the
+// frames, runs the stack and sends, and exchanges values with the PLC scan through triple buffers,
+// so the scan never waits for it. The slave stays on the bus while the PLC is stopped (heartbeat,
+// NMT, SDO), sends EMCY 6200h on a PLC stop and 0000h when the PLC runs again, and is replaced only
+// when a PLC start brings a different configuration. The PLC program reads and steers it through
+// the plc_* functions (plc_api.h version 3).
 
 #ifndef CANOPEN_SLAVE_H
 #define CANOPEN_SLAVE_H
@@ -139,6 +139,8 @@ class Slave
     // The node ID and bit rate to start with (stored, else the project's); slave thread or start().
     void load_lss_values();
     bool store_lss(uint8_t node_id, uint16_t kbit);
+    // A reset node: the stored LSS values, else the project's, for the coming reset communication.
+    void reset_node();
 
     void publish_plc(uint8_t nmt, uint8_t node_id, bool on_bus, bool watched, bool seen,
                      BusState bus, uint8_t error_register, uint8_t emcy_active);
@@ -176,7 +178,7 @@ class Slave
     std::atomic<bool> plc_running_{false};
     std::atomic<bool> stop_{false};
     std::atomic<bool> forget_{false};
-    // LSS: pending node ID (0xFF unconfigured) and bit rate (kbit/s) as CANopenNode sees them, the
+    // LSS: pending node ID (0xFF unconfigured) and bit rate (kbit/s) as the stack sees them, the
     // serial number, the stored values and the bit rate the link runs at. Slave thread only after
     // start().
     uint8_t pending_node_   = 0;
