@@ -14,8 +14,15 @@ concurrency:
 
 jobs:
   spike:
-    name: TWAI in QEMU on vcan
+    name: TWAI in QEMU on vcan (${{ matrix.v.name }})
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        v:
+          - { name: base, flags: "", qemu: "" }
+          - { name: iram, flags: "-DSPIKE_IRAM", qemu: "" }
+          - { name: psram, flags: "", qemu: "-m 4M" }
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -63,7 +70,7 @@ jobs:
       - name: Build sketch
         run: |
           start=$(date +%s)
-          arduino-cli compile --fqbn esp32:esp32:esp32:FlashMode=dio --export-binaries --output-dir build .github/board-spike/spike
+          arduino-cli compile --build-property "compiler.cpp.extra_flags=${{ matrix.v.flags }}" --fqbn esp32:esp32:esp32:FlashMode=dio --export-binaries --output-dir build .github/board-spike/spike
           ls -la build
           echo "compile $(( $(date +%s) - start )) s"
 
@@ -75,18 +82,24 @@ jobs:
           truncate -s 4M flash.bin
           candump -t d vcan0 > candump.log 2>&1 &
           cpid=$!
+          timeout 90 python3 .github/board-spike/check.py vcan0 > check.log 2>&1 &
+          kpid=$!
+          sleep 0.5
           ~/qemu/bin/qemu-system-xtensa -nographic -machine esp32 \
             -drive file=flash.bin,if=mtd,format=raw \
             -object can-bus,id=canbus0 \
             -object can-host-socketcan,id=canhost0,if=vcan0,canbus=canbus0 \
             -global driver=esp32.twai,property=canbus,value=canbus0 \
-            -serial file:serial.log -monitor none &
+            ${{ matrix.v.qemu }} -serial file:serial.log -monitor none &
           qpid=$!
-          sleep 2
           set +e
-          timeout 90 python3 .github/board-spike/check.py vcan0
+          wait $kpid
           rc=$?
           kill $qpid $cpid
-          echo "--- serial"; cat serial.log | tail -40
-          echo "--- candump (head)"; head -40 candump.log
+          cat check.log
+          echo "--- serial"; tail -40 serial.log
+          echo "--- candump (head)"; head -20 candump.log
+          a2l=$(ls ~/.arduino15/packages/esp32/tools/esp-x32/*/bin/xtensa-esp32-elf-addr2line | head -1)
+          bt=$(grep -o '0x4[0-9a-f]\{7\}' serial.log | sort -u | tr '\n' ' ')
+          if [ -n "$bt" ]; then echo "--- addr2line"; "$a2l" -pfiaC -e build/spike.ino.elf $bt; fi
           exit $rc

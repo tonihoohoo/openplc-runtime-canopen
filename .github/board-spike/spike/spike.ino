@@ -17,6 +17,9 @@ void setup() {
     Serial.begin(115200);
     twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_5, GPIO_NUM_4, TWAI_MODE_NORMAL);
     g.rx_queue_len = 32;
+#ifdef SPIKE_IRAM
+    g.intr_flags = ESP_INTR_FLAG_IRAM;
+#endif
     twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
     Serial.printf("install %d\n", twai_driver_install(&g, &t, &f));
