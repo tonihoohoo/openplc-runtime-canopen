@@ -1145,10 +1145,16 @@ void Parser::parse_slave_pdos(const cJSON *j, const char *key, const std::string
         for (const auto &o : out)
             if (o.number == pdo.number)
                 error(w, "is given twice");
-        if (get_uint(p, "cob_id", w, 1, 0x7FF, v))
+        // PDO 1-4 have a pre-defined COB-ID; PDO 5-16 without one stay off until a master
+        // writes one.
+        const uint64_t no_cob = 0;
+        if (get_uint(p, "cob_id", w, pdo.number <= 4 ? 1 : 0, 0x7FF, v,
+                     pdo.number <= 4 ? nullptr : &no_cob))
         {
             pdo.cob_id = static_cast<uint32_t>(v);
-            if (const char *what = reserved_cob_id(pdo.cob_id))
+            if (pdo.cob_id == 0 && cJSON_GetObjectItemCaseSensitive(p, "cob_id"))
+                error(w, "COB-ID 0x000 is reserved for NMT");
+            else if (const char *what = pdo.cob_id ? reserved_cob_id(pdo.cob_id) : nullptr)
                 error(w, "COB-ID " + hex(pdo.cob_id, 3) + " is reserved for " + what);
         }
         const uint64_t def_tx = 255, zero = 0;
@@ -1356,6 +1362,8 @@ bool Parser::parse_device(const cJSON *j, size_t pos, DeviceConfig &dev)
     for (int dir = 0; dir < 2; ++dir)
         for (const auto &p : dir ? dev.tpdos : dev.rpdos)
         {
+            if (p.cob_id == 0)
+                continue;
             std::string what = std::string(dir ? "TPDO " : "RPDO ") + std::to_string(p.number);
             auto it          = cobs.find(p.cob_id);
             if (it != cobs.end())

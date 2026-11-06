@@ -263,8 +263,6 @@ static ODR_t read_history(OD_stream_t *stream, void *buf, OD_size_t count, OD_si
     return ODR_OK;
 }
 
-constexpr unsigned kPdos = 4; // RPDOs and TPDOs each
-
 struct Slave::Impl
 {
     SlaveOd od;
@@ -281,9 +279,9 @@ struct Slave::Impl
     OD_extension_t history{};
 
     // What the frames show, for the status (slave thread only).
-    uint32_t pdo_cob[2 * kPdos]{}; // RPDOs then TPDOs, 11-bit; refreshed with the status
-    uint64_t pdo_frames[2 * kPdos]{};
-    int64_t pdo_last[2 * kPdos]{};
+    uint32_t pdo_cob[2 * kSlavePdos]{}; // RPDOs then TPDOs, 11-bit; refreshed with the status
+    uint64_t pdo_frames[2 * kSlavePdos]{};
+    int64_t pdo_last[2 * kSlavePdos]{};
     int64_t master_last = 0;
     bool nmt_command    = false; // an NMT command for this node since the last state check
     struct SdoDownload
@@ -327,7 +325,7 @@ struct Slave::Impl
 
     void count_pdo(uint32_t id, unsigned first)
     {
-        for (unsigned i = first; i < first + kPdos; ++i)
+        for (unsigned i = first; i < first + kSlavePdos; ++i)
             if (pdo_cob[i] && pdo_cob[i] == id)
             {
                 ++pdo_frames[i];
@@ -426,7 +424,7 @@ struct Slave::Impl
             }
             return;
         }
-        count_pdo(id, kPdos);
+        count_pdo(id, kSlavePdos);
     }
 
     static int send(void *ctx, uint32_t ident, uint8_t dlc, const uint8_t *data)
@@ -570,19 +568,19 @@ void Slave::Impl::fill_details(CO_t *co, SlaveSnapshot &s)
             s.emcy_program.push_back(p.code);
     s.on_plc_stop_state = od.plc_stop_state();
 
-    s.pdos.resize(2 * kPdos);
-    for (unsigned i = 0; i < 2 * kPdos; ++i)
+    s.pdos.resize(2 * kSlavePdos);
+    for (unsigned i = 0; i < 2 * kSlavePdos; ++i)
     {
-        const bool tpdo        = i >= kPdos;
-        const uint16_t comm    = static_cast<uint16_t>((tpdo ? 0x1800 : 0x1400) + i % kPdos);
+        const bool tpdo        = i >= kSlavePdos;
+        const uint16_t comm    = static_cast<uint16_t>((tpdo ? 0x1800 : 0x1400) + i % kSlavePdos);
         const uint16_t mapping = static_cast<uint16_t>(comm + 0x200);
         SlavePdoStatus &p      = s.pdos[i];
-        p.number               = i % kPdos + 1;
+        p.number               = i % kSlavePdos + 1;
         p.tpdo                 = tpdo;
         p.cob_id               = od_value<uint32_t>(d, comm, 1);
         // The bare pre-defined base follows the node ID in use, as in CO_PDO.c.
-        const uint32_t base = (tpdo ? 0x180u : 0x200u) + 0x100u * (i % kPdos);
-        if (node_id != 0 && (p.cob_id & 0x7FFu) == base)
+        const uint32_t base = (tpdo ? 0x180u : 0x200u) + 0x100u * (i % kSlavePdos);
+        if (node_id != 0 && p.number <= 4 && (p.cob_id & 0x7FFu) == base)
             p.cob_id += node_id;
         p.transmission  = od_value<uint8_t>(d, comm, 2);
         p.inhibit_100us = tpdo ? od_value<uint16_t>(d, comm, 3) : 0;

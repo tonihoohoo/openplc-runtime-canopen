@@ -84,7 +84,10 @@ void SlaveOd::add_pdos(bool tpdo)
         // PDOs 1-4 on their default COB-ID keep the bare base, which the stack adds the node ID
         // in use to.
         const uint32_t base = cob_base + 0x100 * (n - 1);
-        uint32_t cob        = pdo ? pdo->cob_id : (kCobInvalid | base);
+        // PDO 5-16 have no pre-defined COB-ID: off with no CAN ID until a master writes one.
+        uint32_t cob = pdo ? pdo->cob_id : (kCobInvalid | (n <= 4 ? base : 0));
+        if (pdo && cob == 0)
+            cob = kCobInvalid;
         if (pdo && n <= 4 && (cob & 0x7FF) == base + dev_->node_id)
             cob = (cob & ~0x7FFu) | base;
         Record &rec = add_record(static_cast<uint16_t>(comm_base + n - 1));

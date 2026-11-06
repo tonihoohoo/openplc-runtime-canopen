@@ -220,8 +220,8 @@ struct SlavePdoEntry
 // A PDO as the slave sees it: an RPDO is received from the master, a TPDO sent to it.
 struct SlavePdo
 {
-    unsigned number         = 0; // 1-4
-    uint32_t cob_id         = 0; // 11-bit
+    unsigned number         = 0; // 1-16
+    uint32_t cob_id         = 0; // 11-bit; 0 for PDO 5-16 off until a master writes one
     unsigned transmission   = 255;
     unsigned inhibit_100us  = 0; // TPDO only
     unsigned event_timer_ms = 0;
@@ -249,7 +249,7 @@ enum class SlaveStopState
     Stopped
 };
 
-constexpr unsigned kSlavePdos = 4;
+constexpr unsigned kSlavePdos = 16; // RPDOs and TPDOs each
 
 // The slave's LSS (CiA 305) settings.
 struct SlaveLss

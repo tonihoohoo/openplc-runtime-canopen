@@ -483,10 +483,10 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
             find_event(snap, [](const SlaveEvent &e) { return e.kind == SlaveEventKind::OnBus; }));
         CHECK(snap.nmt == 127 && snap.nmt_by == SlaveNmtBy::Boot);
         CHECK(snap.heartbeat_ms == 100 && snap.master_watch_ms == 300 && snap.on_master_lost == 0);
-        CHECK(snap.pdos.size() == 8 && snap.pdos[0].cob_id == 0x205 && !snap.pdos[0].tpdo);
-        CHECK(snap.pdos[4].tpdo && snap.pdos[4].cob_id == 0x185 &&
-              snap.pdos[4].mapping.size() == 2);
-        CHECK(snap.pdos[5].transmission == 1);
+        CHECK(snap.pdos.size() == 32 && snap.pdos[0].cob_id == 0x205 && !snap.pdos[0].tpdo);
+        CHECK(snap.pdos[16].tpdo && snap.pdos[16].cob_id == 0x185 &&
+              snap.pdos[16].mapping.size() == 2);
+        CHECK(snap.pdos[17].transmission == 1);
         CHECK(snap.bus.state == BusState::ErrorActive);
         CHECK(!find_value(snap, 0x2100, 5)); // the string constant is left out
         // The fields in the JSON answer.
@@ -546,8 +546,8 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
         [](const SlaveSnapshot &s)
         {
             return s.nmt == 5 && s.nmt_by == SlaveNmtBy::Master && s.since > 0 &&
-                   s.pdos.size() == 8 && s.pdos[0].frames >= 1 && s.pdos[0].last > 0 &&
-                   s.pdos[4].frames >= 2;
+                   s.pdos.size() == 32 && s.pdos[0].frames >= 1 && s.pdos[0].last > 0 &&
+                   s.pdos[16].frames >= 2;
         },
         milliseconds(500)));
     CHECK(find_event(
@@ -591,8 +591,8 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
         slave,
         [](const SlaveSnapshot &s)
         {
-            return s.pdos.size() == 8 && s.pdos[4].mapping.size() == 2 &&
-                   s.pdos[4].mapping[0] == 0x21000210 && s.pdos[4].mapping[1] == 0x21000110;
+            return s.pdos.size() == 32 && s.pdos[16].mapping.size() == 2 &&
+                   s.pdos[16].mapping[0] == 0x21000210 && s.pdos[16].mapping[1] == 0x21000110;
         },
         milliseconds(500)));
 
@@ -1520,6 +1520,129 @@ void check_packed(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     slave.stop();
 }
 
+const char *const kMorePdosConfig = R"({
+  "version": 12,
+  "networks": [],
+  "devices": [{
+    "name": "many", "interface": "vcan-pdos", "bitrate": 0, "node_id": 5,
+    "identity": {"device_name": "many", "vendor_id": 1, "product_code": 1, "revision": 1},
+    "heartbeat_ms": 100, "master_watch": null, "on_master_lost": "pre_operational",
+    "on_plc_stop": "hold", "on_plc_stop_state": "none",
+    "objects": [
+      {"index": 8192, "subindex": 1, "name": "Setpoint", "type": "INTEGER16",
+       "direction": "from_master", "exchange": "pdo", "location": "%IW0", "default": 0},
+      {"index": 8448, "subindex": 1, "name": "Counter", "type": "UNSIGNED8",
+       "direction": "to_master", "exchange": "pdo", "location": "%QB0"},
+      {"index": 8448, "subindex": 2, "name": "Fast", "type": "UNSIGNED16",
+       "direction": "to_master", "exchange": "pdo", "location": "%QW0"}
+    ],
+    "rpdos": [{"number": 1, "cob_id": 517, "event_timer_ms": 200,
+               "entries": [{"index": 8192, "subindex": 1}]}],
+    "tpdos": [{"number": 5, "event_timer_ms": 50, "entries": [{"index": 8448, "subindex": 1}]},
+              {"number": 6, "cob_id": 464, "event_timer_ms": 50,
+               "entries": [{"index": 8448, "subindex": 2}]}]
+  }]
+})";
+
+void check_more_pdos_config()
+{
+    const std::string base = kMorePdosConfig;
+    CHECK(packed_refused(replaced(base, "\"number\": 6,", "\"number\": 17,"),
+                         "\"number\" must be an integer from 1 to 16"));
+    CHECK(packed_refused(replaced(base, "\"number\": 1, \"cob_id\": 517,", "\"number\": 1,"),
+                         "RPDO 1: missing \"cob_id\""));
+    CHECK(packed_refused(replaced(base, "\"number\": 5,", "\"number\": 5, \"cob_id\": 464,"),
+                         "use the same COB-ID 0x1D0"));
+    CHECK(packed_refused(replaced(base, "\"number\": 5,", "\"number\": 5, \"cob_id\": 0,"),
+                         "COB-ID 0x000 is reserved for NMT"));
+}
+
+void check_more_pdos(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
+{
+    std::memset(g_int_in, 0, sizeof(g_int_in));
+    std::memset(g_byte_out, 0, sizeof(g_byte_out));
+    std::memset(g_int_out, 0, sizeof(g_int_out));
+    auto vbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
+    Probe p(vbus);
+    size_t m0 = p.mark();
+    Slave slave(dev, virtual_slave_link(vbus));
+    std::string problem;
+    CHECK(slave.start(problem));
+    CHECK(p.wait(
+        m0, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; }, milliseconds(1000)));
+
+    // Sixteen PDOs each way; the unused ones and TPDO 5 without a COB-ID are off.
+    uint32_t v = 0;
+    CHECK(sdo_read(p, 0x140F, 1, v) && (v & 0x80000000u));
+    CHECK(sdo_read(p, 0x180F, 1, v) && (v & 0x80000000u));
+    CHECK(sdo_read(p, 0x1A0F, 0, v) && v == 0);
+    CHECK(sdo_read(p, 0x1804, 1, v) && v == 0x80000000u);
+    CHECK(sdo_read(p, 0x1A04, 0, v) && v == 1);
+    CHECK(sdo_read(p, 0x1A04, 1, v) && v == 0x21000108u);
+    CHECK(sdo_read(p, 0x1805, 1, v) && v == 0x1D0);
+    uint32_t abort_code = 0;
+    CHECK(!sdo_read(p, 0x1810, 1, abort_code) && abort_code == 0x06020000u);
+
+    // Operational: the fixed TPDO 6 runs, TPDO 5 stays silent.
+    g_byte_out[0] = 0x42;
+    g_int_out[0]  = 0x1234;
+    p.send(0x000, {0x01, static_cast<uint8_t>(kNode)});
+    size_t m = p.mark();
+    Frame f;
+    CHECK(scan_until(
+        slave, rt, [&] { return p.wait_id(m, 0x1D0, milliseconds(0), &f); }, milliseconds(1000)));
+    CHECK(f.len == 2 && f.data[0] == 0x34 && f.data[1] == 0x12);
+    CHECK(!scan_until(slave, rt, [] { return false; }, milliseconds(200)));
+    for (uint32_t id = 0x181; id < 0x200; ++id)
+        if (id != 0x1D0 && p.count(m, id) != 0)
+        {
+            std::fprintf(stderr, "unexpected frame 0x%X\n", static_cast<unsigned>(id));
+            CHECK(false);
+        }
+
+    // A master gives TPDO 5 a COB-ID in pre-operational and starts it again.
+    p.send(0x000, {0x80, static_cast<uint8_t>(kNode)});
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x7F; }, milliseconds(1000)));
+    CHECK(sdo_write(p, 0x1804, 1, 0x1C2, 4) == 0);
+    p.send(0x000, {0x01, static_cast<uint8_t>(kNode)});
+    m = p.mark();
+    CHECK(scan_until(
+        slave, rt, [&] { return p.wait_id(m, 0x1C2, milliseconds(0), &f); }, milliseconds(1000)));
+    CHECK(f.len == 1 && f.data[0] == 0x42);
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            if (s.pdos.size() != 32)
+                return false;
+            const SlavePdoStatus &t5 = s.pdos[16 + 4];
+            return t5.tpdo && t5.number == 5 && t5.cob_id == 0x1C2 && t5.frames > 0;
+        },
+        milliseconds(1000)));
+
+    // RPDO 1 receive timeout: EMCY 8250h after the frames stop, value held, still operational.
+    m = p.mark();
+    p.send(0x205, {0xDC, 0x05});
+    CHECK(scan_until(slave, rt, [] { return g_int_in[0] == 1500; }, milliseconds(500)));
+    CHECK(scan_until(
+        slave, rt, [&] { return p.wait(m, [](const Frame &x) { return is_emcy(x, 0x8250); },
+                                       milliseconds(0)); },
+        milliseconds(1000)));
+    CHECK(g_int_in[0] == 1500);
+    size_t after = p.mark();
+    CHECK(p.wait(
+        after, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x05; },
+        milliseconds(500)));
+    p.send(0x205, {0xDD, 0x05});
+    CHECK(scan_until(
+        slave, rt, [&] { return p.wait(after, [](const Frame &x) { return is_emcy(x, 0x0000); },
+                                       milliseconds(0)); },
+        milliseconds(1000)));
+    CHECK(scan_until(slave, rt, [] { return g_int_in[0] == 1501; }, milliseconds(500)));
+    slave.stop();
+}
+
 int main()
 {
     set_log_sink(quiet_sink);
@@ -1555,6 +1678,16 @@ int main()
             std::fprintf(stderr, "%s\n", e.c_str());
         if (perrors.empty())
             check_packed(pcfg.devices[0], rt);
+    }
+    check_more_pdos_config();
+    {
+        Config mcfg;
+        std::vector<std::string> merrors;
+        CHECK(parse_config(kMorePdosConfig, mcfg, merrors));
+        for (const auto &e : merrors)
+            std::fprintf(stderr, "%s\n", e.c_str());
+        if (merrors.empty())
+            check_more_pdos(mcfg.devices[0], rt);
     }
     CHECK(system(("rm -rf " + dir).c_str()) == 0);
     return TEST_RESULT();
