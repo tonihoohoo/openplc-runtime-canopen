@@ -191,7 +191,7 @@ jobs:
           npx electron --no-sandbox ./release/app/dist/main/main.js --cli compile \
             ./e2e/fixtures/canopen-slave-board/project --target "ESP32 Generic" \
             --user-data "$RUNNER_TEMP/editor-data" > compile.log 2>&1 || {
-            echo "--- first errors"; grep -n -m 12 -B 3 -A 6 'error' compile.log | grep -v 'Could not refresh\|arduino-cli: not found' | head -150
+            echo "--- first errors"; grep -n -m 8 -B 2 -A 8 ': error:\|fatal error:' compile.log | cut -c 1-400 | head -150
             echo "--- tail"; tail -30 compile.log; exit 1; }
           tail -30 compile.log
           echo "compile $(( $(date +%s) - start )) s"
