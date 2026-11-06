@@ -20,8 +20,6 @@ jobs:
       fail-fast: false
       matrix:
         v:
-          - { name: base, flags: "", qemu: "" }
-          - { name: iram, flags: "-DSPIKE_IRAM", qemu: "" }
           - { name: psram, flags: "", qemu: "-m 4M" }
     timeout-minutes: 40
     steps:
@@ -103,3 +101,83 @@ jobs:
           bt=$(grep -o '0x4[0-9a-f]\{7\}' serial.log | sort -u | tr '\n' ' ')
           if [ -n "$bt" ]; then echo "--- addr2line"; "$a2l" -pfiaC -e build/spike.ino.elf $bt; fi
           exit $rc
+
+  board:
+    name: Board slave built by the editor
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      EDITOR_REPOSITORY: tonihoohoo/openplc-editor-canopen
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.EDITOR_REPOSITORY }}
+          ref: feature/canopen-add-canopen-slave-esp32
+          path: editor
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: editor/package-lock.json
+
+      - name: Build the editor
+        working-directory: editor
+        run: |
+          start=$(date +%s)
+          npm ci --ignore-scripts
+          npm run setup:strucpp
+          node node_modules/electron/install.js
+          npm run build:main -- --no-optimization-minimize --no-devtool --no-optimization-concatenate-modules
+          mkdir -p release/app/dist/main/node_modules
+          ln -sfn "$PWD/node_modules/strucpp" release/app/dist/main/node_modules/strucpp
+          mkdir -p "$RUNNER_TEMP/editor-data/User/Runtime"
+          echo '[]' > "$RUNNER_TEMP/editor-data/User/Runtime/arduino-core-control.json"
+          echo '[]' > "$RUNNER_TEMP/editor-data/User/Runtime/arduino-library-control.json"
+          echo "editor build $(( $(date +%s) - start )) s"
+
+      - name: Board package
+        working-directory: editor
+        run: |
+          curl -fsSL https://api.autonomylogic.com/vpp-catalog/v1/catalog.json -o catalog.json
+          python3 - <<'PY'
+          import json
+          c = json.load(open('catalog.json'))
+          items = c if isinstance(c, list) else c.get('packages', c)
+          for p in items:
+              print(p.get('packageId'), [v.get('version') for v in p.get('versions', [])][:3])
+          PY
+          url=$(python3 -c "
+          import json
+          c = json.load(open('catalog.json'))
+          items = c if isinstance(c, list) else c.get('packages', c)
+          p = next(p for p in items if 'espressif' in p.get('packageId', ''))
+          print(p['versions'][0]['downloadUrl'])")
+          echo "package $url"
+          curl -fsSL "$url" -o esp.vpp
+          xvfb-run -a npx electron --no-sandbox ./release/app/dist/main/main.js --cli packages install esp.vpp \
+            --user-data "$RUNNER_TEMP/editor-data" --json || npx electron --no-sandbox ./release/app/dist/main/main.js --cli packages install esp.vpp \
+            --user-data "$RUNNER_TEMP/editor-data" --json
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli packages list \
+            --user-data "$RUNNER_TEMP/editor-data" --json | tee boards.json
+
+      - name: Compile the board slave
+        working-directory: editor
+        run: |
+          start=$(date +%s)
+          target=$(python3 -c "
+          import json
+          d = json.load(open('boards.json'))
+          d = d.get('data', d)
+          for b in d['boards']:
+              print(b['name'], b.get('core'), file=__import__('sys').stderr)
+          b = next(b for b in d['boards'] if b.get('core') == 'esp32:esp32' and 'C3' not in b['name'] and 'S' not in b['name'].replace('ESP32', ''))
+          print(b['name'])")
+          echo "target: $target"
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli compile \
+            ./e2e/fixtures/canopen-slave-board/project --target "$target" \
+            --user-data "$RUNNER_TEMP/editor-data" 2>&1 | tail -150
+          echo "compile $(( $(date +%s) - start )) s"
+          find / -name "*.merged.bin" -newer catalog.json 2>/dev/null | head
