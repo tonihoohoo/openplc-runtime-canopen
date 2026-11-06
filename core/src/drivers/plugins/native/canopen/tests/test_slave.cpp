@@ -739,6 +739,8 @@ void check_error_reset(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
         CHECK(sdo_write(p, 0x1800, 2, 254, 1) == 0);
         CHECK(sdo_write(p, 0x1800, 1, 0x80000185, 4) == 0);
         CHECK(sdo_write(p, 0x1A00, 0, 0, 1) == 0);
+        CHECK(sdo_write(p, 0x1A00, 0, 9, 1) == 0x06090030);
+        CHECK(sdo_write(p, 0x1A00, 0, 10, 1) == 0x06090030);
         CHECK(sdo_write(p, 0x1A00, 1, 0x21000120, 4) == 0x06040041); // 32 bits of a 16-bit object
         CHECK(sdo_write(p, 0x1A00, 1, 0x20000110, 4) == 0x06040041); // from the master
         CHECK(sdo_write(p, 0x1A00, 1, 0x21000108, 4) == 0);         // 8 bits of it fit

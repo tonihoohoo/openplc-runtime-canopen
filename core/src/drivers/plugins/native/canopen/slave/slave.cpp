@@ -787,7 +787,7 @@ struct Slave::Impl
     }
 
     // Checks the stack leaves out, in every NMT state: a transmission type is 0-240, 254 or
-    // 255, and a mapped length fits the object it maps.
+    // 255, a mapping has at most 8 entries, and a mapped length fits the object it maps.
     static co_unsigned32_t map_len_ac(const co_dev_t *d, uint32_t map)
     {
         const uint16_t i    = static_cast<uint16_t>(map >> 16);
@@ -812,8 +812,10 @@ struct Slave::Impl
         const co_dev_t *d = co_obj_get_dev(obj);
         if (s != 0)
             return val.u32 ? map_len_ac(d, val.u32) : 0;
+        if (val.u8 > 8)
+            return CO_SDO_AC_PARAM_VAL; // no MPDOs; at most 8 entries
         co_unsigned32_t ac = 0;
-        for (uint8_t k = 1; !ac && val.u8 <= 0x40 && k <= val.u8; ++k)
+        for (uint8_t k = 1; !ac && k <= val.u8; ++k)
             if (const uint32_t map = co_dev_get_val_u32(d, idx, k))
                 ac = map_len_ac(d, map);
         return ac;

@@ -301,8 +301,8 @@ Behaviour:
   gives them. A master may remap the
   PDOs by the CiA 301 procedure, in pre-operational and in operational alike; an object that is
   not `pdo`, an object from the master in a TPDO and a length longer than the object cannot be
-  mapped (abort 0604 0041h). Transmission types 241-253 are
-  refused (0609 0030h).
+  mapped (abort 0604 0041h). Transmission types 241-253 and a
+  mapping count above 8 are refused (0609 0030h).
   Writes to 0x1010 (store) and 0x1011 (restore) are refused (0602 0000h): nothing is stored, and a
   master writes its settings again at every boot.
 - Event-driven TPDOs (254, 255) are sent when a mapped value changes and on entering operational;
