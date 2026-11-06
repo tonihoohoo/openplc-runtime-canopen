@@ -20,7 +20,12 @@ jobs:
       fail-fast: false
       matrix:
         v:
-          - { name: psram, flags: "", qemu: "-m 4M" }
+          - { name: psram-1, flags: "", qemu: "-m 4M" }
+          - { name: psram-2, flags: "", qemu: "-m 4M" }
+          - { name: psram-3, flags: "", qemu: "-m 4M" }
+          - { name: icount-1, flags: "", qemu: "-m 4M -icount shift=3,align=off,sleep=on" }
+          - { name: icount-2, flags: "", qemu: "-m 4M -icount shift=3,align=off,sleep=on" }
+          - { name: icount-3, flags: "", qemu: "-m 4M -icount shift=3,align=off,sleep=on" }
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -123,6 +128,20 @@ jobs:
           cache: npm
           cache-dependency-path: editor/package-lock.json
 
+      - name: vcan
+        run: |
+          .github/scripts/vcan-up.sh vcan0
+          .github/scripts/vcan-up.sh vcan1
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/qemu
+          key: board-qemu-v1
+
+      - name: QEMU
+        run: .github/board-slave/qemu-install.sh
+
       - name: Build the editor
         working-directory: editor
         run: |
@@ -143,9 +162,8 @@ jobs:
         run: |
           curl -fsSL https://api.autonomylogic.com/vpp-catalog/v1/catalog.json -o catalog.json
           url=$(python3 - <<'PY'
-          import json, sys
+          import json
           c = json.load(open('catalog.json'))
-          print(json.dumps(c)[:1200], file=sys.stderr)
           found = []
           def walk(x):
               if isinstance(x, dict):
@@ -158,34 +176,76 @@ jobs:
                       walk(v)
           walk(c)
           p = next(p for p in found if 'espressif' in p['packageId'])
-          print(json.dumps(p)[:800], file=sys.stderr)
           v = p.get('versions', [p])[0]
           print(v.get('downloadUrl') or v.get('url'))
           PY
           )
-          echo "package $url"
           curl -fsSL "$url" -o esp.vpp
-          xvfb-run -a npx electron --no-sandbox ./release/app/dist/main/main.js --cli packages install esp.vpp \
-            --user-data "$RUNNER_TEMP/editor-data" --json || npx electron --no-sandbox ./release/app/dist/main/main.js --cli packages install esp.vpp \
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli packages install esp.vpp \
             --user-data "$RUNNER_TEMP/editor-data" --json
-          npx electron --no-sandbox ./release/app/dist/main/main.js --cli packages list \
-            --user-data "$RUNNER_TEMP/editor-data" --json | tee boards.json
 
       - name: Compile the board slave
         working-directory: editor
         run: |
+          set -o pipefail
           start=$(date +%s)
-          target=$(python3 -c "
-          import json
-          d = json.load(open('boards.json'))
-          d = d.get('data', d)
-          for b in d['boards']:
-              print(b['name'], b.get('core'), file=__import__('sys').stderr)
-          b = next(b for b in d['boards'] if b.get('core') == 'esp32:esp32' and 'C3' not in b['name'] and 'S' not in b['name'].replace('ESP32', ''))
-          print(b['name'])")
-          echo "target: $target"
           npx electron --no-sandbox ./release/app/dist/main/main.js --cli compile \
-            ./e2e/fixtures/canopen-slave-board/project --target "$target" \
-            --user-data "$RUNNER_TEMP/editor-data" 2>&1 | tail -150
+            ./e2e/fixtures/canopen-slave-board/project --target "ESP32 Generic" \
+            --user-data "$RUNNER_TEMP/editor-data" 2>&1 | tail -80
           echo "compile $(( $(date +%s) - start )) s"
-          find / -name "*.merged.bin" -newer catalog.json 2>/dev/null | head
+          od=$(find / -name canopen_slave_od.h -newer catalog.json -not -path '*/editor/resources/*' 2>/dev/null | head -1)
+          bin=$(find / -name "*.merged.bin" -newer catalog.json 2>/dev/null | head -1)
+          echo "headers: $od"; echo "image: $bin"
+          test -n "$od" && test -n "$bin"
+          mkdir -p "$RUNNER_TEMP/board"
+          cp "$(dirname "$od")"/canopen_slave_config.h "$od" "$RUNNER_TEMP/board/"
+          cp "$bin" "$RUNNER_TEMP/board/flash.bin"
+          elf=$(ls "$(dirname "$bin")"/*.elf 2>/dev/null | head -1 || true)
+          if [ -n "$elf" ]; then cp "$elf" "$RUNNER_TEMP/board/firmware.elf"; fi
+          truncate -s 4M "$RUNNER_TEMP/board/flash.bin"
+
+      - name: Slave module on Linux, end to end on vcan1
+        timeout-minutes: 5
+        run: |
+          b="$RUNNER_TEMP/board"; e=editor/resources/sources; c=$e/canopennode/src
+          mkdir -p host && cd host
+          for f in $(find "../$c" -name '*.c'); do gcc -c -O1 -I"../$c" -I"../$c/301" -I"../$c/305" "$f" -o "$(basename "$f" .c).o"; done
+          g++ -std=gnu++17 -O1 -Wall -Wextra -Werror -DCANOPEN_SLAVE_HOST -I"$b" -I"../$e/arduino" -I"../$c" -I"../$c/301" -I"../$c/305" -c "../$e/arduino/canopen_slave.cpp" -o slave.o
+          g++ -std=gnu++17 -O1 -Wall -Wextra -Werror -I"$b" -I"../$e/arduino" -c ../.github/board-slave/host_slave.cpp -o host.o
+          g++ ./*.o -o host_slave
+          cd ..
+          candump -t d vcan1 > host-candump.log 2>&1 &
+          ./host/host_slave vcan1 5020 > host.log 2>&1 &
+          pid=$!
+          set +e
+          python3 .github/scripts/canopen_slave_e2e.py --interface vcan1 --board 127.0.0.1:5020
+          rc=$?
+          kill $pid
+          echo "--- slave"; cat host.log
+          if [ $rc -ne 0 ]; then echo "--- candump"; tail -60 host-candump.log; fi
+          exit $rc
+
+      - name: Firmware in QEMU, end to end on vcan0
+        timeout-minutes: 8
+        run: |
+          b="$RUNNER_TEMP/board"
+          candump -t d vcan0 > qemu-candump.log 2>&1 &
+          ~/qemu/bin/qemu-system-xtensa -nographic -machine esp32 -m 4M \
+            -drive file="$b/flash.bin",if=mtd,format=raw \
+            -object can-bus,id=canbus0 \
+            -object can-host-socketcan,id=canhost0,if=vcan0,canbus=canbus0 \
+            -global driver=esp32.twai,property=canbus,value=canbus0 \
+            -chardev socket,id=uart0,host=127.0.0.1,port=5021,server=on,wait=off,logfile=serial.log \
+            -serial chardev:uart0 -monitor none > qemu.log 2>&1 &
+          qpid=$!
+          set +e
+          python3 .github/scripts/canopen_slave_e2e.py --interface vcan0 --board 127.0.0.1:5021
+          rc=$?
+          kill $qpid
+          echo "--- qemu"; tail -20 qemu.log
+          echo "--- serial"; tail -60 serial.log
+          a2l=$(ls ~/.arduino15/packages/esp32/tools/esp-x32/*/bin/xtensa-esp32-elf-addr2line "$RUNNER_TEMP"/editor-data/*/packages/esp32/tools/esp-x32/*/bin/xtensa-esp32-elf-addr2line 2>/dev/null | head -1)
+          bt=$(grep -o '0x4[0-9a-f]\{7\}' serial.log | sort -u | tr '\n' ' ')
+          if [ -n "$bt" ] && [ -n "$a2l" ] && [ -f "$b/firmware.elf" ]; then echo "--- addr2line"; "$a2l" -pfiaC -e "$b/firmware.elf" $bt; fi
+          echo "--- candump"; head -20 qemu-candump.log; echo ...; tail -40 qemu-candump.log
+          exit $rc

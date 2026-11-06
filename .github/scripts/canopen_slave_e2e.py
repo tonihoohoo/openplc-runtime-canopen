@@ -12,6 +12,12 @@ heartbeat lost and back, the PLC stopped and started, and the slave in /api/cano
 NMT source, SDO writes, PDO counts, values and active EMCY codes.
 
     canopen_slave_e2e.py --user ci --password secret --interface vcan0
+
+With --board HOST:PORT the slave is the board firmware (in QEMU, or its module built for Linux):
+the PLC is stopped and started by the editor's 0x4B frame on that TCP port (the board's serial
+port), and the /api/canopen/status checks are skipped.
+
+    canopen_slave_e2e.py --interface vcan0 --board 127.0.0.1:5020
 """
 
 import argparse
@@ -47,6 +53,24 @@ def call(path: str, token: str | None = None, body: Json | None = None) -> Json:
     with urllib.request.urlopen(req, context=CONTEXT, timeout=10) as resp:
         answer: Json = json.loads(resp.read())
     return answer
+
+
+def crc16(data: bytes) -> int:
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return crc
+
+
+def board_plc(address: str, run: bool) -> None:
+    """The editor's run/stop frame to the board (Modbus RTU, slave 1, function 0x4B)."""
+    host, port = address.rsplit(":", 1)
+    pdu = bytes([1, 0x4B, 1 if run else 0])
+    with socket.create_connection((host, int(port)), timeout=5) as conn:
+        conn.sendall(pdu + struct.pack("<H", crc16(pdu)))
+        time.sleep(0.5)
 
 
 def expect(what: str, got: object, wanted: object) -> None:
@@ -121,14 +145,28 @@ def sdo_write(bus: Bus, index: int, sub: int, value: int, size: int) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--user", required=True)
-    parser.add_argument("--password", required=True)
+    parser.add_argument("--user")
+    parser.add_argument("--password")
     parser.add_argument("--interface", required=True)
+    parser.add_argument("--board", help="HOST:PORT of the board's serial port")
     args = parser.parse_args()
-    token = str(
-        call("/login", body={"username": args.user, "password": args.password})["access_token"]
+    board: str | None = args.board
+    token = (
+        None
+        if board
+        else str(
+            call("/login", body={"username": args.user, "password": args.password})[
+                "access_token"
+            ]
+        )
     )
     bus = Bus(args.interface)
+
+    def plc(run: bool) -> None:
+        if board:
+            board_plc(board, run)
+        else:
+            call("/start-plc" if run else "/stop-plc", token)
 
     def slave() -> Json:
         slaves = call("/canopen/status", token).get("slaves")
@@ -138,6 +176,9 @@ def main() -> None:
         return {}
 
     def wait_status(what: str, check: Callable[[Json], bool], seconds: float = 20) -> None:
+        if board:
+            print(f"skip on a board: {what}")
+            return
         end = time.monotonic() + seconds
         last: Json = {}
         while time.monotonic() < end:
@@ -291,7 +332,7 @@ def main() -> None:
     expect("EMCY 0000h when the master heartbeat is back", emcy is not None, True)
 
     start = bus.mark()
-    call("/stop-plc", token)
+    plc(False)
     emcy = bus.wait(start, lambda f: f[0] == 0x80 + NODE and f[1][:2] == b"\x00\x62", 10)
     expect("EMCY 6200h when the PLC stops", emcy is not None, True)
     wait_status(
@@ -305,7 +346,7 @@ def main() -> None:
     )
 
     start = bus.mark()
-    call("/start-plc", token)
+    plc(True)
     emcy = bus.wait(start, lambda f: f[0] == 0x80 + NODE and f[1][:2] == b"\x00\x00", 20)
     expect("EMCY 0000h when the PLC starts again", emcy is not None, True)
     expect("parameter back to its default after the PLC start", sdo_read(bus, 0x2000, 3), (0, 1000))
