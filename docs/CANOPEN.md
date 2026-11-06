@@ -4,8 +4,7 @@ The `canopen` native plugin is a CANopen master (CiA 301/302) on a Linux SocketC
 runs inside `plc_main`, exchanges PDOs with the nodes once per PLC cycle, and is built on
 [Lely CANopen](https://gitlab.com/lely_industries/lely-core) (Apache-2.0), which is fetched at a
 pinned commit and linked statically into the plugin. The same plugin can also make the runtime a
-[CANopen slave](#canopen-slave) (CiA 301) on another interface, built on
-[CANopenNode](https://github.com/CANopenNode/CANopenNode) (Apache-2.0) at its newest release.
+[CANopen slave](#canopen-slave) (CiA 301) on another interface, built on the same Lely stack.
 
 ```
 Editor upload ──► webserver ──► conf/canopen.json ──► plc_main (canopen plugin) ◄── can0 ──► nodes
@@ -236,8 +235,8 @@ A project's CANopen slave server makes the runtime a CANopen slave (CiA 301) on 
 interface: a master on that bus reads and writes the objects the project defines, and the values
 pass to and from the PLC program through `%I` and `%Q` locations. The editor writes it as an item
 of `devices` in `conf/canopen.json`, next to `networks` (which may be empty). The slave runs on
-[CANopenNode](https://github.com/CANopenNode/CANopenNode) v4.1 with the plugin's own CAN driver and
-an object dictionary built from the file when the PLC starts.
+Lely's CANopen stack, the same one the master uses, in its own thread on the plugin's CAN link,
+with an object dictionary built from the file when the PLC starts.
 
 ```json
 {
@@ -693,8 +692,7 @@ itself; they lower the worst-case delays, not the typical ones.
 ## Building and testing
 
 `install.sh` builds the plugin with the other native plugins. Lely is built from source, which
-needs `git`, `autoconf`, `automake` and `libtool` (the dependency step installs them), and
-CANopenNode is cloned at its release tag into the build directory. By hand:
+needs `git`, `autoconf`, `automake` and `libtool` (the dependency step installs them). By hand:
 
 ```bash
 cd core/src/drivers/plugins/native/canopen
@@ -705,9 +703,6 @@ ctest --test-dir build --output-on-failure
 
 `-DLELY_PREFIX=<dir>` uses a Lely already installed there instead of fetching it; a Lely installed
 in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workflow caches one there).
-`-DCANOPENNODE_SOURCE_DIR=<dir>` uses a CANopenNode checkout instead of cloning it. When
-CANopenNode cannot be fetched, the plugin is built without the slave (with a CMake warning) and
-refuses a file with `devices`.
 
 | Test | What it covers |
 |---|---|

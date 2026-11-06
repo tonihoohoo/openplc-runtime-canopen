@@ -253,8 +253,6 @@ bool Parser::parse(const cJSON *root)
     }
     if (cfg_.networks.empty() && cfg_.devices.empty())
         error("", "\"networks\" and \"devices\" are both empty");
-    if (!cfg_.devices.empty() && !slave_supported())
-        error("", "this runtime has no CANopen slave support; \"devices\" cannot be run");
     std::map<std::string, std::string> ifaces;
     for (const auto &net : cfg_.networks)
     {

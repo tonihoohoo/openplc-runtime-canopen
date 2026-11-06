@@ -6,267 +6,129 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <ctime>
 #include <deque>
+#include <functional>
 #include <mutex>
 
-#include <net/if.h>
-#include <poll.h>
 #include <pthread.h>
 #include <sys/prctl.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
-#include <linux/can.h>
-#include <linux/can/raw.h>
+#include <lely/can/msg.h>
+#include <lely/can/net.hpp>
+#include <lely/co/dcf.hpp>
+#include <lely/co/dev.hpp>
+#include <lely/co/emcy.hpp>
+#include <lely/co/lss.hpp>
+#include <lely/co/nmt.hpp>
+#include <lely/co/obj.hpp>
+#include <lely/co/pdo.h>
+#include <lely/co/rpdo.hpp>
+#include <lely/co/sdo.h>
+#include <lely/co/tpdo.hpp>
+#include <lely/co/type.hpp>
+#include <lely/co/val.hpp>
 
-#include <lely/ev/loop.hpp>
-#include <lely/io2/ctx.hpp>
-#include <lely/io2/vcan.hpp>
-
-#include "CANopen.h"
 #include "bus_monitor.h"
 #include "bus_off_recovery.h"
 #include "can_link.h"
 #include "log.h"
 #include "lss_store.h"
 #include "plc_port.h"
-#include "slave_od.h"
+#include "slave_dcf.h"
 
 namespace canopen_plugin
 {
-
-bool slave_supported()
-{
-    return true;
-}
 
 namespace
 {
 
 using Clock = std::chrono::steady_clock;
 
-// Error status bit of a PLC stop: the first manufacturer bit (CiA 301 leaves them free).
-constexpr uint8_t kPlcStopBit = CO_EM_MANUFACTURER_START;
-// The program's emergencies use the manufacturer bits after it, one per slot.
-constexpr uint8_t kProgramBit = CO_EM_MANUFACTURER_START + 1;
-static_assert(kProgramBit + CANOPEN_PLC_SLAVE_EMCY_SLOTS - 1 <= CO_EM_MANUFACTURER_END,
-              "every program emergency slot needs an error status bit");
-constexpr int kRetryMs        = 1000;
-constexpr int kTickMs         = 1;
-constexpr uint16_t kLssMasterId = 0x7E5;
-constexpr uint8_t kLssFastscan  = 0x51;
+// Error codes (CiA 301 7.2.7) the slave sends itself.
+constexpr uint16_t kEmcyNoError     = 0x0000;
+constexpr uint16_t kEmcyPlcStop     = 0x6200; // software, user
+constexpr uint16_t kEmcyHeartbeat   = 0x8130;
+constexpr uint16_t kEmcyPassive     = 0x8120;
+constexpr uint16_t kEmcyBusOff      = 0x8140;
+constexpr uint16_t kEmcyRpdoTimeout = 0x8250;
+// Error register bits (CiA 301 7.5.2.2).
+constexpr uint8_t kRegCurrent       = 0x02;
+constexpr uint8_t kRegVoltage       = 0x04;
+constexpr uint8_t kRegTemperature   = 0x08;
+constexpr uint8_t kRegCommunication = 0x10;
+constexpr uint8_t kRegManufacturer  = 0x80;
+// Byte 3 of an EMCY: the error status bit that raised it, as the earlier slave sent it.
+constexpr uint8_t kBitPassive = 0x07;
+constexpr uint8_t kBitBusOff  = 0x12;
+constexpr uint8_t kPlcStopBit = 0x30;
+constexpr uint8_t kProgramBit = 0x31; // one per program slot after it
+// 0x1029 values (CiA 301): what the slave does on a communication error.
+constexpr uint8_t kErrorPreOperational = 0;
+constexpr uint8_t kErrorNoChange       = 1;
+constexpr uint8_t kErrorStopped        = 2;
+constexpr size_t kHistory              = 8; // 0x1003 entries
+constexpr int kRetryMs                 = 1000;
+constexpr int kTickMs                  = 1;
+constexpr uint32_t kLssMasterId        = 0x7E5;
+constexpr uint32_t kLssSlaveId         = 0x7E4;
+constexpr uint8_t kLssSwitchGlobal     = 0x04;
+constexpr uint8_t kLssConfigBitTiming  = 0x13;
+constexpr uint8_t kLssSwitchSelected   = 0x44;
+constexpr uint8_t kLssFastscan         = 0x51;
+constexpr uint8_t kLssFastscanAnswer   = 0x4F;
 
-class SocketLink : public SlaveLink
+timespec monotonic_now()
 {
-  public:
-    SocketLink(std::string interface, unsigned bitrate)
-        : interface_(std::move(interface)), bitrate_(bitrate)
-    {
-    }
-    ~SocketLink() override
-    {
-        close();
-    }
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts;
+}
 
-    bool open(std::string &problem) override
-    {
-        close();
-        if (prepare_link(system_link_ops(), interface_, bitrate_, problem, setup_) !=
-            LinkResult::Ready)
-            return false;
-        fd_ = socket(PF_CAN, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, CAN_RAW);
-        if (fd_ < 0)
-        {
-            problem = std::string("cannot open a CAN socket: ") + std::strerror(errno);
-            return false;
-        }
-        sockaddr_can addr{};
-        addr.can_family  = AF_CAN;
-        addr.can_ifindex = static_cast<int>(if_nametoindex(interface_.c_str()));
-        if (addr.can_ifindex == 0 ||
-            bind(fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0)
-        {
-            problem = "cannot bind to " + interface_ + ": " + std::strerror(errno);
-            close();
-            return false;
-        }
-        return true;
-    }
-
-    void close() override
-    {
-        if (fd_ >= 0)
-            ::close(fd_);
-        fd_ = -1;
-    }
-
-    int read(Frame &frame, int timeout_ms) override
-    {
-        pollfd p{fd_, POLLIN, 0};
-        int rc = poll(&p, 1, timeout_ms);
-        if (rc == 0)
-            return 0;
-        if (rc < 0)
-            return errno == EINTR ? 0 : -1;
-        if (p.revents & (POLLERR | POLLHUP | POLLNVAL))
-            return -1;
-        can_frame f{};
-        ssize_t n = ::read(fd_, &f, sizeof(f));
-        if (n < 0)
-            return errno == EAGAIN || errno == EINTR ? 0 : -1;
-        if (n != static_cast<ssize_t>(sizeof(f)) || (f.can_id & (CAN_EFF_FLAG | CAN_ERR_FLAG)))
-            return 0;
-        frame.id  = (f.can_id & CAN_SFF_MASK) | ((f.can_id & CAN_RTR_FLAG) ? kRtr : 0);
-        frame.dlc = f.can_dlc > 8 ? 8 : f.can_dlc;
-        std::memcpy(frame.data, f.data, 8);
-        return 1;
-    }
-
-    void set_bitrate(unsigned bitrate) override
-    {
-        bitrate_ = bitrate;
-    }
-
-    int write(const Frame &frame) override
-    {
-        can_frame f{};
-        f.can_id  = (frame.id & CAN_SFF_MASK) | ((frame.id & kRtr) ? CAN_RTR_FLAG : 0);
-        f.can_dlc = frame.dlc;
-        std::memcpy(f.data, frame.data, 8);
-        return ::write(fd_, &f, sizeof(f)) == static_cast<ssize_t>(sizeof(f)) ? 0 : -1;
-    }
-
-    bool info(LinkInfo &out) override
-    {
-        return system_link_ops().get(interface_, out) == 0;
-    }
-
-    int take_down() override
-    {
-        return system_link_ops().set_up(interface_, false);
-    }
-
-    bool restart_refused() const override
-    {
-        return setup_.restart_refused;
-    }
-
-  private:
-    std::string interface_;
-    unsigned bitrate_;
-    int fd_ = -1;
-    LinkSetup setup_; // restart_refused is kept across reopens
-};
-
-class VirtualLink : public SlaveLink
+uint8_t nmt_state(co_nmt_t *nmt)
 {
-  public:
-    explicit VirtualLink(std::shared_ptr<lely::io::VirtualCanController> bus) : bus_(bus) {}
-
-    bool open(std::string &) override
-    {
-        chan_.reset(new lely::io::VirtualCanChannel(ctx_, loop_.get_executor()));
-        chan_->open(*bus_);
-        return true;
-    }
-    void close() override
-    {
-        chan_.reset();
-    }
-    int read(Frame &frame, int timeout_ms) override
-    {
-        can_msg msg = CAN_MSG_INIT;
-        std::error_code ec;
-        if (chan_->read(&msg, nullptr, nullptr, timeout_ms, ec) != 1)
-            return 0;
-        if (msg.flags & CAN_FLAG_IDE)
-            return 0;
-        frame.id  = (msg.id & 0x7FF) | ((msg.flags & CAN_FLAG_RTR) ? kRtr : 0);
-        frame.dlc = msg.len > 8 ? 8 : msg.len;
-        std::memcpy(frame.data, msg.data, 8);
-        return 1;
-    }
-    int write(const Frame &frame) override
-    {
-        can_msg msg = CAN_MSG_INIT;
-        msg.id      = frame.id & 0x7FF;
-        if (frame.id & kRtr)
-            msg.flags |= CAN_FLAG_RTR;
-        msg.len = frame.dlc;
-        std::memcpy(msg.data, frame.data, 8);
-        std::error_code ec;
-        chan_->write(msg, 100, ec);
-        return ec ? -1 : 0;
-    }
-
-  private:
-    std::shared_ptr<lely::io::VirtualCanController> bus_;
-    lely::io::Context ctx_;
-    lely::ev::Loop loop_;
-    std::unique_ptr<lely::io::VirtualCanChannel> chan_;
-};
+    return static_cast<uint8_t>(co_nmt_get_st(nmt) & ~CO_NMT_ST_TOGGLE);
+}
 
 } // namespace
 
-std::unique_ptr<SlaveLink> socket_slave_link(const std::string &interface, unsigned bitrate)
-{
-    return std::unique_ptr<SlaveLink>(new SocketLink(interface, bitrate));
-}
-
-std::unique_ptr<SlaveLink> virtual_slave_link(std::shared_ptr<lely::io::VirtualCanController> bus)
-{
-    return std::unique_ptr<SlaveLink>(new VirtualLink(bus));
-}
-
-// 0x1003 without the "error reset" (0000h) messages that CANopenNode keeps in the same FIFO:
-// the number of errors when `nth` is 0, else the nth newest error. False when there is none.
-static bool history_entry(const CO_EM_t *em, uint8_t nth, uint32_t &value)
-{
-    uint8_t found = 0;
-    for (uint8_t k = 1; k <= em->fifoCount; ++k)
-    {
-        int index = static_cast<int>(em->fifoWrPtr) - k;
-        if (index < 0)
-            index += em->fifoSize;
-        const uint32_t msg = em->fifo[index].msg;
-        if ((msg & 0xFFFFu) == 0)
-            continue;
-        if (++found == nth)
-        {
-            value = msg;
-            return true;
-        }
-    }
-    value = found;
-    return nth == 0;
-}
-
-static ODR_t read_history(OD_stream_t *stream, void *buf, OD_size_t count, OD_size_t *count_read)
-{
-    if (stream == nullptr || buf == nullptr || count_read == nullptr || count < 1 ||
-        (stream->subIndex > 0 && count < 4))
-        return ODR_DEV_INCOMPAT;
-    const CO_EM_t *em = static_cast<const CO_EM_t *>(stream->object);
-    uint32_t value    = 0;
-    if (!history_entry(em, stream->subIndex, value))
-        return ODR_NO_DATA;
-    if (stream->subIndex == 0)
-    {
-        CO_setUint8(buf, static_cast<uint8_t>(value));
-        *count_read = 1;
-    }
-    else
-    {
-        CO_setUint32(buf, value);
-        *count_read = 4;
-    }
-    return ODR_OK;
-}
-
 struct Slave::Impl
 {
-    SlaveOd od;
-    SlaveCanPort port{};
+    Slave *self = nullptr;
+
+    // ---- built in start(), kept for the slave's life ----
+    std::string dcf_base; // the DCF with node ID 255; re-made per start of the stack
+    // One application object in the dictionary; `sub` belongs to the stack running now.
+    struct Slot
+    {
+        const SlaveObject *obj = nullptr;
+        co_sub_t *sub          = nullptr;
+    };
+    std::vector<Slot> from_master;
+    std::vector<Slot> to_master;
+    struct AppSub
+    {
+        Impl *impl                   = nullptr;
+        const SlaveObject *obj       = nullptr;
+        std::atomic<uint32_t> *count = nullptr;
+    };
+    std::deque<AppSub> app_subs;
+    std::deque<std::atomic<uint32_t>> counts;
+
+    // ---- the stack running now (slave thread only) ----
+    co_dev_t *dev    = nullptr;
+    can_net_t *net   = nullptr;
+    co_nmt_t *nmt    = nullptr;
+    void *app_dcf    = nullptr; // the application values at start, for a PLC start
+    bool booting     = false;   // the stack's first reset node: the LSS values are loaded
+    bool restart     = false;   // a reset node brought another bit rate: start the stack anew
+    bool reset_comm  = false;   // a reset communication ran; the slave is on the bus anew
+    bool after_node  = false;   // that reset communication followed a reset node
+    bool written     = false;   // a master wrote a value from it, or the defaults came back
+    bool mute_emcy   = false;   // drops an EMCY being replaced by another one
+    uint8_t st_known = 0xFF;    // the NMT state the indications were installed for
+
+    std::function<void()> at_reset_comm; // the slave's status for the node ID now in use
     SlaveLink *link         = nullptr;
     unsigned node_id        = 0;
     unsigned master_node_id = 0; // 0: not watched
@@ -276,14 +138,23 @@ struct Slave::Impl
     uint16_t last_emcy      = 0;
     bool emcy_sent          = false;
     unsigned write_failures = 0;
-    OD_extension_t history{};
+    std::deque<uint32_t> history; // 0x1003, newest first
 
     // What the frames show, for the status (slave thread only).
     uint32_t pdo_cob[2 * kSlavePdos]{}; // RPDOs then TPDOs, 11-bit; refreshed with the status
     uint64_t pdo_frames[2 * kSlavePdos]{};
     int64_t pdo_last[2 * kSlavePdos]{};
     int64_t master_last = 0;
+    bool master_beat    = false; // a heartbeat of the master came since the last loss or reset
+    bool master_lost    = false; // the stack reported its loss
     bool nmt_command    = false; // an NMT command for this node since the last state check
+    bool lss_selected   = false; // in the LSS configuration state
+    struct Fastscan
+    {
+        uint8_t bitchk  = 0;
+        uint8_t lsssub  = 0;
+        uint8_t lssnext = 0;
+    } fastscan;
     struct SdoDownload
     {
         bool active      = false;
@@ -304,15 +175,88 @@ struct Slave::Impl
         uint8_t klass = 0;
     };
     ProgramEmcy program[CANOPEN_PLC_SLAVE_EMCY_SLOTS];
+    bool plc_stop_on  = false; // EMCY 6200h wanted
+    bool passive_on   = false; // EMCY 8120h wanted
+    bool bus_off_on   = false; // EMCY 8140h wanted
     bool program_nmt  = false; // the program asked for the last NMT change
     bool plc_stop_nmt = false; // the PLC stop setting (0x1029 sub 2) made it
 
-    bool program_code_active(uint16_t code) const
+    ~Impl()
     {
-        for (const ProgramEmcy &p : program)
-            if (p.on && p.code == code)
-                return true;
-        return false;
+        destroy();
+    }
+
+    void destroy()
+    {
+        if (nmt)
+            co_nmt_destroy(nmt);
+        nmt = nullptr;
+        if (net)
+            can_net_destroy(net);
+        net = nullptr;
+        if (app_dcf)
+            co_val_fini(CO_DEFTYPE_DOMAIN, &app_dcf);
+        app_dcf = nullptr;
+        if (dev)
+            co_dev_destroy(dev);
+        dev = nullptr;
+        for (Slot &s : from_master)
+            s.sub = nullptr;
+        for (Slot &s : to_master)
+            s.sub = nullptr;
+    }
+
+    const std::atomic<uint32_t> *write_count(uint16_t index, uint8_t subindex) const
+    {
+        for (const AppSub &a : app_subs)
+            if (a.obj->index == index && a.obj->subindex == subindex)
+                return a.count;
+        return nullptr;
+    }
+
+    uint8_t od_u8(uint16_t index, uint8_t sub) const
+    {
+        return dev ? co_dev_get_val_u8(dev, index, sub) : 0;
+    }
+    uint16_t od_u16(uint16_t index, uint8_t sub) const
+    {
+        return dev ? co_dev_get_val_u16(dev, index, sub) : 0;
+    }
+    uint32_t od_u32(uint16_t index, uint8_t sub) const
+    {
+        return dev ? co_dev_get_val_u32(dev, index, sub) : 0;
+    }
+    uint8_t error_behaviour() const
+    {
+        return od_u8(0x1029, 1);
+    }
+    uint8_t plc_stop_state() const
+    {
+        return od_u8(0x1029, 2);
+    }
+
+    static uint64_t raw_value(const Slot &slot)
+    {
+        uint64_t v = 0;
+        if (slot.sub)
+            std::memcpy(&v, co_sub_addressof_val(slot.sub),
+                        std::min<size_t>(slot.obj->bytes(), sizeof(v)));
+        else
+            v = slot.obj->value;
+        return v;
+    }
+
+    // Sets a value to the master and asks for its event-driven TPDOs when it changed.
+    void set_to_master(Slot &slot, uint64_t raw)
+    {
+        if (!slot.sub)
+            return;
+        const size_t len = slot.obj->bytes();
+        if (std::memcmp(co_sub_addressof_val(slot.sub), &raw, len) == 0)
+            return;
+        co_sub_set_val(slot.sub, &raw, len);
+        if (slot.obj->exch == SlaveExchange::Pdo)
+            co_dev_tpdo_event(dev, slot.obj->index, slot.obj->subindex);
     }
 
     void push(SlaveEvent e)
@@ -334,6 +278,136 @@ struct Slave::Impl
             }
     }
 
+    bool program_code_active(uint16_t code) const
+    {
+        for (const ProgramEmcy &p : program)
+            if (p.on && p.code == code)
+                return true;
+        return false;
+    }
+
+    // ---- EMCY: the stack's producer, with the error register bits we give ----
+    co_emcy_t *emcy() const
+    {
+        return nmt ? co_nmt_get_emcy(nmt) : nullptr;
+    }
+    bool emcy_active(uint16_t code) const
+    {
+        co_emcy_t *e = emcy();
+        return e && co_emcy_find(e, code) >= 0;
+    }
+    void emcy_raise(uint16_t code, uint8_t reg, uint8_t bit, uint32_t info = 0)
+    {
+        co_emcy_t *e = emcy();
+        if (!e)
+            return;
+        co_unsigned8_t msef[5] = {
+            bit, static_cast<co_unsigned8_t>(info), static_cast<co_unsigned8_t>(info >> 8),
+            static_cast<co_unsigned8_t>(info >> 16), static_cast<co_unsigned8_t>(info >> 24)};
+        co_emcy_push(e, code, reg, msef);
+    }
+    // Clears one active `code`; `quiet` sends no 0000h (another code takes its place).
+    void emcy_clear(uint16_t code, bool quiet = false)
+    {
+        co_emcy_t *e = emcy();
+        if (!e)
+            return;
+        const ssize_t n = co_emcy_find(e, code);
+        if (n < 0)
+            return;
+        mute_emcy = quiet;
+        co_emcy_remove(e, static_cast<size_t>(n));
+        mute_emcy = false;
+    }
+    // Raises what the slave wants active and the stack lost (a reset or the stopped state).
+    void emcy_sync()
+    {
+        if (!emcy() || node_id == 0)
+            return;
+        if (plc_stop_on && !emcy_active(kEmcyPlcStop))
+            emcy_raise(kEmcyPlcStop, kRegManufacturer, kPlcStopBit);
+        for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+        {
+            const ProgramEmcy &p = program[i];
+            if (p.on && !emcy_active(p.code))
+                emcy_raise(p.code, p.klass, static_cast<uint8_t>(kProgramBit + i), p.info);
+        }
+        if (passive_on && !emcy_active(kEmcyPassive))
+            emcy_raise(kEmcyPassive, 0, kBitPassive);
+        if (bus_off_on && !emcy_active(kEmcyBusOff))
+            emcy_raise(kEmcyBusOff, kRegCommunication, kBitBusOff);
+    }
+
+    void set_plc_stop(bool on)
+    {
+        plc_stop_on = on;
+        if (on)
+            emcy_sync();
+        else
+            emcy_clear(kEmcyPlcStop);
+    }
+
+    // Raises, changes or clears the program's emergencies the blocks asked for since the last
+    // tick. A change while active sends one EMCY with the new code, without a reset between.
+    void apply_program_emcy(EmcySlot *slots)
+    {
+        for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+        {
+            const uint32_t gen = slots[i].gen.load(std::memory_order_acquire);
+            if (gen == program[i].gen)
+                continue;
+            program[i].gen      = gen;
+            const bool active   = slots[i].active.load(std::memory_order_relaxed);
+            const uint16_t code = slots[i].code.load(std::memory_order_relaxed);
+            const uint32_t info = slots[i].info.load(std::memory_order_relaxed);
+            ProgramEmcy &p      = program[i];
+            if (active)
+            {
+                if (p.on && p.code == code && p.info == info)
+                    continue;
+                if (p.on)
+                    emcy_clear(p.code, true);
+                p.on    = true;
+                p.code  = code;
+                p.info  = info;
+                p.klass = Slave::error_class_bit(code);
+                emcy_raise(code, p.klass, static_cast<uint8_t>(kProgramBit + i), info);
+            }
+            else if (p.on)
+            {
+                p.on = false;
+                emcy_clear(p.code);
+            }
+        }
+    }
+
+    // At a PLC stop: every program emergency is cleared (the PLC stop's 6200h takes over).
+    void clear_program_emcy(EmcySlot *slots)
+    {
+        for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+        {
+            slots[i].active.store(false, std::memory_order_relaxed);
+            program[i].gen = slots[i].gen.fetch_add(1, std::memory_order_acq_rel) + 1;
+            if (program[i].on)
+            {
+                program[i].on = false;
+                emcy_clear(program[i].code);
+            }
+        }
+    }
+
+    // The stack keeps its active errors in 0x1003 and answers a read past its sub 0 itself: the
+    // object is given the history after every change the stack may have made.
+    void sync_history()
+    {
+        if (!dev || !co_dev_find_obj(dev, 0x1003))
+            return;
+        co_dev_set_val_u8(dev, 0x1003, 0, static_cast<co_unsigned8_t>(history.size()));
+        for (uint8_t s = 1; s <= kHistory; ++s)
+            co_dev_set_val_u32(dev, 0x1003, s, s <= history.size() ? history[s - 1] : 0);
+    }
+
+    // ---- frames seen, for the status ----
     // A frame received from the bus.
     void seen_rx(const SlaveLink::Frame &f)
     {
@@ -343,11 +417,11 @@ struct Slave::Impl
         if (id == 0 && f.dlc >= 2 && (f.data[1] == 0 || f.data[1] == node_id))
         {
             nmt_command = true;
-            if (f.data[0] == CO_NMT_RESET_NODE || f.data[0] == CO_NMT_RESET_COMMUNICATION)
+            if (f.data[0] == CO_NMT_CS_RESET_NODE || f.data[0] == CO_NMT_CS_RESET_COMM)
             {
                 SlaveEvent e;
                 e.kind = SlaveEventKind::Reset;
-                e.node = f.data[0] == CO_NMT_RESET_NODE;
+                e.node = f.data[0] == CO_NMT_CS_RESET_NODE;
                 push(e);
             }
             return;
@@ -355,9 +429,17 @@ struct Slave::Impl
         if (master_node_id && id == 0x700u + master_node_id)
         {
             master_last = wall_ms();
+            if (node_id != 0)
+                master_beat = true;
             return;
         }
-        if (id == 0x600u + node_id && f.dlc == 8)
+        if (id == kLssMasterId && f.dlc >= 1)
+        {
+            if (f.data[0] == kLssFastscan && f.dlc >= 8)
+                fastscan = {f.data[5], f.data[6], f.data[7]};
+            return;
+        }
+        if (node_id && id == 0x600u + node_id && f.dlc == 8)
         {
             const uint8_t ccs = f.data[0] >> 5;
             if (ccs == 1) // initiate download
@@ -381,11 +463,18 @@ struct Slave::Impl
     void seen_tx(const SlaveLink::Frame &f)
     {
         const uint32_t id = f.id & 0x7FF;
-        if (id == emcy_id && f.dlc >= 3)
+        if (node_id && id == emcy_id && f.dlc >= 3)
         {
             const uint16_t code = static_cast<uint16_t>(f.data[0] | (f.data[1] << 8));
             last_emcy           = code;
             emcy_sent           = true;
+            if (code != kEmcyNoError)
+            {
+                history.push_front(code | (static_cast<uint32_t>(f.data[2]) << 16) |
+                                   (static_cast<uint32_t>(f.data[3]) << 24));
+                if (history.size() > kHistory)
+                    history.pop_back();
+            }
             SlaveEvent e;
             e.kind    = code ? SlaveEventKind::Emcy : SlaveEventKind::EmcyReset;
             e.code    = code;
@@ -394,7 +483,17 @@ struct Slave::Impl
             push(e);
             return;
         }
-        if (id == 0x580u + node_id && f.dlc == 8 && sdo.active)
+        if (id == kLssSlaveId && f.dlc >= 1)
+        {
+            if (f.data[0] == kLssSwitchSelected)
+                lss_selected = true;
+            // The last fastscan step (CiA 305: LSSNext wraps below LSSSub): the slave is selected.
+            else if (f.data[0] == kLssFastscanAnswer && fastscan.bitchk == 0 &&
+                     fastscan.lssnext < fastscan.lsssub)
+                lss_selected = true;
+            return;
+        }
+        if (node_id && id == 0x580u + node_id && f.dlc == 8 && sdo.active)
         {
             const uint16_t index = static_cast<uint16_t>(f.data[1] | (f.data[2] << 8));
             SlaveEvent e;
@@ -427,146 +526,317 @@ struct Slave::Impl
         count_pdo(id, kSlavePdos);
     }
 
-    static int send(void *ctx, uint32_t ident, uint8_t dlc, const uint8_t *data)
+    // ---- the stack's callbacks ----
+    static int send(const can_msg *msg, void *data)
     {
-        Impl *self = static_cast<Impl *>(ctx);
+        Impl *im = static_cast<Impl *>(data);
+        if (im->restart || (msg->flags & CAN_FLAG_IDE))
+            return 0;
         SlaveLink::Frame f;
-        f.id  = (ident & 0x7FF) | ((ident & CO_CAN_RTR_FLAG) ? SlaveLink::kRtr : 0);
-        f.dlc = dlc > 8 ? 8 : dlc;
-        std::memcpy(f.data, data, f.dlc);
-        if (self->link->write(f) != 0)
+        f.id  = (msg->id & 0x7FF) | ((msg->flags & CAN_FLAG_RTR) ? SlaveLink::kRtr : 0);
+        f.dlc = msg->len > 8 ? 8 : msg->len;
+        std::memcpy(f.data, msg->data, f.dlc);
+        if (im->mute_emcy && (f.id & 0x7FF) == im->emcy_id)
+            return 0;
+        // A refused bit rate answers "implementation specific: not allowed", as before.
+        if (f.id == kLssSlaveId && f.data[0] == kLssConfigBitTiming && f.data[1] == 1 &&
+            !im->self->dev_.lss.bitrate_change)
         {
-            ++self->write_failures;
+            f.data[1] = 0xFF;
+            f.data[2] = 1;
+        }
+        if (im->link->write(f) != 0)
+        {
+            ++im->write_failures;
             return -1;
         }
-        ++self->tx;
-        self->seen_tx(f);
+        ++im->tx;
+        im->seen_tx(f);
         return 0;
     }
 
-    void fill_details(CO_t *co, SlaveSnapshot &s);
-
-    void update_classes()
+    static void on_cs(co_nmt_t *, co_unsigned8_t cs, void *data)
     {
-        uint8_t classes = 0;
-        for (const ProgramEmcy &p : program)
-            if (p.on)
-                classes |= p.klass;
-        port.error_classes = classes;
-    }
-
-    // Raises, changes or clears the program's emergencies the blocks asked for since the last
-    // tick. A change while active sends one EMCY with the new code, without a reset between.
-    void apply_program_emcy(CO_t *co, EmcySlot *slots)
-    {
-        for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+        Impl *im = static_cast<Impl *>(data);
+        if (cs == CO_NMT_CS_RESET_NODE)
+            im->self->reset_node();
+        else if (cs == CO_NMT_CS_RESET_COMM)
         {
-            const uint32_t gen = slots[i].gen.load(std::memory_order_acquire);
-            if (gen == program[i].gen)
-                continue;
-            program[i].gen      = gen;
-            const bool active   = slots[i].active.load(std::memory_order_relaxed);
-            const uint16_t code = slots[i].code.load(std::memory_order_relaxed);
-            const uint32_t info = slots[i].info.load(std::memory_order_relaxed);
-            const uint8_t bit   = static_cast<uint8_t>(kProgramBit + i);
-            ProgramEmcy &p      = program[i];
-            if (active)
-            {
-                if (p.on && p.code == code && p.info == info)
-                    continue;
-                if (p.on)
-                    co->em->errorStatusBits[bit >> 3] &= static_cast<uint8_t>(~(1u << (bit & 7u)));
-                p.on    = true;
-                p.code  = code;
-                p.info  = info;
-                p.klass = Slave::error_class_bit(code);
-                update_classes();
-                CO_errorReport(co->em, bit, code, info);
-            }
-            else if (p.on)
-            {
-                p.on = false;
-                update_classes();
-                CO_errorReset(co->em, bit, 0);
-            }
+            // Before the boot-up: the node ID applies, the error services start later.
+            im->reset_comm = true;
+            if (im->at_reset_comm)
+                im->at_reset_comm();
         }
     }
 
-    // At a PLC stop: every program emergency is cleared (the PLC stop's 6200h takes over).
-    void clear_program_emcy(CO_t *co, EmcySlot *slots)
+    static void on_hb(co_nmt_t *nmt, co_unsigned8_t id, int state, int reason, void *data)
     {
-        for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+        co_nmt_on_hb(nmt, id, state, reason);
+        Impl *im = static_cast<Impl *>(data);
+        if (reason == CO_NMT_EC_TIMEOUT && state == CO_NMT_EC_OCCURRED)
         {
-            slots[i].active.store(false, std::memory_order_relaxed);
-            program[i].gen = slots[i].gen.fetch_add(1, std::memory_order_acq_rel) + 1;
-            if (program[i].on)
-            {
-                program[i].on = false;
-                update_classes();
-                CO_errorReset(co->em, static_cast<uint8_t>(kProgramBit + i), 0);
-            }
+            im->master_beat = false;
+            im->master_lost = true;
         }
     }
+
+    static co_unsigned32_t app_dn(co_sub_t *sub, co_sdo_req *req, void *data)
+    {
+        AppSub *a          = static_cast<AppSub *>(data);
+        const uint16_t typ = co_sub_get_type(sub);
+        co_unsigned32_t ac = 0;
+        co_val val;
+        if (co_sdo_req_dn_val(req, typ, &val, &ac) == -1)
+            return ac;
+        const SlaveObject *o = a->obj;
+        if (!o->string && (o->has_min || o->has_max))
+        {
+            uint64_t raw = 0;
+            std::memcpy(&raw, &val, std::min<size_t>(o->bytes(), sizeof(raw)));
+            if (o->has_min && compare_raw(o->type, raw, o->min) < 0)
+                ac = CO_SDO_AC_PARAM_LO;
+            else if (o->has_max && compare_raw(o->type, raw, o->max) > 0)
+                ac = CO_SDO_AC_PARAM_HI;
+        }
+        if (!ac)
+            co_sub_dn(sub, &val);
+        co_val_fini(typ, &val);
+        if (ac)
+            return ac;
+        if (o->dir == SlaveDirection::FromMaster)
+        {
+            a->impl->written = true;
+            a->count->fetch_add(1, std::memory_order_relaxed);
+        }
+        return 0;
+    }
+
+    // 0x1029: sub 1 and 2 take 0-2 only.
+    static co_unsigned32_t error_dn(co_sub_t *sub, co_sdo_req *req, void *)
+    {
+        const uint16_t typ = co_sub_get_type(sub);
+        co_unsigned32_t ac = 0;
+        co_val val;
+        if (co_sdo_req_dn_val(req, typ, &val, &ac) == -1)
+            return ac;
+        if (co_sub_get_subidx(sub) > 0 && val.u8 > kErrorStopped)
+            ac = CO_SDO_AC_PARAM_VAL;
+        else
+            co_sub_dn(sub, &val);
+        co_val_fini(typ, &val);
+        return ac;
+    }
+
+    // 0x1003 as an error history: the EMCY errors sent, newest at sub 1, never 0000h. Writing 0
+    // to sub 0 clears it.
+    static co_unsigned32_t history_up(const co_sub_t *sub, co_sdo_req *req, void *data)
+    {
+        Impl *im           = static_cast<Impl *>(data);
+        const uint8_t s    = co_sub_get_subidx(sub);
+        co_unsigned32_t ac = 0;
+        if (s == 0)
+        {
+            const co_unsigned8_t n = static_cast<co_unsigned8_t>(im->history.size());
+            co_sdo_req_up_val(req, CO_DEFTYPE_UNSIGNED8, &n, &ac);
+            return ac;
+        }
+        if (s > im->history.size())
+            return CO_SDO_AC_NO_DATA;
+        const co_unsigned32_t v = im->history[s - 1];
+        co_sdo_req_up_val(req, CO_DEFTYPE_UNSIGNED32, &v, &ac);
+        return ac;
+    }
+    static co_unsigned32_t history_dn(co_sub_t *sub, co_sdo_req *req, void *data)
+    {
+        Impl *im           = static_cast<Impl *>(data);
+        co_unsigned32_t ac = 0;
+        co_val val;
+        if (co_sdo_req_dn_val(req, co_sub_get_type(sub), &val, &ac) == -1)
+            return ac;
+        if (co_sub_get_subidx(sub) != 0 || val.u8 != 0)
+            return CO_SDO_AC_PARAM_VAL;
+        im->history.clear();
+        im->sync_history();
+        return 0;
+    }
+
+    static void on_rpdo(co_rpdo_t *, co_unsigned32_t ac, const void *, size_t, void *data)
+    {
+        Impl *im = static_cast<Impl *>(data);
+        if (!ac && im->emcy_active(kEmcyRpdoTimeout))
+            im->emcy_clear(kEmcyRpdoTimeout);
+    }
+
+    static void on_lss_rate(co_lss_t *, co_unsigned16_t, int, void *)
+    {
+        // Activate bit timing is not taken: a stored bit rate applies at the next start.
+    }
+
+    static int on_lss_store(co_lss_t *, co_unsigned8_t id, co_unsigned16_t rate, void *data)
+    {
+        Impl *im = static_cast<Impl *>(data);
+        return im->self->store_lss(id, rate) ? 0 : -1;
+    }
+
+    // PDO parameters while the stack's PDO services are off (pre-operational, stopped), checked
+    // as the services check them: a mapping changes only while the PDO is invalid and its count
+    // is 0, maps only mappable objects and fits in 8 bytes; a valid COB-ID is not changed.
+    static co_unsigned32_t pdo_comm_dn(co_sub_t *sub, co_sdo_req *req, void *)
+    {
+        const uint16_t typ = co_sub_get_type(sub);
+        co_unsigned32_t ac = 0;
+        co_val val;
+        if (co_sdo_req_dn_val(req, typ, &val, &ac) == -1)
+            return ac;
+        if (co_sub_get_subidx(sub) == 1)
+        {
+            const uint32_t old = co_sub_get_val_u32(sub);
+            const bool valid   = !(old & 0x80000000u) && !(val.u32 & 0x80000000u);
+            if (valid && (old & 0x1FFFFFFFu) != (val.u32 & 0x1FFFFFFFu))
+                ac = CO_SDO_AC_PARAM_VAL;
+        }
+        if (!ac)
+            co_sub_dn(sub, &val);
+        co_val_fini(typ, &val);
+        return ac;
+    }
+    static co_unsigned32_t pdo_map_dn(co_sub_t *sub, co_sdo_req *req, void *)
+    {
+        co_obj_t *obj      = co_sub_get_obj(sub);
+        const uint16_t idx = co_obj_get_idx(obj);
+        const bool tpdo    = idx >= 0x1A00;
+        const co_dev_t *d  = co_obj_get_dev(obj);
+        const uint16_t typ = co_sub_get_type(sub);
+        co_unsigned32_t ac = 0;
+        co_val val;
+        if (co_sdo_req_dn_val(req, typ, &val, &ac) == -1)
+            return ac;
+        const bool valid =
+            !(co_dev_get_val_u32(d, static_cast<uint16_t>(idx - 0x200), 1) & 0x80000000u);
+        auto check = [&](uint32_t map) -> co_unsigned32_t
+        {
+            const uint16_t i = static_cast<uint16_t>(map >> 16);
+            const uint8_t s  = static_cast<uint8_t>(map >> 8);
+            return tpdo ? co_dev_chk_tpdo(d, i, s) : co_dev_chk_rpdo(d, i, s);
+        };
+        const uint8_t n_old = co_dev_get_val_u8(d, idx, 0);
+        if (co_sub_get_subidx(sub) == 0)
+        {
+            const uint8_t n = val.u8;
+            if (n != n_old)
+            {
+                if (valid || n > 8)
+                    ac = CO_SDO_AC_PARAM_VAL;
+                unsigned bits = 0;
+                for (uint8_t k = 1; !ac && k <= n; ++k)
+                {
+                    const uint32_t map = co_dev_get_val_u32(d, idx, k);
+                    if (!map)
+                        continue;
+                    if ((bits += map & 0xFFu) > 64)
+                        ac = CO_SDO_AC_PDO_LEN;
+                    else
+                        ac = check(map);
+                }
+            }
+        }
+        else if (val.u32 != co_sub_get_val_u32(sub))
+        {
+            if (valid || n_old)
+                ac = CO_SDO_AC_PARAM_VAL;
+            else if (val.u32)
+                ac = check(val.u32);
+        }
+        if (!ac)
+            co_sub_dn(sub, &val);
+        co_val_fini(typ, &val);
+        return ac;
+    }
+
+    void pdo_inds(uint16_t comm)
+    {
+        if (co_obj_t *c = co_dev_find_obj(dev, comm))
+            co_obj_set_dn_ind(c, &pdo_comm_dn, nullptr);
+        if (co_obj_t *m = co_dev_find_obj(dev, static_cast<uint16_t>(comm + 0x200)))
+            co_obj_set_dn_ind(m, &pdo_map_dn, nullptr);
+    }
+
+    // The indications the stack replaces when its services start again.
+    void install()
+    {
+        sync_history();
+        const uint8_t st = nmt_state(nmt);
+        if (st == st_known)
+            return;
+        st_known = st;
+        if (co_obj_t *h = co_dev_find_obj(dev, 0x1003))
+        {
+            co_obj_set_up_ind(h, &history_up, this);
+            co_obj_set_dn_ind(h, &history_dn, this);
+        }
+        for (co_unsigned16_t n = 1; n <= kSlavePdos; ++n)
+        {
+            if (co_rpdo_t *pdo = co_nmt_get_rpdo(nmt, n))
+                co_rpdo_set_ind(pdo, &on_rpdo, this);
+            else
+                pdo_inds(static_cast<uint16_t>(0x1400 + n - 1));
+            if (!co_nmt_get_tpdo(nmt, n))
+                pdo_inds(static_cast<uint16_t>(0x1800 + n - 1));
+        }
+        if (co_lss_t *lss = co_nmt_get_lss(nmt))
+        {
+            co_lss_set_store_ind(lss, &on_lss_store, this);
+            co_lss_set_rate_ind(lss, self->dev_.lss.bitrate_change ? &on_lss_rate : nullptr, this);
+        }
+    }
+
+    void fill_details(SlaveSnapshot &s);
 };
 
-namespace
-{
-
-template <typename T> T od_value(OD_t *od, uint16_t index, uint8_t sub)
-{
-    T v           = 0;
-    OD_entry_t *e = OD_find(od, index);
-    if (e)
-        (void)OD_get_value(e, sub, &v, sizeof(v), true);
-    return v;
-}
-
-} // namespace
-
 // The details of the status, read in the slave thread; `s` keeps its vectors' memory.
-void Slave::Impl::fill_details(CO_t *co, SlaveSnapshot &s)
+void Slave::Impl::fill_details(SlaveSnapshot &s)
 {
-    OD_t *d           = od.od();
     s.detailed        = true;
-    s.error_register  = CO_getErrorRegister(co->em);
-    s.heartbeat_ms    = od_value<uint16_t>(d, 0x1017, 0);
-    s.master_watch_ms = static_cast<uint16_t>(od_value<uint32_t>(d, 0x1016, 1) & 0xFFFFu);
-    s.on_master_lost  = od.error_behaviour();
+    s.error_register  = od_u8(0x1001, 0);
+    s.heartbeat_ms    = od_u16(0x1017, 0);
+    s.master_watch_ms = static_cast<uint16_t>(od_u32(0x1016, 1) & 0xFFFFu);
+    s.on_master_lost  = error_behaviour();
     s.master_last     = master_last;
 
-    s.error_history.clear();
-    uint32_t count = 0;
-    history_entry(co->em, 0, count);
-    for (uint8_t k = 1; k <= count; ++k)
-    {
-        uint32_t v = 0;
-        if (history_entry(co->em, k, v))
-            s.error_history.push_back(v);
-    }
-    // Active errors: the set status bits, each with the code of its newest report.
+    s.error_history.assign(history.begin(), history.end());
+    // Active errors, newest first.
     s.emcy_active.clear();
-    for (uint8_t k = 1; k <= co->em->fifoCount; ++k)
+    if (co_emcy_t *e = emcy())
     {
-        int index = static_cast<int>(co->em->fifoWrPtr) - k;
-        if (index < 0)
-            index += co->em->fifoSize;
-        const uint32_t msg  = co->em->fifo[index].msg;
-        const uint16_t code = static_cast<uint16_t>(msg & 0xFFFFu);
-        const uint8_t bit   = static_cast<uint8_t>(msg >> 24);
-        if (code == 0 || !CO_isError(co->em, bit))
-            continue;
-        bool known = false;
-        for (uint16_t c : s.emcy_active)
-            known = known || c == code;
-        if (!known)
-            s.emcy_active.push_back(code);
+        std::vector<std::pair<ssize_t, uint16_t>> found;
+        auto add = [&](uint16_t code)
+        {
+            const ssize_t n = co_emcy_find(e, code);
+            if (n < 0)
+                return;
+            for (const auto &f : found)
+                if (f.second == code)
+                    return;
+            found.emplace_back(n, code);
+        };
+        add(kEmcyPlcStop);
+        for (const ProgramEmcy &p : program)
+            if (p.on)
+                add(p.code);
+        add(kEmcyPassive);
+        add(kEmcyBusOff);
+        add(kEmcyHeartbeat);
+        add(kEmcyRpdoTimeout);
+        std::sort(found.begin(), found.end());
+        for (const auto &f : found)
+            s.emcy_active.push_back(f.second);
     }
     s.emcy_program.clear();
     for (const ProgramEmcy &p : program)
         if (p.on &&
             std::find(s.emcy_program.begin(), s.emcy_program.end(), p.code) == s.emcy_program.end())
             s.emcy_program.push_back(p.code);
-    s.on_plc_stop_state = od.plc_stop_state();
+    s.on_plc_stop_state = plc_stop_state();
 
     s.pdos.resize(2 * kSlavePdos);
     for (unsigned i = 0; i < 2 * kSlavePdos; ++i)
@@ -577,35 +847,31 @@ void Slave::Impl::fill_details(CO_t *co, SlaveSnapshot &s)
         SlavePdoStatus &p      = s.pdos[i];
         p.number               = i % kSlavePdos + 1;
         p.tpdo                 = tpdo;
-        p.cob_id               = od_value<uint32_t>(d, comm, 1);
-        // The bare pre-defined base follows the node ID in use, as in CO_PDO.c.
-        const uint32_t base = (tpdo ? 0x180u : 0x200u) + 0x100u * (i % kSlavePdos);
-        if (node_id != 0 && p.number <= 4 && (p.cob_id & 0x7FFu) == base)
-            p.cob_id += node_id;
-        p.transmission  = od_value<uint8_t>(d, comm, 2);
-        p.inhibit_100us = tpdo ? od_value<uint16_t>(d, comm, 3) : 0;
-        p.event_ms      = od_value<uint16_t>(d, comm, 5);
-        const uint8_t n = od_value<uint8_t>(d, mapping, 0);
+        p.cob_id               = od_u32(comm, 1);
+        p.transmission         = od_u8(comm, 2);
+        p.inhibit_100us        = tpdo ? od_u16(comm, 3) : 0;
+        p.event_ms             = od_u16(comm, 5);
+        const uint8_t n        = od_u8(mapping, 0);
         p.mapping.clear();
         for (uint8_t k = 1; k <= n && k <= 8; ++k)
-            p.mapping.push_back(od_value<uint32_t>(d, mapping, k));
+            p.mapping.push_back(od_u32(mapping, k));
         p.frames   = pdo_frames[i];
         p.last     = pdo_last[i];
         pdo_cob[i] = (p.cob_id & 0x80000000u) ? 0 : (p.cob_id & 0x7FFu);
     }
 
     s.values.clear();
-    for (const SlaveObject &o : od.config().objects)
+    for (const SlaveObject &o : self->dev_.objects)
     {
         if (o.string)
             continue;
         SlaveValue v;
-        v.index       = o.index;
-        v.subindex    = o.subindex;
-        v.bytes       = static_cast<uint8_t>(o.bytes() > 8 ? 8 : o.bytes());
-        OD_entry_t *e = OD_find(d, o.index);
-        if (e)
-            (void)OD_get_value(e, o.subindex, v.data, v.bytes, true);
+        v.index    = o.index;
+        v.subindex = o.subindex;
+        v.bytes    = static_cast<uint8_t>(o.bytes() > 8 ? 8 : o.bytes());
+        if (dev)
+            if (const co_sub_t *sub = co_dev_find_sub(dev, o.index, o.subindex))
+                std::memcpy(v.data, co_sub_get_val(sub), v.bytes);
         s.values.push_back(v);
     }
     s.events = events;
@@ -629,15 +895,38 @@ bool Slave::start(std::string &problem)
 {
     store_path_ = lss_store_path(dev_.interface);
     load_lss_values();
-    if (!impl_->od.build(dev_, serial_, problem))
+    // The dictionary is loaded once here, so a file the stack refuses fails the start.
+    const std::string dcf = slave_dcf(dev_, serial_, pending_node_);
+    co_dev_t *check = co_dev_create_from_dcf_text(dcf.data(), dcf.data() + dcf.size(), nullptr);
+    if (!check)
+    {
+        problem = "the CANopen stack refused the slave's object dictionary";
         return false;
+    }
+    co_dev_destroy(check);
+    Impl &im = *impl_;
+    im.self  = this;
+    for (const SlaveObject &o : dev_.objects)
+    {
+        im.counts.emplace_back(0u);
+        Impl::AppSub a;
+        a.impl  = &im;
+        a.obj   = &o;
+        a.count = &im.counts.back();
+        im.app_subs.push_back(a);
+        if (o.exch == SlaveExchange::Constant)
+            continue;
+        Impl::Slot slot;
+        slot.obj = &o;
+        (o.dir == SlaveDirection::FromMaster ? im.from_master : im.to_master).push_back(slot);
+    }
     link_->set_bitrate(link_bitrate_);
-    in_.resize(impl_->od.from_master().size());
-    out_.resize(impl_->od.to_master().size());
+    in_.resize(im.from_master.size());
+    out_.resize(im.to_master.size());
     // The defaults reach the PLC before the first frame does.
     uint64_t *back = in_.back();
-    for (size_t i = 0; i < impl_->od.from_master().size(); ++i)
-        back[i] = SlaveOd::raw_value(impl_->od.from_master()[i]);
+    for (size_t i = 0; i < im.from_master.size(); ++i)
+        back[i] = Impl::raw_value(im.from_master[i]);
     in_.publish();
     plc_running_.store(true);
     stop_.store(false);
@@ -655,7 +944,7 @@ void Slave::stop()
 void Slave::copy_to_plc(const plugin_runtime_args_t &rt)
 {
     const uint64_t *v = in_.latest();
-    const auto &slots = impl_->od.from_master();
+    const auto &slots = impl_->from_master;
     for (size_t i = 0; i < slots.size(); ++i)
     {
         const SlaveObject &o = *slots[i].obj;
@@ -671,7 +960,7 @@ void Slave::copy_from_plc(const plugin_runtime_args_t &rt)
     if (out_.size() == 0)
         return;
     uint64_t *back    = out_.back();
-    const auto &slots = impl_->od.to_master();
+    const auto &slots = impl_->to_master;
     if (rt.image_lock)
         rt.image_lock();
     for (size_t i = 0; i < slots.size(); ++i)
@@ -842,26 +1131,45 @@ SlaveSnapshot Slave::snapshot() const
 
 bool Slave::program_code_allowed(uint16_t code)
 {
-    return code != CO_EMC_NO_ERROR && code != CO_EMC_SOFTWARE_USER && code != CO_EMC_HEARTBEAT;
+    return code != kEmcyNoError && code != kEmcyPlcStop && code != kEmcyHeartbeat;
 }
 
 uint8_t Slave::error_class_bit(uint16_t code)
 {
     if ((code & 0xFF00u) == 0xFF00u)
-        return CO_ERR_REG_MANUFACTURER;
+        return kRegManufacturer;
     switch (code >> 12)
     {
     case 0x2:
-        return CO_ERR_REG_CURRENT;
+        return kRegCurrent;
     case 0x3:
-        return CO_ERR_REG_VOLTAGE;
+        return kRegVoltage;
     case 0x4:
-        return CO_ERR_REG_TEMPERATURE;
+        return kRegTemperature;
     case 0x8:
-        return CO_ERR_REG_COMMUNICATION;
+        return kRegCommunication;
     default:
         return 0;
     }
+}
+
+// A reset node (from a master, the program or a forget): the node ID and bit rate to come back
+// with are the stored ones, else the project's. Runs inside the stack, before its reset
+// communication.
+void Slave::reset_node()
+{
+    Impl &im = *impl_;
+    if (im.booting)
+        return;
+    log_info("%s: reset node", dev_.label().c_str());
+    const unsigned opened_at = link_bitrate_;
+    load_lss_values();
+    co_nmt_set_id(im.nmt, pending_node_);
+    co_dev_set_rate(im.dev, pending_kbit_);
+    if (link_bitrate_ != opened_at)
+        im.restart = true;
+    im.after_node = true;
+    im.written    = true; // the scan takes the restored values
 }
 
 void Slave::publish_plc(uint8_t nmt, uint8_t node_id, bool on_bus, bool watched, bool seen,
@@ -935,12 +1243,12 @@ uint8_t state_of_command(uint8_t command)
 {
     switch (command)
     {
-    case CO_NMT_ENTER_OPERATIONAL:
-        return CO_NMT_OPERATIONAL;
-    case CO_NMT_ENTER_STOPPED:
-        return CO_NMT_STOPPED;
-    case CO_NMT_ENTER_PRE_OPERATIONAL:
-        return CO_NMT_PRE_OPERATIONAL;
+    case CO_NMT_CS_START:
+        return CO_NMT_ST_START;
+    case CO_NMT_CS_STOP:
+        return CO_NMT_ST_STOP;
+    case CO_NMT_CS_ENTER_PREOP:
+        return CO_NMT_ST_PREOP;
     default:
         return 0;
     }
@@ -1005,7 +1313,7 @@ int Slave::plc_emcy(uint32_t handle, bool active, uint16_t code, uint32_t info)
 
 int Slave::plc_written(uint16_t index, uint8_t subindex, uint32_t &count) const
 {
-    const std::atomic<uint32_t> *c = impl_->od.write_count(index, subindex);
+    const std::atomic<uint32_t> *c = impl_->write_count(index, subindex);
     if (!c)
         return CANOPEN_PLC_WRONG_PARAMETER;
     count = c->load(std::memory_order_relaxed);
@@ -1014,16 +1322,6 @@ int Slave::plc_written(uint16_t index, uint8_t subindex, uint32_t &count) const
 
 namespace
 {
-
-uint16_t nmt_control(const DeviceConfig &dev, uint8_t behaviour)
-{
-    uint16_t control = dev.start_alone ? CO_NMT_STARTUP_TO_OPERATIONAL : 0;
-    if (behaviour == kErrorPreOperational)
-        control |= CO_NMT_ERR_ON_BUSOFF_HB;
-    else if (behaviour == kErrorStopped)
-        control |= CO_NMT_ERR_ON_BUSOFF_HB | CO_NMT_ERR_TO_STOPPED;
-    return control;
-}
 
 void enter_realtime(int priority, const std::string &label)
 {
@@ -1043,15 +1341,21 @@ const char *state_text(uint8_t nmt)
 {
     switch (nmt)
     {
-    case CO_NMT_OPERATIONAL:
+    case CO_NMT_ST_START:
         return "operational";
-    case CO_NMT_PRE_OPERATIONAL:
+    case CO_NMT_ST_PREOP:
         return "pre-operational";
-    case CO_NMT_STOPPED:
+    case CO_NMT_ST_STOP:
         return "stopped";
     default:
         return "initializing";
     }
+}
+
+void set_string(co_dev_t *dev, uint16_t index, uint8_t subindex, const std::string &text)
+{
+    if (co_sub_t *sub = co_dev_find_sub(dev, index, subindex))
+        co_sub_set_val(sub, text.c_str(), text.size());
 }
 
 } // namespace
@@ -1062,10 +1366,7 @@ void Slave::thread_main()
     enter_realtime(dev_.priority, label);
     Impl &im          = *impl_;
     im.link           = link_.get();
-    im.emcy_id        = 0x80u + dev_.node_id;
-    im.port.ctx       = &im;
-    im.port.send      = Impl::send;
-    im.node_id        = dev_.node_id;
+    im.node_id        = 0;
     im.master_node_id = status_.master_node_id;
     std::string last_problem;
     bool first_plc = true;
@@ -1077,6 +1378,7 @@ void Slave::thread_main()
     BusStatus bus        = monitor.simulated();
     BusState bus_was     = BusState::Unknown;
     Clock::time_point last_monitor;
+    bool said_seen = false; // survives a reset communication
 
     auto set_problem = [&](const std::string &problem)
     {
@@ -1090,9 +1392,10 @@ void Slave::thread_main()
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
     };
 
-    // Reads the link into `bus`, tells the stack its error state, and resets a bus-off link the
-    // kernel does not restart (as a master network does). True when the link was taken down.
-    auto supervise = [&](CO_t *co) -> bool
+    // Reads the link into `bus`, raises or clears the bus's emergencies, and resets a bus-off
+    // link the kernel does not restart (as a master network does). True when the link was taken
+    // down.
+    auto supervise = [&]() -> bool
     {
         LinkInfo li;
         const auto now = BusMonitor::clock::now();
@@ -1106,29 +1409,39 @@ void Slave::thread_main()
             bus = monitor.unusable(BusState::Down);
             return false;
         }
-        bus            = monitor.update(li, now);
-        bus.has_resets = li.kind == "can";
-        bus.resets     = link_resets;
-        uint16_t err   = 0;
-        if (bus.state == BusState::BusOff)
-            err |= CO_CAN_ERRTX_BUS_OFF;
-        if (li.has_berr)
+        bus              = monitor.update(li, now);
+        bus.has_resets   = li.kind == "can";
+        bus.resets       = link_resets;
+        const bool off   = bus.state == BusState::BusOff;
+        const bool passv = li.has_berr && (li.tx_errors >= 128 || li.rx_errors >= 128);
+        if (im.node_id != 0)
         {
-            if (li.tx_errors >= 128)
-                err |= CO_CAN_ERRTX_PASSIVE;
-            else if (li.tx_errors >= 96)
-                err |= CO_CAN_ERRTX_WARNING;
-            if (li.rx_errors >= 128)
-                err |= CO_CAN_ERRRX_PASSIVE;
-            else if (li.rx_errors >= 96)
-                err |= CO_CAN_ERRRX_WARNING;
+            if (passv && !im.passive_on)
+            {
+                im.passive_on = true;
+                im.emcy_raise(kEmcyPassive, 0, kBitPassive);
+            }
+            else if (!passv && im.passive_on)
+            {
+                im.passive_on = false;
+                im.emcy_clear(kEmcyPassive);
+            }
+            if (off && !im.bus_off_on)
+            {
+                im.bus_off_on = true;
+                // A communication error: 0x1029 sub 1 applies, as for a lost master.
+                const co_unsigned8_t msef[5] = {kBitBusOff, 0, 0, 0, 0};
+                co_nmt_on_err(im.nmt, kEmcyBusOff, kRegCommunication, msef);
+            }
+            else if (!off && im.bus_off_on)
+            {
+                im.bus_off_on = false;
+                im.emcy_clear(kEmcyBusOff);
+            }
         }
-        const uint16_t mask = CO_CAN_ERRTX_BUS_OFF | CO_CAN_ERR_WARN_PASSIVE;
-        co->CANmodule->CANerrorStatus =
-            static_cast<uint16_t>((co->CANmodule->CANerrorStatus & ~mask) | err);
         if (li.kind != "can" || reset_forbidden)
             return false;
-        const LinkFault fault = bus.state == BusState::BusOff ? LinkFault::BusOff : LinkFault::None;
+        const LinkFault fault = off ? LinkFault::BusOff : LinkFault::None;
         if (!recovery.reading(fault, li.restart_ms, link_->restart_refused(), now))
         {
             if (recovery.held_back_news())
@@ -1175,7 +1488,7 @@ void Slave::thread_main()
         return false;
     };
     // Brings the link up again after a reset, keeping the stack and its state. False on stop.
-    auto reopen = [&](const std::string &) -> bool
+    auto reopen = [&]() -> bool
     {
         link_->close();
         std::string problem;
@@ -1190,6 +1503,113 @@ void Slave::thread_main()
         log_info("%s: CAN interface %s is back after the reset", label.c_str(),
                  dev_.interface.c_str());
         return true;
+    };
+
+    // Builds the stack from the configuration and boots it (reset node). False when the stack
+    // refused the configuration.
+    auto build = [&]() -> bool
+    {
+        im.destroy();
+        const std::string dcf = slave_dcf(dev_, serial_, pending_node_);
+        im.dev = co_dev_create_from_dcf_text(dcf.data(), dcf.data() + dcf.size(), nullptr);
+        if (!im.dev)
+            return false;
+        if (!dev_.device_name.empty())
+            set_string(im.dev, 0x1008, 0, dev_.device_name);
+        if (!dev_.hardware_version.empty())
+            set_string(im.dev, 0x1009, 0, dev_.hardware_version);
+        if (!dev_.software_version.empty())
+            set_string(im.dev, 0x100A, 0, dev_.software_version);
+        for (Impl::AppSub &a : im.app_subs)
+        {
+            co_sub_t *sub = co_dev_find_sub(im.dev, a.obj->index, a.obj->subindex);
+            if (!sub)
+                return false;
+            if (a.obj->string)
+                co_sub_set_val(sub, a.obj->text.c_str(), a.obj->text.size());
+            else if (co_sub_set_val(sub, &a.obj->value, a.obj->bytes()) != a.obj->bytes())
+                return false;
+            if (a.obj->exch != SlaveExchange::Constant)
+                co_sub_set_dn_ind(sub, &Impl::app_dn, &a);
+        }
+        for (auto *slots : {&im.from_master, &im.to_master})
+            for (Impl::Slot &s : *slots)
+                s.sub = co_dev_find_sub(im.dev, s.obj->index, s.obj->subindex);
+        if (co_obj_t *o = co_dev_find_obj(im.dev, 0x1029))
+            co_obj_set_dn_ind(o, &Impl::error_dn, nullptr);
+        co_dev_set_rate(im.dev, pending_kbit_);
+        if (co_dev_write_dcf(im.dev, 0x2000, 0x9FFF, &im.app_dcf) == -1)
+            return false;
+        im.net = can_net_create();
+        if (!im.net)
+            return false;
+        can_net_set_send_func(im.net, &Impl::send, &im);
+        const timespec now = monotonic_now();
+        can_net_set_time(im.net, &now);
+        im.nmt = co_nmt_create(im.net, im.dev);
+        if (!im.nmt)
+            return false;
+        co_nmt_set_cs_ind(im.nmt, &Impl::on_cs, &im);
+        co_nmt_set_hb_ind(im.nmt, &Impl::on_hb, &im);
+        im.restart    = false;
+        im.reset_comm = false;
+        im.after_node = true;
+        im.st_known   = 0xFF;
+        im.booting    = true;
+        co_nmt_cs_ind(im.nmt, CO_NMT_CS_RESET_NODE);
+        im.booting = false;
+        im.install();
+        return true;
+    };
+
+    // A reset communication: the node ID in use, before the boot-up is sent.
+    im.at_reset_comm = [&]()
+    {
+        const uint8_t node      = co_dev_get_id(im.dev);
+        const bool unconfigured = node == 0 || node > 127;
+        if (!im.after_node && im.node_id != 0)
+            log_info("%s: reset communication", label.c_str());
+        im.after_node  = false;
+        im.node_id     = unconfigured ? 0 : node;
+        im.emcy_id     = im.od_u32(0x1014, 0) & 0x7FFu;
+        im.master_beat = false;
+        im.master_lost = false;
+        im.history.clear();
+        for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+        {
+            im.program[i]     = Impl::ProgramEmcy{};
+            im.program[i].gen = emcy_[i].gen.load(std::memory_order_acquire) - 1;
+        }
+        im.program_nmt  = false;
+        im.plc_stop_nmt = false;
+        im.st_known     = 0xFF;
+        if (unconfigured)
+            log_info("%s: no node ID; waiting for an LSS master (serial number 0x%08X)",
+                     label.c_str(), serial_);
+        else
+            log_info("%s: node %u on the bus", label.c_str(), node);
+        {
+            std::lock_guard<PiMutex> lock(status_mutex_);
+            status_.node_id      = im.node_id;
+            status_.unconfigured = unconfigured;
+            // Stored wins; the start value keeps its source; any other ID came from a master.
+            if (!unconfigured)
+                status_.node_from = stored_node_ && node == stored_node_ ? "stored"
+                                    : node == start_node_                ? start_from_
+                                                                         : "lss";
+        }
+        SlaveEvent e;
+        e.kind = SlaveEventKind::OnBus;
+        im.push(e);
+        im.nmt_command = false;
+        im.sdo.active  = false;
+    };
+    // Then the slave is on the bus with a stack with no errors, which gets the ones the slave
+    // wants active again.
+    auto on_bus = [&]()
+    {
+        im.install();
+        im.emcy_sync();
     };
 
     while (!stop_.load())
@@ -1207,398 +1627,324 @@ void Slave::thread_main()
         last_problem.clear();
         set_problem("");
 
-        uint32_t heap = 0;
-        CO_t *co      = CO_new(im.od.co_config(), &heap);
-        if (!co)
+        bool link_ok     = true;
+        bool new_bitrate = false; // a reset node brought another bit rate
+        im.plc_stop_on   = !plc_running_.load();
+        im.passive_on    = false;
+        im.bus_off_on    = false;
+        if (!build())
         {
-            log_error("%s: cannot allocate the CANopen stack", label.c_str());
+            log_error("%s: the CANopen stack refused its configuration", label.c_str());
+            im.destroy();
+            stop_.store(true);
             link_->close();
-            sleep_or_stop(kRetryMs);
-            continue;
+            break;
         }
-        CO_NMT_reset_cmd_t reset = CO_RESET_NOT;
-        bool link_ok             = true;
-        bool new_bitrate         = false; // a reset node brought another bit rate
-        bool said_seen           = false; // survives a reset communication
-        const unsigned opened_at = link_bitrate_;
-        while (!stop_.load() && link_ok && reset != CO_RESET_QUIT)
+
+        Clock::time_point last_status;
+        uint8_t last_state = 0xFF;
+        uint8_t status_nmt = 0xFF;
+        bool master_was    = false;
+        while (!stop_.load())
         {
-            co->CANmodule->CANnormal = false;
-            CO_CANsetConfigurationMode(&im.port);
-            CO_CANmodule_disable(co->CANmodule);
-            uint32_t err_info    = 0;
-            CO_ReturnError_t err = CO_CANinit(co, &im.port, 0);
-            uint8_t node         = pending_node_;
-            if (err == CO_ERROR_NO && dev_.lss.enabled)
+            SlaveLink::Frame f;
+            int got     = link_->read(f, kTickMs);
+            timespec ts = monotonic_now();
+            can_net_set_time(im.net, &ts);
+            im.sync_history();
+            for (int n = 0; got == 1 && n < 64 && !im.restart; ++n)
             {
-                CO_LSS_address_t address{};
-                address.identity.vendorID       = dev_.vendor_id;
-                address.identity.productCode    = dev_.product_code;
-                address.identity.revisionNumber = dev_.revision;
-                address.identity.serialNumber   = serial_;
-                err = CO_LSSinit(co, &address, &pending_node_, &pending_kbit_);
-                if (err == CO_ERROR_NO)
+                ++im.rx;
+                im.seen_rx(f);
+                const uint32_t id = f.id & 0x7FF;
+                const bool rtr    = (f.id & SlaveLink::kRtr) != 0;
+                const bool lss    = id == kLssMasterId && !rtr && f.dlc >= 1;
+                bool drop         = lss && !dev_.lss.enabled;
+                // CiA 305: only an unconfigured slave in the waiting state takes part in fastscan.
+                if (lss && f.data[0] == kLssFastscan &&
+                    (co_dev_get_id(im.dev) != 0xFF || im.lss_selected))
+                    drop = true;
+                if (!drop)
                 {
-                    CO_LSSslave_initCkBitRateCall(
-                        co->LSSslave, this,
-                        [](void *object, uint16_t kbit) -> bool_t
-                        {
-                            const Slave *self = static_cast<const Slave *>(object);
-                            return self->dev_.lss.bitrate_change && kbit != 0;
-                        });
-                    CO_LSSslave_initCfgStoreCall(
-                        co->LSSslave, this, [](void *object, uint8_t id, uint16_t kbit) -> bool_t
-                        { return static_cast<Slave *>(object)->store_lss(id, kbit); });
-                    node = co->LSSslave->activeNodeID;
+                    can_msg msg = CAN_MSG_INIT;
+                    msg.id      = id;
+                    if (rtr)
+                        msg.flags |= CAN_FLAG_RTR;
+                    msg.len = f.dlc;
+                    std::memcpy(msg.data, f.data, 8);
+                    can_net_recv(im.net, &msg);
+                    if (lss && f.data[0] == kLssSwitchGlobal && f.dlc >= 2)
+                    {
+                        im.lss_selected = f.data[1] == 1;
+                        // An unconfigured slave given a node ID starts with it on the switch to
+                        // the waiting state (CiA 305).
+                        if (f.data[1] == 0 && co_dev_get_id(im.dev) == 0xFF &&
+                            co_nmt_get_id(im.nmt) != 0xFF)
+                            co_nmt_cs_ind(im.nmt, CO_NMT_CS_RESET_COMM);
+                    }
                 }
+                im.install();
+                if (im.reset_comm)
+                {
+                    im.reset_comm = false;
+                    on_bus();
+                }
+                got = link_->read(f, 0);
             }
-            if (err == CO_ERROR_NO)
-                err = CO_CANopenInit(co, nullptr, nullptr, im.od.od(), nullptr,
-                                     nmt_control(dev_, im.od.error_behaviour()), 500, 1000, 0,
-                                     false, node, &err_info);
-            const bool unconfigured = err == CO_ERROR_NODE_ID_UNCONFIGURED_LSS;
-            if (unconfigured)
-                err = CO_ERROR_NO;
-            if (err == CO_ERROR_NO && !unconfigured)
-                err = CO_CANopenInitPDO(co, co->em, im.od.od(), node, &err_info);
-            if (err != CO_ERROR_NO)
+            if (im.restart)
             {
-                log_error("%s: the CANopen stack refused its configuration (error %d, object "
-                          "0x%X)",
-                          label.c_str(), static_cast<int>(err), static_cast<unsigned>(err_info));
-                reset = CO_RESET_QUIT;
-                stop_.store(true);
+                link_->set_bitrate(link_bitrate_);
+                new_bitrate = true;
                 break;
             }
-            im.emcy_id = 0x80u + node;
-            im.node_id = unconfigured ? 0 : node;
-            if (!unconfigured)
+            if (got < 0)
             {
-                im.history      = co->em->OD_1003_extension;
-                im.history.read = read_history;
-                OD_extension_init(OD_find(im.od.od(), 0x1003), &im.history);
+                log_warn("%s: the CAN interface failed; reopening it", label.c_str());
+                link_ok = false;
+                break;
             }
-            CO_CANsetNormalMode(co->CANmodule);
-            if (!unconfigured && !plc_running_.load())
-                CO_errorReport(co->em, kPlcStopBit, CO_EMC_SOFTWARE_USER, 0);
-            // A new stack has no errors set: the program's active ones are raised again.
-            im.port.error_classes = 0;
-            for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
+            if (im.reset_comm)
             {
-                im.program[i]     = Impl::ProgramEmcy{};
-                im.program[i].gen = emcy_[i].gen.load(std::memory_order_acquire) - 1;
+                im.reset_comm = false;
+                on_bus();
             }
-            im.program_nmt  = false;
-            im.plc_stop_nmt = false;
-            if (unconfigured)
-                log_info("%s: no node ID; waiting for an LSS master (serial number 0x%08X)",
-                         label.c_str(), serial_);
-            else
-                log_info("%s: node %u on the bus", label.c_str(), node);
+            const bool unconfigured = im.node_id == 0;
+
+            // PLC start and stop.
+            const bool plc = plc_running_.load();
+            if (plc != plc_was)
             {
-                std::lock_guard<PiMutex> lock(status_mutex_);
-                status_.node_id      = unconfigured ? 0 : node;
-                status_.unconfigured = unconfigured;
-                // Stored wins; the start value keeps its source; any other ID came from a master.
-                if (!unconfigured)
-                    status_.node_from = stored_node_ && node == stored_node_ ? "stored"
-                                        : node == start_node_               ? start_from_
-                                                                            : "lss";
-            }
-            {
+                if (!plc)
+                {
+                    im.set_plc_stop(true);
+                    im.clear_program_emcy(emcy_);
+                    if (dev_.on_plc_stop == SlaveOnStop::Zero)
+                        for (auto &slot : im.to_master)
+                            im.set_to_master(slot, 0);
+                    // The NMT state set for a PLC stop (0x1029 sub 2, coded as sub 1).
+                    const uint8_t now_state  = nmt_state(im.nmt);
+                    const uint8_t stop_state = unconfigured ? kErrorNoChange : im.plc_stop_state();
+                    if (stop_state == kErrorPreOperational && now_state == CO_NMT_ST_START)
+                    {
+                        im.plc_stop_nmt = true;
+                        co_nmt_cs_ind(im.nmt, CO_NMT_CS_ENTER_PREOP);
+                    }
+                    else if (stop_state == kErrorStopped && now_state != CO_NMT_ST_STOP)
+                    {
+                        im.plc_stop_nmt = true;
+                        co_nmt_cs_ind(im.nmt, CO_NMT_CS_STOP);
+                    }
+                }
+                else
+                {
+                    if (!first_plc)
+                    {
+                        co_dev_read_dcf(im.dev, nullptr, nullptr, &im.app_dcf);
+                        im.written = true;
+                    }
+                    im.set_plc_stop(false);
+                }
+                plc_was = plc;
                 SlaveEvent e;
-                e.kind = SlaveEventKind::OnBus;
+                e.kind = SlaveEventKind::Plc;
+                e.ok   = plc;
                 im.push(e);
             }
-            im.nmt_command      = false;
-            im.sdo.active       = false;
-            uint8_t pending_was = pending_node_;
+            first_plc = false;
 
-            reset                  = CO_RESET_NOT;
-            Clock::time_point last = Clock::now();
-            Clock::time_point last_status;
-            uint8_t last_state = 0xFF;
-            uint8_t status_nmt = 0xFF;
-            bool master_was    = false;
-            uint8_t behaviour  = im.od.error_behaviour();
-            while (!stop_.load() && reset == CO_RESET_NOT)
+            // Values to the master from the newest scan.
+            bool fresh          = false;
+            const uint64_t *out = out_.size() ? out_.latest(&fresh) : nullptr;
+            if (plc && fresh && out)
+                for (size_t i = 0; i < im.to_master.size(); ++i)
+                    im.set_to_master(im.to_master[i], out[i]);
+
+            // The program NMT request and emergencies; an unconfigured slave stays silent.
+            const uint8_t cmd = nmt_request_.exchange(0, std::memory_order_acq_rel);
+            if (cmd && !unconfigured)
             {
-                SlaveLink::Frame f;
-                int got = link_->read(f, kTickMs);
-                for (int n = 0; got == 1 && n < 64; ++n)
-                {
-                    CO_CANrxMsg_t msg;
-                    msg.ident = f.id & 0x7FF;
-                    if (f.id & SlaveLink::kRtr)
-                        msg.ident |= CO_CAN_RTR_FLAG;
-                    msg.dlc = f.dlc;
-                    std::memcpy(msg.data, f.data, 8);
-                    ++im.rx;
-                    im.seen_rx(f);
-                    // CiA 305: only a slave in the waiting state takes part in fastscan.
-                    const bool fastscan_ignored =
-                        dev_.lss.enabled && msg.ident == kLssMasterId && msg.dlc >= 1 &&
-                        msg.data[0] == kLssFastscan &&
-                        CO_LSSslave_getState(co->LSSslave) != CO_LSS_STATE_WAITING;
-                    if (!fastscan_ignored)
-                        co_slave_receive(co->CANmodule, &msg);
-                    got = link_->read(f, 0);
-                }
-                if (got < 0)
-                {
-                    log_warn("%s: the CAN interface failed; reopening it", label.c_str());
-                    link_ok = false;
-                    break;
-                }
+                im.program_nmt = true;
+                co_nmt_cs_ind(im.nmt, cmd);
+            }
+            if (!unconfigured)
+                im.apply_program_emcy(emcy_);
 
-                // PLC start and stop.
-                const bool plc = plc_running_.load();
-                if (plc != plc_was)
+            // LSS: a forget asked by the editor, and a node ID set by a master.
+            if (forget_.exchange(false))
+            {
+                LssStored stored;
+                std::string problem;
+                lss_load(store_path_, stored, problem);
+                stored.node_id = 0;
+                stored.bitrate = 0;
+                if (serial_auto_)
+                    stored.serial = serial_;
+                if (lss_save(store_path_, stored, problem))
+                    log_info("%s: stored LSS values forgotten; restarting with the project's",
+                             label.c_str());
+                else
+                    log_error("%s: cannot forget the stored LSS values: %s", label.c_str(),
+                              problem.c_str());
+                co_nmt_cs_ind(im.nmt, CO_NMT_CS_RESET_NODE);
+            }
+            im.install();
+            if (im.reset_comm)
+            {
+                im.reset_comm = false;
+                on_bus();
+            }
+            if (im.restart)
+            {
+                link_->set_bitrate(link_bitrate_);
+                new_bitrate = true;
+                break;
+            }
+            const uint8_t pending = co_nmt_get_id(im.nmt);
+            if (pending != pending_node_)
+            {
+                if (unconfigured)
+                    log_info("%s: LSS master gave node ID %u", label.c_str(), pending);
+                else if (pending == 0xFF)
+                    log_info("%s: LSS master cleared the node ID (no node ID after reset "
+                             "communication)",
+                             label.c_str());
+                else
+                    log_info("%s: LSS master set node ID %u (active after reset communication)",
+                             label.c_str(), pending);
+                pending_node_ = pending;
+            }
+
+            // Values from the master to the scan.
+            if (im.written)
+            {
+                im.written     = false;
+                uint64_t *back = in_.back();
+                for (size_t i = 0; i < im.from_master.size(); ++i)
+                    back[i] = Impl::raw_value(im.from_master[i]);
+                in_.publish();
+            }
+
+            const uint8_t state = nmt_state(im.nmt);
+            if (state != last_state)
+            {
+                log_info("%s: %s", label.c_str(), state_text(state));
+                SlaveNmtBy by = SlaveNmtBy::Boot;
+                if (im.program_nmt)
+                    by = SlaveNmtBy::Program;
+                else if (im.plc_stop_nmt)
+                    by = SlaveNmtBy::PlcStop;
+                else if (im.nmt_command)
+                    by = SlaveNmtBy::Master;
+                else if (last_state == CO_NMT_ST_START)
+                    by = SlaveNmtBy::Self;
+                else if (state == CO_NMT_ST_START && dev_.start_alone)
+                    by = SlaveNmtBy::StartAlone;
+                if (state != CO_NMT_ST_BOOTUP)
                 {
-                    if (!plc)
-                    {
-                        if (!unconfigured)
-                            CO_errorReport(co->em, kPlcStopBit, CO_EMC_SOFTWARE_USER, 0);
-                        im.clear_program_emcy(co, emcy_);
-                        if (dev_.on_plc_stop == SlaveOnStop::Zero)
-                            for (auto &slot : im.od.to_master())
-                                im.od.set_to_master(slot, 0);
-                        // The NMT state set for a PLC stop (0x1029 sub 2, coded as sub 1).
-                        const uint8_t now_state =
-                            static_cast<uint8_t>(CO_NMT_getInternalState(co->NMT));
-                        const uint8_t stop_state = unconfigured ? 1 : im.od.plc_stop_state();
-                        if (stop_state == kErrorPreOperational && now_state == CO_NMT_OPERATIONAL)
-                        {
-                            CO_NMT_sendInternalCommand(co->NMT, CO_NMT_ENTER_PRE_OPERATIONAL);
-                            im.plc_stop_nmt = true;
-                        }
-                        else if (stop_state == kErrorStopped && now_state != CO_NMT_STOPPED)
-                        {
-                            CO_NMT_sendInternalCommand(co->NMT, CO_NMT_ENTER_STOPPED);
-                            im.plc_stop_nmt = true;
-                        }
-                    }
-                    else
-                    {
-                        if (!first_plc)
-                            im.od.restore_defaults(SlaveOd::Restore::Application);
-                        if (!unconfigured)
-                            CO_errorReset(co->em, kPlcStopBit, 0);
-                    }
-                    plc_was = plc;
                     SlaveEvent e;
-                    e.kind = SlaveEventKind::Plc;
-                    e.ok   = plc;
+                    e.kind  = SlaveEventKind::Nmt;
+                    e.state = state;
+                    e.by    = by;
                     im.push(e);
                 }
-                first_plc = false;
-
-                // Values to the master from the newest scan.
-                bool fresh          = false;
-                const uint64_t *out = out_.size() ? out_.latest(&fresh) : nullptr;
-                if (plc && fresh && out)
+                // Event-driven TPDOs are sent once on entering operational, as before.
+                if (state == CO_NMT_ST_START)
+                    for (co_unsigned16_t n = 1; n <= kSlavePdos; ++n)
+                    {
+                        const uint8_t trans = im.od_u8(static_cast<uint16_t>(0x1800 + n - 1), 2);
+                        co_tpdo_t *pdo      = co_nmt_get_tpdo(im.nmt, n);
+                        if (pdo && trans >= 0xFE)
+                            co_tpdo_event(pdo);
+                    }
+                // Leaving the stopped state brings a new EMCY service: it gets the active
+                // errors back, without sending them again.
+                if (last_state == CO_NMT_ST_STOP && !unconfigured)
                 {
-                    auto &slots = im.od.to_master();
-                    for (size_t i = 0; i < slots.size(); ++i)
-                        im.od.set_to_master(slots[i], out[i]);
+                    im.mute_emcy = true;
+                    im.emcy_sync();
+                    im.mute_emcy = false;
                 }
-
-                // The program NMT request and emergencies; an unconfigured slave stays silent.
-                const uint8_t cmd = nmt_request_.exchange(0, std::memory_order_acq_rel);
-                if (cmd && !unconfigured)
+                std::lock_guard<PiMutex> lock(status_mutex_);
+                status_.since  = wall_ms();
+                status_.nmt_by = by;
+                last_state     = state;
+            }
+            im.nmt_command    = false;
+            im.program_nmt    = false;
+            im.plc_stop_nmt   = false;
+            const bool master = status_.master_node_id && !unconfigured && im.master_beat;
+            if (status_.master_node_id && !unconfigured && master != master_was)
+            {
+                if (master && !said_seen)
                 {
-                    CO_NMT_sendInternalCommand(co->NMT, static_cast<CO_NMT_command_t>(cmd));
-                    im.program_nmt = true;
+                    log_info("%s: heartbeat of master node %u seen", label.c_str(),
+                             dev_.master_node_id);
+                    SlaveEvent e;
+                    e.kind = SlaveEventKind::Heartbeat;
+                    e.ok   = true;
+                    im.push(e);
                 }
-                if (!unconfigured)
-                    im.apply_program_emcy(co, emcy_);
-
-                const Clock::time_point now = Clock::now();
-                uint32_t dt                 = static_cast<uint32_t>(
-                    std::chrono::duration_cast<std::chrono::microseconds>(now - last).count());
-                last      = now;
-                reset     = CO_process(co, false, dt, nullptr);
-                bool sync = CO_process_SYNC(co, dt, nullptr);
-                CO_process_RPDO(co, sync, dt, nullptr);
-                CO_process_TPDO(co, sync, dt, nullptr);
-
-                // LSS: a node ID set by a master, and a forget asked by the editor.
-                if (pending_node_ != pending_was)
+                else if (!master && im.master_lost)
                 {
-                    if (unconfigured)
-                        log_info("%s: LSS master gave node ID %u", label.c_str(), pending_node_);
-                    else if (pending_node_ == 0xFF)
-                        log_info("%s: LSS master cleared the node ID (no node ID after reset "
-                                 "communication)",
-                                 label.c_str());
-                    else
-                        log_info("%s: LSS master set node ID %u (active after reset "
-                                 "communication)",
-                                 label.c_str(), pending_node_);
-                    pending_was = pending_node_;
+                    log_warn("%s: heartbeat of master node %u lost", label.c_str(),
+                             dev_.master_node_id);
+                    said_seen = false;
+                    SlaveEvent e;
+                    e.kind = SlaveEventKind::Heartbeat;
+                    im.push(e);
                 }
-                if (forget_.exchange(false))
+                if (master)
                 {
-                    LssStored stored;
-                    std::string problem;
-                    lss_load(store_path_, stored, problem);
-                    stored.node_id = 0;
-                    stored.bitrate = 0;
-                    if (serial_auto_)
-                        stored.serial = serial_;
-                    if (lss_save(store_path_, stored, problem))
-                        log_info("%s: stored LSS values forgotten; restarting with the project's",
-                                 label.c_str());
-                    else
-                        log_error("%s: cannot forget the stored LSS values: %s", label.c_str(),
-                                  problem.c_str());
-                    reset = CO_RESET_APP;
+                    said_seen      = true;
+                    im.master_lost = false;
                 }
-
-                // A master's write to 0x1029.
-                if (im.od.error_behaviour() != behaviour)
+                master_was = master;
+            }
+            // Bus status and bus-off recovery, once a second.
+            const Clock::time_point now = Clock::now();
+            if (now - last_monitor >= std::chrono::seconds(1))
+            {
+                last_monitor = now;
+                if (supervise())
                 {
-                    behaviour           = im.od.error_behaviour();
-                    co->NMT->NMTcontrol = nmt_control(dev_, behaviour);
+                    if (!reopen())
+                        break;
+                    im.sdo.active = false;
                 }
-
-                // Values from the master to the scan.
-                if (im.od.take_written())
+                if (bus.state != bus_was)
                 {
-                    uint64_t *back = in_.back();
-                    auto &slots    = im.od.from_master();
-                    for (size_t i = 0; i < slots.size(); ++i)
-                        back[i] = SlaveOd::raw_value(slots[i]);
-                    in_.publish();
-                }
-
-                const uint8_t state = static_cast<uint8_t>(CO_NMT_getInternalState(co->NMT));
-                if (state != last_state)
-                {
-                    log_info("%s: %s", label.c_str(), state_text(state));
-                    SlaveNmtBy by = SlaveNmtBy::Boot;
-                    if (im.program_nmt)
-                        by = SlaveNmtBy::Program;
-                    else if (im.plc_stop_nmt)
-                        by = SlaveNmtBy::PlcStop;
-                    else if (im.nmt_command)
-                        by = SlaveNmtBy::Master;
-                    else if (last_state == CO_NMT_OPERATIONAL)
-                        by = SlaveNmtBy::Self;
-                    else if (state == CO_NMT_OPERATIONAL && dev_.start_alone)
-                        by = SlaveNmtBy::StartAlone;
-                    if (state != CO_NMT_INITIALIZING)
+                    if (bus_was != BusState::Unknown || bus.state != BusState::ErrorActive)
                     {
                         SlaveEvent e;
-                        e.kind  = SlaveEventKind::Nmt;
-                        e.state = state;
-                        e.by    = by;
+                        e.kind      = SlaveEventKind::BusState;
+                        e.bus_state = bus.state;
                         im.push(e);
                     }
-                    std::lock_guard<PiMutex> lock(status_mutex_);
-                    status_.since  = wall_ms();
-                    status_.nmt_by = by;
-                    last_state     = state;
-                }
-                im.nmt_command  = false;
-                im.program_nmt  = false;
-                im.plc_stop_nmt = false;
-                bool master     = false;
-                if (status_.master_node_id && !unconfigured)
-                    master = CO_HBconsumer_getState(co->HBcons, 0) == CO_HBconsumer_ACTIVE;
-                if (status_.master_node_id && !unconfigured && master != master_was)
-                {
-                    if (master && !said_seen)
-                    {
-                        log_info("%s: heartbeat of master node %u seen", label.c_str(),
-                                 dev_.master_node_id);
-                        SlaveEvent e;
-                        e.kind = SlaveEventKind::Heartbeat;
-                        e.ok   = true;
-                        im.push(e);
-                    }
-                    else if (!master && CO_isError(co->em, CO_EM_HEARTBEAT_CONSUMER))
-                    {
-                        log_warn("%s: heartbeat of master node %u lost", label.c_str(),
-                                 dev_.master_node_id);
-                        said_seen = false;
-                        SlaveEvent e;
-                        e.kind = SlaveEventKind::Heartbeat;
-                        im.push(e);
-                    }
-                    if (master)
-                        said_seen = true;
-                    master_was = master;
-                }
-                // Bus status and bus-off recovery, once a second.
-                if (now - last_monitor >= std::chrono::seconds(1))
-                {
-                    last_monitor = now;
-                    if (supervise(co))
-                    {
-                        if (!reopen(label))
-                            break;
-                        im.sdo.active = false;
-                    }
-                    if (bus.state != bus_was)
-                    {
-                        if (bus_was != BusState::Unknown || bus.state != BusState::ErrorActive)
-                        {
-                            SlaveEvent e;
-                            e.kind      = SlaveEventKind::BusState;
-                            e.bus_state = bus.state;
-                            im.push(e);
-                        }
-                        bus_was = bus.state;
-                    }
-                }
-                if (now - last_status >= std::chrono::milliseconds(100) || state != status_nmt)
-                {
-                    status_nmt  = state;
-                    last_status = now;
-                    std::lock_guard<PiMutex> lock(status_mutex_);
-                    status_.nmt          = state;
-                    status_.plc_running  = plc;
-                    status_.master_seen  = master;
-                    status_.last_emcy    = im.last_emcy;
-                    status_.emcy_sent    = im.emcy_sent;
-                    status_.rx_frames    = im.rx;
-                    status_.tx_frames    = im.tx;
-                    status_.bus          = bus;
-                    status_.lss_selected = dev_.lss.enabled && CO_LSSslave_getState(co->LSSslave) ==
-                                                                   CO_LSS_STATE_CONFIGURATION;
-                    im.fill_details(co, status_);
-                    unsigned active = 0;
-                    for (uint8_t b : co->em->errorStatusBits)
-                        active += static_cast<unsigned>(__builtin_popcount(b));
-                    publish_plc(state, static_cast<uint8_t>(im.node_id), true,
-                                status_.master_node_id != 0, master, bus.state,
-                                CO_getErrorRegister(co->em),
-                                static_cast<uint8_t>(active > 255 ? 255 : active));
+                    bus_was = bus.state;
                 }
             }
-            if (reset == CO_RESET_APP)
+            if (now - last_status >= std::chrono::milliseconds(100) || state != status_nmt)
             {
-                log_info("%s: reset node", label.c_str());
-                im.od.restore_defaults(SlaveOd::Restore::All);
-                reset = CO_RESET_NOT;
-                load_lss_values();
-                if (link_bitrate_ != opened_at)
-                {
-                    link_->set_bitrate(link_bitrate_);
-                    new_bitrate = true;
-                    link_ok     = false;
-                }
-            }
-            else if (reset == CO_RESET_COMM)
-            {
-                log_info("%s: reset communication", label.c_str());
-                im.od.restore_defaults(SlaveOd::Restore::Communication);
-                reset = CO_RESET_NOT;
+                status_nmt  = state;
+                last_status = now;
+                std::lock_guard<PiMutex> lock(status_mutex_);
+                status_.nmt          = state;
+                status_.plc_running  = plc;
+                status_.master_seen  = master;
+                status_.last_emcy    = im.last_emcy;
+                status_.emcy_sent    = im.emcy_sent;
+                status_.rx_frames    = im.rx;
+                status_.tx_frames    = im.tx;
+                status_.bus          = bus;
+                status_.lss_selected = dev_.lss.enabled && im.lss_selected;
+                im.fill_details(status_);
+                const size_t active = status_.emcy_active.size();
+                publish_plc(state, static_cast<uint8_t>(im.node_id), true,
+                            status_.master_node_id != 0, master, bus.state, im.od_u8(0x1001, 0),
+                            static_cast<uint8_t>(active > 255 ? 255 : active));
             }
         }
-        CO_CANsetConfigurationMode(&im.port);
-        CO_delete(co);
+        im.destroy();
         link_->close();
         publish_plc(0, static_cast<uint8_t>(im.node_id), false, status_.master_node_id != 0, false,
                     BusState::Unknown, 0, 0);
@@ -1607,9 +1953,10 @@ void Slave::thread_main()
             std::lock_guard<PiMutex> lock(status_mutex_);
             status_.bus_open = false;
         }
-        if (!stop_.load() && !new_bitrate)
+        if (!stop_.load() && !new_bitrate && !link_ok)
             sleep_or_stop(kRetryMs);
     }
+    im.at_reset_comm = nullptr;
     log_info("%s: left the bus", label.c_str());
 }
 

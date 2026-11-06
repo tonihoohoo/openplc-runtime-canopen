@@ -13,13 +13,11 @@ foreach(name test_bus_off_recovery test_can_link test_config test_link_stall tes
 endforeach()
 set_tests_properties(test_network test_lss PROPERTIES TIMEOUT 120)
 
-if(CANOPEN_HAVE_SLAVE)
-    add_executable(test_slave ${CMAKE_CURRENT_SOURCE_DIR}/test_slave.cpp)
-    target_compile_options(test_slave PRIVATE -Wall -Wextra -Wno-unused-parameter)
-    target_link_libraries(test_slave PRIVATE canopen_core)
-    add_test(NAME test_slave COMMAND test_slave)
-    set_tests_properties(test_slave PROPERTIES TIMEOUT 120)
-endif()
+add_executable(test_slave ${CMAKE_CURRENT_SOURCE_DIR}/test_slave.cpp)
+target_compile_options(test_slave PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_link_libraries(test_slave PRIVATE canopen_core)
+add_test(NAME test_slave COMMAND test_slave)
+set_tests_properties(test_slave PROPERTIES TIMEOUT 120)
 
 add_executable(test_entry_points ${CMAKE_CURRENT_SOURCE_DIR}/test_entry_points.cpp
                                  ${CMAKE_CURRENT_SOURCE_DIR}/../canopen_plugin.cpp

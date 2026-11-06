@@ -297,10 +297,6 @@ struct Config
     std::vector<std::string> warnings;
 };
 
-// Whether this build has the CANopen slave (CANopenNode); without it a file with devices is
-// refused.
-bool slave_supported();
-
 // Compares two raw values of `type` as that type: <0, 0 or >0.
 int compare_raw(CoType type, uint64_t a, uint64_t b);
 
