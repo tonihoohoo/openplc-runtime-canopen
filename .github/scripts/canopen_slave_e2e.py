@@ -5,11 +5,11 @@ Needs the slave e2e project running in the runtime: node 5 on the interface, a p
 0x2000:1 (from the master) to 0x2100:1, the parameter 0x2000:3 to 0x2100:2 and the eight bits of the
 packed 0x2000:4 to those of the packed 0x2100:3, RPDO1 0x205 and an event TPDO1 0x185, the copy
 0x2100:4 of 0x2000:1 in an event TPDO5 whose COB-ID the master gives, a heartbeat of 100 ms and a
-watch of master node 127. This script plays the master: SDO reads and writes with
-range checks, NMT start, an RPDO in and the TPDO back (packed bits included), TPDO5 enabled by a
-COB-ID written by SDO, the master
-heartbeat lost and back, the PLC stopped and started, and the slave in /api/canopen/status with its
-NMT source, SDO writes, PDO counts, values and active EMCY codes.
+watch of master node 127. This script plays the master: SDO reads and writes with range checks,
+the hardware version 0x1009, NMT start, an RPDO in and the TPDO back (packed bits included), TPDO5
+enabled by a COB-ID written by SDO, the master heartbeat lost and back, the PLC stopped and
+started, and the slave in /api/canopen/status with its NMT source, SDO writes, PDO counts, values
+and active EMCY codes.
 
     canopen_slave_e2e.py --user ci --password secret --interface vcan0
 """
@@ -108,6 +108,22 @@ def sdo_read(bus: Bus, index: int, sub: int) -> tuple[int, int]:
     return (value, 0) if cmd == 0x80 else (0, value)
 
 
+def sdo_read_text(bus: Bus, index: int, sub: int) -> tuple[int, str]:
+    """Returns (abort code, text) of an expedited upload of at most 4 bytes."""
+    start = bus.mark()
+    bus.send(0x600 + NODE, struct.pack("<BHB4x", 0x40, index, sub))
+    frame = bus.wait(start, lambda f: f[0] == 0x580 + NODE, 2)
+    if frame is None:
+        sys.exit(f"FAIL: no SDO answer for 0x{index:04X}:{sub}")
+    cmd = frame[1][0]
+    if cmd == 0x80:
+        return (struct.unpack("<I", frame[1][4:8])[0], "")
+    if cmd & 0x03 != 0x03:
+        sys.exit(f"FAIL: 0x{index:04X}:{sub} is not an expedited upload with a size")
+    size = 4 - ((cmd >> 2) & 0x03)
+    return (0, frame[1][4 : 4 + size].decode("ascii"))
+
+
 def sdo_write(bus: Bus, index: int, sub: int, value: int, size: int) -> int:
     start = bus.mark()
     cmd = 0x23 | ((4 - size) << 2)
@@ -194,6 +210,7 @@ def main() -> None:
 
     expect("vendor id", sdo_read(bus, 0x1018, 1), (0, 0x0000ABCD))
     expect("heartbeat time", sdo_read(bus, 0x1017, 0), (0, 100))
+    expect("hardware version", sdo_read_text(bus, 0x1009, 0), (0, "HW 2"))
     expect("parameter default", sdo_read(bus, 0x2000, 3), (0, 1000))
     expect("parameter written", sdo_write(bus, 0x2000, 3, 1234, 2), 0)
     expect("parameter below its minimum", sdo_write(bus, 0x2000, 3, 50, 2), 0x06090032)

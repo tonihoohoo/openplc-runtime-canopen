@@ -245,8 +245,8 @@ an object dictionary built from the file when the PLC starts.
   "networks": [],
   "devices": [{
     "name": "io", "interface": "can1", "bitrate": 250000, "node_id": 5, "priority": 90,
-    "identity": {"device_name": "plc-node", "software_version": "1.0", "vendor_id": 0,
-                 "product_code": 1, "revision": 65536},
+    "identity": {"device_name": "plc-node", "hardware_version": "rev B", "software_version": "1.0",
+                 "vendor_id": 0, "product_code": 1, "revision": 65536},
     "heartbeat_ms": 100,
     "master_watch": {"node_id": 127, "time_ms": 300},
     "on_master_lost": "pre_operational",
@@ -280,7 +280,7 @@ an object dictionary built from the file when the PLC starts.
 |---|---|
 | `interface`, `bitrate`, `node_id` | The slave's SocketCAN interface (not one a master network or another slave uses), its bit rate as for a network, and its node ID, 1-127. |
 | `priority` | SCHED_FIFO priority of the slave's thread, 1-97, default 90. |
-| `identity` | 0x1008 device name, 0x100A software version, 0x1018 vendor ID, product code and revision. 0x1000 (device type) is 0: no device profile. |
+| `identity` | 0x1008 device name, 0x1009 hardware version, 0x100A software version (each up to 255 characters, left out of the dictionary when empty; the hardware version printable ASCII), 0x1018 vendor ID, product code and revision. 0x1000 (device type) is 0: no device profile. |
 | `heartbeat_ms` | The slave's heartbeat producer time (0x1017), 1-65535. |
 | `master_watch` | `null` or `{node_id, time_ms}`: the heartbeat consumer (0x1016) for the master's heartbeat. |
 | `on_master_lost` | What the slave does when the watched heartbeat is lost, written to 0x1029 sub 1: `pre_operational` (default), `no_change` or `stopped`. It also sends EMCY 8130h. |
@@ -296,7 +296,7 @@ an object dictionary built from the file when the PLC starts.
 Behaviour:
 
 - The slave has the CiA 301 communication objects 0x1000-0x1029 (0x1001, 0x1003 with up to 8 errors,
-  newest first and without the 0000h "error reset" messages, 0x1005-0x1007, 0x1014, 0x1016, 0x1017, 0x1018, 0x1029), one SDO server (0x1200), and the PDO
+  newest first and without the 0000h "error reset" messages, 0x1005-0x1007, 0x1008-0x100A when given, 0x1014, 0x1016, 0x1017, 0x1018, 0x1029), one SDO server (0x1200), and the PDO
   parameters of 16 RPDOs and 16 TPDOs (0x1400-0x140F, 0x1600-0x160F, 0x1800-0x180F and
   0x1A00-0x1A0F). PDO 1-4 follow the node ID in use; PDO 5-16 keep the COB-ID the file or a master
   gives them. A master may remap the

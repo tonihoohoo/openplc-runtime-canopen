@@ -25,6 +25,14 @@ constexpr size_t kMaxSdoBytes    = 1024;
 // The master's own objects for mapped entries (master_dcf.h).
 constexpr size_t kMaxMasterEntries = 4096;
 
+bool is_printable_ascii(const std::string &s)
+{
+    for (const char c : s)
+        if (c < 0x20 || c > 0x7E)
+            return false;
+    return true;
+}
+
 std::string hex(unsigned v, int width)
 {
     char buf[16];
@@ -1264,8 +1272,13 @@ bool Parser::parse_device(const cJSON *j, size_t pos, DeviceConfig &dev)
         const std::string w = where + ": identity";
         get_string(id, "device_name", w, dev.device_name, false);
         get_string(id, "software_version", w, dev.software_version, false);
+        get_string(id, "hardware_version", w, dev.hardware_version, false);
         if (dev.device_name.size() > 255 || dev.software_version.size() > 255)
             error(w, "names are at most 255 characters");
+        if (dev.hardware_version.size() > 255)
+            error(w, "\"hardware_version\" is at most 255 characters");
+        else if (!is_printable_ascii(dev.hardware_version))
+            error(w, "\"hardware_version\" must be printable ASCII");
         if (get_uint(id, "vendor_id", w, 0, 0xFFFFFFFF, v, &zero))
             dev.vendor_id = static_cast<uint32_t>(v);
         if (get_uint(id, "product_code", w, 0, 0xFFFFFFFF, v, &zero))

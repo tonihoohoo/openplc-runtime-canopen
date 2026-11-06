@@ -51,8 +51,8 @@ const char *const kConfig = R"({
   "networks": [],
   "devices": [{
     "name": "io", "interface": "vcan-slave", "bitrate": 0, "node_id": 5,
-    "identity": {"device_name": "test-node", "vendor_id": 4660, "product_code": 1,
-                 "revision": 65536},
+    "identity": {"device_name": "test-node", "hardware_version": "rev B", "vendor_id": 4660,
+                 "product_code": 1, "revision": 65536},
     "heartbeat_ms": 100,
     "master_watch": {"node_id": 127, "time_ms": 300},
     "on_master_lost": "pre_operational",
@@ -440,6 +440,7 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     CHECK(sdo_write(p, 0x1011, 1, 0x64616F6C, 4) == 0x06020000);
     std::string text;
     CHECK(sdo_read_string(p, 0x1008, 0, text) && text == "test-node");
+    CHECK(sdo_read_string(p, 0x1009, 0, text) && text == "rev B");
     CHECK(sdo_read_string(p, 0x2100, 5, text) && text == "1.4.0");
 
     // Range checks and read-only objects.
@@ -1410,6 +1411,13 @@ void check_packed_config()
     const std::string bits = R"("%IX0.0", "%IX0.1", "%IX0.2", "%IX0.3", "%IX0.4", "%IX0.5", "%IX0.6", "%IX0.7")";
     CHECK(packed_refused(replaced(base, bits, R"("%IX0.0", "%IX0.1", "%IX0.2", "%IX0.3", "%IX0.4", "%IX0.5", "%IX0.6")"),
                          "\"bits\" must list 8 locations"));
+    CHECK(packed_refused(replaced(base, "\"device_name\": \"bits\"",
+                                  "\"device_name\": \"bits\", \"hardware_version\": \"" +
+                                      std::string(300, 'h') + "\""),
+                         "\"hardware_version\" is at most 255 characters"));
+    CHECK(packed_refused(replaced(base, "\"device_name\": \"bits\"",
+                                  "\"device_name\": \"bits\", \"hardware_version\": \"r\\u00e9v\""),
+                         "\"hardware_version\" must be printable ASCII"));
     CHECK(packed_refused(replaced(base, "\"%IX0.7\"", "\"%QX2.0\""),
                          "bit location %QX2.0 must be a %IX location"));
     CHECK(packed_refused(replaced(base, "\"%IX0.7\"", "\"%IB3\""),
@@ -1455,6 +1463,8 @@ void check_packed(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
         milliseconds(500)));
     uint32_t v = 0;
     CHECK(sdo_read(p, 0x2000, 1, v) && v == 0x81);
+    // No hardware version in the configuration: no 0x1009.
+    CHECK(!sdo_read(p, 0x1009, 0, v) && v == 0x06020000);
 
     // Operational: RPDO 0x05 gives bits 0 and 2.
     p.send(0x000, {0x01, static_cast<uint8_t>(kNode)});

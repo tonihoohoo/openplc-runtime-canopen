@@ -269,6 +269,7 @@ struct DeviceConfig
     int priority     = kDefaultPriority;
     std::string device_name;
     std::string software_version;
+    std::string hardware_version;
     uint32_t vendor_id               = 0;
     uint32_t product_code            = 0;
     uint32_t revision                = 0;

@@ -152,6 +152,13 @@ bool SlaveOd::build(const DeviceConfig &dev, uint32_t serial, std::string &probl
         std::memcpy(p, dev.device_name.data(), dev.device_name.size());
         add_var(0x1008, p, ODA_SDO_R | ODA_STR, static_cast<OD_size_t>(dev.device_name.size()));
     }
+    if (!dev.hardware_version.empty())
+    {
+        uint8_t *p = store(dev.hardware_version.size());
+        std::memcpy(p, dev.hardware_version.data(), dev.hardware_version.size());
+        add_var(0x1009, p, ODA_SDO_R | ODA_STR,
+                static_cast<OD_size_t>(dev.hardware_version.size()));
+    }
     if (!dev.software_version.empty())
     {
         uint8_t *p = store(dev.software_version.size());
