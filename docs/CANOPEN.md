@@ -750,5 +750,16 @@ until the master has given it node 2 over LSS, stored it once and booted it.
 `.github/scripts/canopen_slave_lss_e2e.py` plays an LSS master: fastscan, node ID 12 configured
 and stored, the boot-up as node 12 with its COB-IDs following, a reset node, and the forget request.
 
+On a pull request the end-to-end check runs only the step groups its changed files need
+(`.github/scripts/docs-only.sh`): the master group (inputs to outputs, online tools, PLC blocks,
+boot SDO, node control, the runtime dying) for the master files and their scripts, the slave group
+(slave, slave blocks, Linux I/O blocks) for `slave/` and its scripts, and the LSS group (LSS tools,
+out of turn, master LSS, slave LSS) for `lss.cpp`, `lss_online.*`, `slave/lss_store.*` and their
+scripts. Any other plugin file, a file outside the plugin, the workflow, a same-named editor branch,
+pushes to `canopen` and runs started by hand run every group; a change to the plugin's tests alone
+runs none, and the job is skipped. The built editor is cached by its commit and the hash of
+`.github/scripts/editor-build.sh`. The upstream `Tests` workflow skips its jobs when a pull
+request changes only the plugin, the CANopen CI files, Markdown or `docs/`.
+
 vcan needs the kernel's `vcan` module. On a runner whose kernel has no matching
 `linux-modules-extra` package the vcan jobs fail at their first step, and the reason is in its log.

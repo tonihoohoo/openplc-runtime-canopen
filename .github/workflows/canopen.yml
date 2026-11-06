@@ -30,16 +30,20 @@ jobs:
       pull-requests: read
     outputs:
       docs_only: ${{ steps.files.outputs.docs_only }}
+      master: ${{ steps.files.outputs.master }}
+      slave: ${{ steps.files.outputs.slave }}
+      lss: ${{ steps.files.outputs.lss }}
     steps:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: .github/scripts
 
-      - name: Docs-only pull request
+      - name: Docs-only pull request and end-to-end groups
         id: files
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.head_ref }}
         run: .github/scripts/docs-only.sh
 
   plugin:
@@ -78,7 +82,10 @@ jobs:
         run: .github/scripts/vcan-up.sh vcan0
 
       - name: Dependencies
-        run: sudo apt-get install -y --no-install-recommends autoconf automake libtool
+        run: |
+          pkgs=(autoconf automake libtool)
+          sudo apt-get install -y --no-install-recommends "${pkgs[@]}" ||
+            { sudo apt-get update && sudo apt-get install -y --no-install-recommends "${pkgs[@]}"; }
 
       - name: Build
         run: |
@@ -94,8 +101,12 @@ jobs:
   e2e:
     name: End-to-end with the editor
     needs: changes
-    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    # Runs the step groups (master, slave, lss) the changed files need: .github/scripts/docs-only.sh.
+    # Skipped (and so passing) when a pull request needs none, such as one changing only plugin tests;
+    # with no answer from that job every group runs.
+    if: >-
+      ${{ !cancelled() && (needs.changes.outputs.master != 'false' ||
+      needs.changes.outputs.slave != 'false' || needs.changes.outputs.lss != 'false') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -137,17 +148,34 @@ jobs:
           cmake -S "$PLUGIN_DIR" -B "$PLUGIN_DIR/build-sim" -DCANOPEN_BUILD_TESTS=ON
           cmake --build "$PLUGIN_DIR/build-sim" -j"$(nproc)" --target canopen_sim_slave
 
-      # Production mode without minification, source maps or module concatenation: about a minute.
+      - name: Editor commit
+        id: editor_commit
+        run: echo "sha=$(git -C editor rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # The built editor of an editor commit, saved right after its build so a later failure keeps it.
+      - uses: actions/cache/restore@v4
+        id: editor_cache
+        with:
+          path: |
+            editor/node_modules
+            editor/release/app/dist
+          key: editor-e2e-${{ steps.editor_commit.outputs.sha }}-${{ hashFiles('.github/scripts/editor-build.sh') }}
+
       - name: Build the editor
+        if: steps.editor_cache.outputs.cache-hit != 'true'
+        run: .github/scripts/editor-build.sh editor
+
+      - uses: actions/cache/save@v4
+        if: steps.editor_cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            editor/node_modules
+            editor/release/app/dist
+          key: ${{ steps.editor_cache.outputs.cache-primary-key }}
+
+      - name: Prepare the editor
         working-directory: editor
         run: |
-          npm ci --ignore-scripts
-          npm run setup:strucpp
-          node node_modules/electron/install.js
-          flags='--no-optimization-minimize --no-devtool --no-optimization-concatenate-modules'
-          npx concurrently --kill-others-on-fail --names main,renderer \
-            "npm run build:main -- $flags" \
-            "npm run build:renderer -- $flags"
           # Run from dist, the app looks for STruC++'s runtime headers next to main.js.
           mkdir -p release/app/dist/main/node_modules
           ln -sfn "$PWD/node_modules/strucpp" release/app/dist/main/node_modules/strucpp
@@ -185,6 +213,7 @@ jobs:
           sudo cat ../build/plugins/canopen.json
 
       - name: Inputs reach the outputs through the program, and the status shows the nodes
+        if: ${{ needs.changes.outputs.master != 'false' }}
         run: |
           "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 5 --timeout 180 --linger 30 &
           sim=$!
@@ -210,6 +239,7 @@ jobs:
           fi
 
       - name: Online tools while the PLC runs and in service mode
+        if: ${{ needs.changes.outputs.master != 'false' }}
         run: |
           "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 1 \
             --timeout 180 --linger 300 > "$RUNNER_TEMP/sim-online.log" 2>&1 &
@@ -223,6 +253,7 @@ jobs:
           exit "$status"
 
       - name: LSS tools through the web API
+        if: ${{ needs.changes.outputs.lss != 'false' }}
         run: |
           # Node 2 runs; two devices without a node ID wait for one. Each keeps its LSS store in a file.
           sim="$PLUGIN_DIR/build-sim/tests/canopen_sim_slave"
@@ -254,6 +285,7 @@ jobs:
           done
           exit "$status"
       - name: LSS search ended by a device answering out of turn
+        if: ${{ needs.changes.outputs.lss != 'false' }}
         run: |
           sim="$PLUGIN_DIR/build-sim/tests/canopen_sim_slave"
           "$sim" --interface vcan0 --node 2 --steps 1 --timeout 120 --linger 200 \
@@ -277,6 +309,7 @@ jobs:
 
       - name: Upload the PLC function block project with the editor CLI
         id: blocks
+        if: ${{ needs.changes.outputs.master != 'false' }}
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
@@ -299,6 +332,7 @@ jobs:
 
       - name: Upload the boot SDO project with the editor CLI
         id: boot
+        if: ${{ needs.changes.outputs.master != 'false' }}
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
@@ -348,6 +382,7 @@ jobs:
 
       - name: Upload the node control project with the editor CLI
         id: control
+        if: ${{ needs.changes.outputs.master != 'false' }}
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
@@ -402,6 +437,7 @@ jobs:
 
       - name: Upload the slave project with the editor CLI
         id: slave
+        if: ${{ needs.changes.outputs.slave != 'false' }}
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
@@ -425,6 +461,7 @@ jobs:
 
       - name: Upload the slave blocks project with the editor CLI
         id: slaveblocks
+        if: ${{ needs.changes.outputs.slave != 'false' }}
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
@@ -448,6 +485,7 @@ jobs:
 
       - name: Upload the LSS project with the editor CLI
         id: lss
+        if: ${{ needs.changes.outputs.lss != 'false' }}
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
@@ -497,6 +535,7 @@ jobs:
 
       - name: Upload the slave LSS project with the editor CLI
         id: slave_lss
+        if: ${{ needs.changes.outputs.lss != 'false' }}
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
@@ -520,6 +559,7 @@ jobs:
 
       - name: GPIO simulator lines for the Linux I/O blocks
         id: gpiosim
+        if: ${{ needs.changes.outputs.slave != 'false' }}
         run: .github/scripts/gpio-sim-up.sh
 
       - name: Upload the Linux I/O project with the editor CLI
@@ -547,9 +587,10 @@ jobs:
 
       - name: Upload the first project again
         if: >-
+          needs.changes.outputs.master != 'false' && (
           steps.control.outputs.present == 'true' || steps.slave.outputs.present == 'true' ||
           steps.lss.outputs.present == 'true' || steps.slave_lss.outputs.present == 'true' ||
-          steps.linuxio.outputs.present == 'true'
+          steps.linuxio.outputs.present == 'true')
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
@@ -560,6 +601,7 @@ jobs:
             --user-data "$RUNNER_TEMP/editor-data" --json
 
       - name: The node goes pre-operational when the runtime dies
+        if: ${{ needs.changes.outputs.master != 'false' }}
         run: |
           # The project's node watches the master's heartbeat (0x1016); no NMT command is sent.
           "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 1 \
