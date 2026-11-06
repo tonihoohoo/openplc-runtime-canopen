@@ -299,14 +299,22 @@ Behaviour:
   parameters of 16 RPDOs and 16 TPDOs (0x1400-0x140F, 0x1600-0x160F, 0x1800-0x180F and
   0x1A00-0x1A0F). PDO 1-4 follow the node ID in use; PDO 5-16 keep the COB-ID the file or a master
   gives them. A master may remap the
-  PDOs by the CiA 301 procedure; an object that is not `pdo` cannot be mapped (abort 0604 0041h).
+  PDOs by the CiA 301 procedure, in pre-operational and in operational alike; an object that is
+  not `pdo`, an object from the master in a TPDO and a length longer than the object cannot be
+  mapped (abort 0604 0041h). Transmission types 241-253 are
+  refused (0609 0030h).
   Writes to 0x1010 (store) and 0x1011 (restore) are refused (0602 0000h): nothing is stored, and a
   master writes its settings again at every boot.
 - Event-driven TPDOs (254, 255) are sent when a mapped value changes and on entering operational;
   synchronous ones on the SYNC. RPDOs are taken in operational only. An RPDO with an event timer
   is watched once its first frame came: no frame within that time sends EMCY 8250h and sets the
   communication bit of the error register, the program keeps the last values and the NMT state
-  does not change; the next frame resets it (EMCY 0000h).
+  does not change; the next frame resets it (EMCY 0000h). An RPDO frame shorter than its mapping
+  is not taken and sends EMCY 8210h, a longer one is taken and sends 8220h; each is sent once
+  while active, and the next frame that fits resets it (EMCY 0000h).
+- The stopped state sends no EMCY. On leaving it the slave keeps what is still active (PLC stop,
+  the program's emergencies, a master still missing) without sending it again; with nothing active
+  it clears 0x1001 and sends EMCY 0000h.
 - The slave stays on the bus while the PLC is stopped. A stop sends EMCY 6200h (and zeroes the
   values to the master with `on_plc_stop: zero`); the next start sends EMCY 0000h and puts the
   objects from the master back to their defaults. With `on_plc_stop_state` the stop also changes
@@ -315,8 +323,8 @@ Behaviour:
   communication the communication objects.
 - The PLC program can control the slave through the [slave blocks](#plc-function-blocks): a local
   NMT start, stop or pre-operational (CiA 301 7.3.2.3; resets are refused), up to 31 emergencies
-  of its own, each sent as EMCY with the program's code and bytes 4-7 (byte 3 is 0 in every EMCY
-  the slave sends), and a write counter per object from the master. The program's emergencies are
+  of its own, each sent as EMCY with the program's code and bytes 4-7 (byte 3 is 0; an EMCY 0000h
+  sent while other errors stay active carries the newest of them in bytes 3-4), and a write counter per object from the master. The program's emergencies are
   cleared (EMCY 0000h) on a PLC stop.
 - A new upload keeps a slave whose settings did not change running, without a new boot-up; a
   changed or removed slave leaves the bus and a changed one starts again with the new settings.
@@ -717,7 +725,7 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), a node started by the program (waiting, started, waiting again after a reset) and a node turned on and off (booted, stopped, pulled without a loss, skipped by NMT to every node), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 | `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, a kept table that stays the same across reloads, version 3's table serving versions 1 and 2, and the slave functions with no slave running. |
 | `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states, the emergency ring, and the node control (wanted states, run states, network counts), with no allocation on the scan's side. |
-| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, the status fields (NMT source, SDO writes and refusals, values, PDO counts and remap, active emergencies and the error register), the program's NMT requests, emergencies and write counters across a PLC restart, 0x1029 sub 2 on a PLC stop, error passive and bus-off on a stood-in link (EMCY 8120h and 8140h, the link reset without a new boot-up), the plugin's own master booting and running the slave, 16 PDOs each way with TPDO 5 off until a master writes its COB-ID, a fixed COB-ID on TPDO 6 and an RPDO receive timeout (EMCY 8250h and 0000h), and with LSS: silence while unconfigured, fastscan, configure, store, the stored values across restarts and reset node, reset communication taking a new node ID, forget, a refused bit rate, a failed store, and the stored file's checks. |
+| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, the status fields (NMT source, SDO writes and refusals, values, PDO counts and remap, active emergencies and the error register), the program's NMT requests, emergencies and write counters across a PLC restart, 0x1029 sub 2 on a PLC stop, error passive and bus-off on a stood-in link (EMCY 8120h and 8140h, the link reset without a new boot-up), the plugin's own master booting and running the slave, 16 PDOs each way with TPDO 5 off until a master writes its COB-ID, a fixed COB-ID on TPDO 6 and an RPDO receive timeout (EMCY 8250h and 0000h), the error register back to 0 after a short or long RPDO, after the master's heartbeat lost with 0x1029 sub 1 stopped and after a PLC stop with 0x1029 sub 2 stopped, PDO parameter checks in pre-operational and operational, and with LSS: silence while unconfigured, fastscan, configure, store, the stored values across restarts and reset node, reset communication taking a new node ID, forget, a refused bit rate, a failed store, and the stored file's checks. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O
