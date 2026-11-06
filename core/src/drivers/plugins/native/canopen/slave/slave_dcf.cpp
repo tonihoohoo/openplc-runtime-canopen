@@ -185,7 +185,8 @@ const char *access_of(const SlaveObject &o)
 {
     if (o.exch == SlaveExchange::Constant)
         return "const";
-    return o.dir == SlaveDirection::FromMaster ? "rw" : "ro";
+    // From the master: RPDO mapping only (rww); to it: TPDO only (ro).
+    return o.dir == SlaveDirection::FromMaster ? "rww" : "ro";
 }
 
 } // namespace

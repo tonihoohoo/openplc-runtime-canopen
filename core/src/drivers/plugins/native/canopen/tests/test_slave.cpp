@@ -715,6 +715,168 @@ void check_raw(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     CHECK(!slave.snapshot().bus_open);
 }
 
+// The error register comes back to 0 with a 0000h EMCY, and PDO parameters are checked in
+// every NMT state.
+void check_error_reset(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
+{
+    auto vbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
+    Probe p(vbus);
+    size_t m = p.mark();
+    Slave slave(dev, virtual_slave_link(vbus));
+    std::string problem;
+    CHECK(slave.start(problem));
+    slave.set_plc_running(true);
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x7F; }, milliseconds(1000)));
+    uint32_t v = 0;
+
+    // PDO checks while the PDO services are off and while they run.
+    auto pdo_checks = [&]
+    {
+        CHECK(sdo_write(p, 0x1800, 2, 241, 1) == 0x06090030);
+        CHECK(sdo_write(p, 0x1800, 2, 252, 1) == 0x06090030);
+        CHECK(sdo_write(p, 0x1400, 2, 241, 1) == 0x06090030);
+        CHECK(sdo_write(p, 0x1800, 2, 254, 1) == 0);
+        CHECK(sdo_write(p, 0x1800, 1, 0x80000185, 4) == 0);
+        CHECK(sdo_write(p, 0x1A00, 0, 0, 1) == 0);
+        CHECK(sdo_write(p, 0x1A00, 1, 0x21000120, 4) == 0x06040041); // 32 bits of a 16-bit object
+        CHECK(sdo_write(p, 0x1A00, 1, 0x20000110, 4) == 0x06040041); // from the master
+        CHECK(sdo_write(p, 0x1A00, 1, 0x21000108, 4) == 0);         // 8 bits of it fit
+        CHECK(sdo_write(p, 0x1A00, 1, 0x21000110, 4) == 0);
+        CHECK(sdo_write(p, 0x1A00, 0, 2, 1) == 0);
+        CHECK(sdo_write(p, 0x1800, 1, 0x185, 4) == 0);
+        CHECK(sdo_write(p, 0x1400, 1, 0x80000205, 4) == 0);
+        CHECK(sdo_write(p, 0x1600, 0, 0, 1) == 0);
+        CHECK(sdo_write(p, 0x1600, 1, 0x20000120, 4) == 0x06040041);
+        CHECK(sdo_write(p, 0x1600, 1, 0x20000110, 4) == 0);
+        CHECK(sdo_write(p, 0x1600, 0, 2, 1) == 0);
+        CHECK(sdo_write(p, 0x1400, 1, 0x205, 4) == 0);
+    };
+    pdo_checks();
+    m = p.mark();
+    p.send(0x000, {0x01, kNode});
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x05; }, milliseconds(1000)));
+    pdo_checks();
+
+    // A short and a long RPDO: 8210h and 8220h, ended by a frame that fits.
+    m = p.mark();
+    p.send(0x205, {0x34, 0x12});
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x8210); }, milliseconds(500)));
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        {
+            return s.error_register == 0x11 && s.emcy_active.size() == 1 &&
+                   s.emcy_active[0] == 0x8210;
+        },
+        milliseconds(500)));
+    m = p.mark();
+    p.send(0x205, {0x34, 0x12, 0x09});
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(500)));
+    CHECK(sdo_read(p, 0x1001, 0, v) && v == 0);
+    m = p.mark();
+    p.send(0x205, {0x34, 0x12, 0x09, 0x01});
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x8220); }, milliseconds(500)));
+    m = p.mark();
+    p.send(0x205, {0x34, 0x12, 0x09, 0x01});
+    std::this_thread::sleep_for(milliseconds(50));
+    CHECK(!p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(0)));
+    p.send(0x205, {0x34, 0x12, 0x09});
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(500)));
+    CHECK(snapshot_until(
+        slave, [](const SlaveSnapshot &s) { return s.error_register == 0 && s.emcy_active.empty(); },
+        milliseconds(500)));
+
+    // The master's heartbeat, sent while `beat` is set.
+    std::atomic<bool> beat{false};
+    std::thread master;
+    auto beat_on = [&]
+    {
+        beat   = true;
+        master = std::thread(
+            [&]
+            {
+                while (beat)
+                {
+                    p.send(0x77F, {0x05});
+                    std::this_thread::sleep_for(milliseconds(50));
+                }
+            });
+    };
+    auto beat_off = [&]
+    {
+        beat = false;
+        master.join();
+    };
+
+    // Master lost with 0x1029 sub 1 "stopped": back after its return, then started.
+    CHECK(sdo_write(p, 0x1029, 1, 2, 1) == 0);
+    beat_on();
+    std::this_thread::sleep_for(milliseconds(200));
+    m = p.mark();
+    beat_off();
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x8130); }, milliseconds(1000)));
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x04; }, milliseconds(1000)));
+    beat_on();
+    std::this_thread::sleep_for(milliseconds(200));
+    m = p.mark();
+    p.send(0x000, {0x01, kNode});
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(500)));
+    CHECK(sdo_read(p, 0x1001, 0, v) && v == 0);
+
+    // Started while the master is still missing: 8130h stays active until its return.
+    m = p.mark();
+    beat_off();
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x04; }, milliseconds(1000)));
+    m = p.mark();
+    p.send(0x000, {0x01, kNode});
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x05; }, milliseconds(1000)));
+    CHECK(sdo_read(p, 0x1001, 0, v) && v == 0x11);
+    CHECK(!p.wait(m, [](const Frame &x) { return is_emcy(x, 0x8130); }, milliseconds(0)));
+    CHECK(snapshot_until(
+        slave,
+        [](const SlaveSnapshot &s)
+        { return s.emcy_active.size() == 1 && s.emcy_active[0] == 0x8130; },
+        milliseconds(500)));
+    m = p.mark();
+    beat_on();
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(1000)));
+    CHECK(sdo_read(p, 0x1001, 0, v) && v == 0);
+    CHECK(sdo_write(p, 0x1029, 1, 0, 1) == 0);
+    beat_off();
+    std::this_thread::sleep_for(milliseconds(500));
+    p.send(0x000, {0x01, kNode});
+    std::this_thread::sleep_for(milliseconds(50));
+
+    // PLC stop with 0x1029 sub 2 "stopped": PLC start, then NMT start.
+    m = p.mark();
+    p.send(0x000, {0x82, kNode});
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; }, milliseconds(1000)));
+    std::this_thread::sleep_for(milliseconds(50));
+    CHECK(sdo_write(p, 0x1029, 2, 2, 1) == 0);
+    p.send(0x000, {0x01, kNode});
+    std::this_thread::sleep_for(milliseconds(50));
+    m = p.mark();
+    slave.set_plc_running(false);
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x6200); }, milliseconds(500)));
+    CHECK(p.wait(
+        m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x04; }, milliseconds(1000)));
+    slave.set_plc_running(true);
+    std::this_thread::sleep_for(milliseconds(100));
+    m = p.mark();
+    p.send(0x000, {0x01, kNode});
+    CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x0000); }, milliseconds(500)));
+    CHECK(sdo_read(p, 0x1001, 0, v) && v == 0);
+
+    slave.stop();
+    (void)rt;
+}
+
 // A CAN link whose state the test sets: frames go over Lely's in-process bus.
 class FakeCanLink : public SlaveLink
 {
@@ -1664,6 +1826,7 @@ int main()
     std::memset(g_int_in, 0, sizeof(g_int_in));
     std::memset(g_byte_in, 0, sizeof(g_byte_in));
     check_with_master(cfg.devices[0], rt, dir);
+    check_error_reset(cfg.devices[0], rt);
     check_bus_off(cfg.devices[0]);
     check_lss_store(dir);
     check_lss(rt, dir);

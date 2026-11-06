@@ -52,6 +52,8 @@ constexpr uint16_t kEmcyHeartbeat   = 0x8130;
 constexpr uint16_t kEmcyPassive     = 0x8120;
 constexpr uint16_t kEmcyBusOff      = 0x8140;
 constexpr uint16_t kEmcyRpdoTimeout = 0x8250;
+constexpr uint16_t kEmcyRpdoShort   = 0x8210; // the stack's: fewer bytes than mapped
+constexpr uint16_t kEmcyRpdoLong    = 0x8220; // the stack's: more bytes than mapped
 // Error register bits (CiA 301 7.5.2.2).
 constexpr uint8_t kRegCurrent       = 0x02;
 constexpr uint8_t kRegVoltage       = 0x04;
@@ -141,6 +143,7 @@ struct Slave::Impl
     int64_t master_last = 0;
     bool master_beat    = false; // a heartbeat of the master came since the last loss or reset
     bool master_lost    = false; // the stack reported its loss
+    bool master_missing = false; // the loss is not resolved yet (8130h belongs on the stack)
     bool nmt_command    = false; // an NMT command for this node since the last state check
     bool lss_selected   = false; // in the LSS configuration state
     struct Fastscan
@@ -331,6 +334,25 @@ struct Slave::Impl
             emcy_raise(kEmcyPassive, 0);
         if (bus_off_on && !emcy_active(kEmcyBusOff))
             emcy_raise(kEmcyBusOff, kRegCommunication);
+        if (master_missing && !emcy_active(kEmcyHeartbeat))
+            emcy_raise(kEmcyHeartbeat, kRegCommunication);
+    }
+    // A new EMCY service starts with an empty stack while 0x1001 keeps the old bits: with nothing
+    // active, 0x1001 is cleared and 0000h is sent.
+    void emcy_settle()
+    {
+        co_emcy_t *e = emcy();
+        if (!e || node_id == 0 || od_u8(0x1001, 0) == 0)
+            return;
+        co_unsigned16_t eec = 0;
+        co_emcy_peek(e, &eec, nullptr);
+        if (eec != 0)
+            return;
+        mute_emcy = true;
+        co_emcy_push(e, 0xFF00, 0, nullptr);
+        mute_emcy = false;
+        co_emcy_clear(e);
+        sync_history();
     }
 
     void set_plc_stop(bool on)
@@ -561,11 +583,16 @@ struct Slave::Impl
     {
         co_nmt_on_hb(nmt, id, state, reason);
         Impl *im = static_cast<Impl *>(data);
-        if (reason == CO_NMT_EC_TIMEOUT && state == CO_NMT_EC_OCCURRED)
+        if (reason != CO_NMT_EC_TIMEOUT)
+            return;
+        if (state == CO_NMT_EC_OCCURRED)
         {
-            im->master_beat = false;
-            im->master_lost = true;
+            im->master_beat    = false;
+            im->master_lost    = true;
+            im->master_missing = true;
         }
+        else if (state == CO_NMT_EC_RESOLVED)
+            im->master_missing = false;
     }
 
     static co_unsigned32_t app_dn(co_sub_t *sub, co_sdo_req *req, void *data)
@@ -648,11 +675,29 @@ struct Slave::Impl
         return 0;
     }
 
-    static void on_rpdo(co_rpdo_t *, co_unsigned32_t ac, const void *, size_t, void *data)
+    // A frame that fits its mapping ends the RPDO timeout and the stack's length errors.
+    static void on_rpdo(co_rpdo_t *pdo, co_unsigned32_t ac, const void *, size_t n, void *data)
     {
         Impl *im = static_cast<Impl *>(data);
-        if (!ac && im->emcy_active(kEmcyRpdoTimeout))
-            im->emcy_clear(kEmcyRpdoTimeout);
+        if (ac)
+            return;
+        const uint16_t map  = static_cast<uint16_t>(0x1600 + co_rpdo_get_num(pdo) - 1);
+        const uint8_t count = im->od_u8(map, 0);
+        unsigned bits       = 0;
+        for (uint8_t k = 1; count <= 0x40 && k <= count; ++k)
+            bits += im->od_u32(map, k) & 0xFFu;
+        if ((bits + 7) / 8 < n)
+            return;
+        for (uint16_t code : {kEmcyRpdoTimeout, kEmcyRpdoShort, kEmcyRpdoLong})
+            if (im->emcy_active(code))
+                im->emcy_clear(code);
+    }
+    // The stack's RPDO errors, each sent once while it stays active.
+    static void on_rpdo_err(co_rpdo_t *, co_unsigned16_t eec, co_unsigned8_t er, void *data)
+    {
+        Impl *im = static_cast<Impl *>(data);
+        if (!im->emcy_active(eec))
+            co_nmt_on_err(im->nmt, eec, er, nullptr);
     }
 
     static void on_lss_rate(co_lss_t *, co_unsigned16_t, int, void *)
@@ -741,6 +786,89 @@ struct Slave::Impl
         return ac;
     }
 
+    // Checks the stack leaves out, in every NMT state: a transmission type is 0-240, 254 or
+    // 255, and a mapped length fits the object it maps.
+    static co_unsigned32_t map_len_ac(const co_dev_t *d, uint32_t map)
+    {
+        const uint16_t i    = static_cast<uint16_t>(map >> 16);
+        const uint8_t s     = static_cast<uint8_t>(map >> 8);
+        const unsigned bits = map & 0xFFu;
+        if (co_type_is_basic(i) && !s)
+            return bits > 8 * co_type_sizeof(i) ? CO_SDO_AC_NO_PDO : 0;
+        const co_sub_t *sub = co_dev_find_sub(d, i, s);
+        if (!sub)
+            return 0; // the stack's own check answers
+        const size_t bytes =
+            co_val_write(co_sub_get_type(sub), co_sub_get_val(sub), nullptr, nullptr);
+        return bits == 0 || bits > 8 * bytes ? CO_SDO_AC_NO_PDO : 0;
+    }
+    static co_unsigned32_t pdo_extra_ac(co_sub_t *sub, const co_val &val)
+    {
+        co_obj_t *obj      = co_sub_get_obj(sub);
+        const uint16_t idx = co_obj_get_idx(obj);
+        const uint8_t s    = co_sub_get_subidx(sub);
+        if ((idx & 0x0200u) == 0)
+            return s == 2 && val.u8 > 240 && val.u8 < 254 ? CO_SDO_AC_PARAM_VAL : 0;
+        const co_dev_t *d = co_obj_get_dev(obj);
+        if (s != 0)
+            return val.u32 ? map_len_ac(d, val.u32) : 0;
+        co_unsigned32_t ac = 0;
+        for (uint8_t k = 1; !ac && val.u8 <= 0x40 && k <= val.u8; ++k)
+            if (const uint32_t map = co_dev_get_val_u32(d, idx, k))
+                ac = map_len_ac(d, map);
+        return ac;
+    }
+    struct PdoGuard
+    {
+        co_sub_dn_ind_t *prev = nullptr;
+        void *prev_data       = nullptr;
+    };
+    PdoGuard guards[4 * kSlavePdos]; // 0x1400, 0x1600, 0x1800 and 0x1A00 ranges
+    static co_unsigned32_t pdo_guard_dn(co_sub_t *sub, co_sdo_req *req, void *data)
+    {
+        const PdoGuard *g  = static_cast<const PdoGuard *>(data);
+        const uint16_t typ = co_sub_get_type(sub);
+        co_unsigned32_t ac = 0;
+        co_val val;
+        if (co_sdo_req_dn_val(req, typ, &val, &ac) == -1)
+            return ac;
+        ac = pdo_extra_ac(sub, val);
+        if (!ac)
+        {
+            // The value goes on to the indication below as one expedited request.
+            uint_least8_t bytes[8];
+            const size_t n = co_val_write(typ, &val, bytes, bytes + sizeof(bytes));
+            co_sdo_req r;
+            co_sdo_req_init(&r);
+            r.size  = n;
+            r.buf   = bytes;
+            r.nbyte = n;
+            ac      = g->prev(sub, &r, g->prev_data);
+            co_sdo_req_fini(&r);
+        }
+        co_val_fini(typ, &val);
+        return ac;
+    }
+    void guard_pdos()
+    {
+        for (unsigned k = 0; k < 4 * kSlavePdos; ++k)
+        {
+            const uint16_t idx =
+                static_cast<uint16_t>(0x1400 + (k / kSlavePdos) * 0x200 + k % kSlavePdos);
+            co_obj_t *obj  = co_dev_find_obj(dev, idx);
+            co_sub_t *sub0 = obj ? co_obj_find_sub(obj, 0) : nullptr;
+            if (!sub0)
+                continue;
+            co_sub_dn_ind_t *ind = nullptr;
+            void *data           = nullptr;
+            co_sub_get_dn_ind(sub0, &ind, &data);
+            if (ind == &pdo_guard_dn)
+                continue;
+            guards[k] = PdoGuard{ind, data};
+            co_obj_set_dn_ind(obj, &pdo_guard_dn, &guards[k]);
+        }
+    }
+
     void pdo_inds(uint16_t comm)
     {
         if (co_obj_t *c = co_dev_find_obj(dev, comm))
@@ -765,12 +893,16 @@ struct Slave::Impl
         for (co_unsigned16_t n = 1; n <= kSlavePdos; ++n)
         {
             if (co_rpdo_t *pdo = co_nmt_get_rpdo(nmt, n))
+            {
                 co_rpdo_set_ind(pdo, &on_rpdo, this);
+                co_rpdo_set_err(pdo, &on_rpdo_err, this);
+            }
             else
                 pdo_inds(static_cast<uint16_t>(0x1400 + n - 1));
             if (!co_nmt_get_tpdo(nmt, n))
                 pdo_inds(static_cast<uint16_t>(0x1800 + n - 1));
         }
+        guard_pdos();
         if (co_lss_t *lss = co_nmt_get_lss(nmt))
         {
             co_lss_set_store_ind(lss, &on_lss_store, this);
@@ -815,6 +947,8 @@ void Slave::Impl::fill_details(SlaveSnapshot &s)
         add(kEmcyBusOff);
         add(kEmcyHeartbeat);
         add(kEmcyRpdoTimeout);
+        add(kEmcyRpdoShort);
+        add(kEmcyRpdoLong);
         std::sort(found.begin(), found.end());
         for (const auto &f : found)
             s.emcy_active.push_back(f.second);
@@ -1556,11 +1690,12 @@ void Slave::thread_main()
         const bool unconfigured = node == 0 || node > 127;
         if (!im.after_node && im.node_id != 0)
             log_info("%s: reset communication", label.c_str());
-        im.after_node  = false;
-        im.node_id     = unconfigured ? 0 : node;
-        im.emcy_id     = im.od_u32(0x1014, 0) & 0x7FFu;
-        im.master_beat = false;
-        im.master_lost = false;
+        im.after_node     = false;
+        im.node_id        = unconfigured ? 0 : node;
+        im.emcy_id        = im.od_u32(0x1014, 0) & 0x7FFu;
+        im.master_beat    = false;
+        im.master_lost    = false;
+        im.master_missing = false;
         im.history.clear();
         for (uint32_t i = 0; i < CANOPEN_PLC_SLAVE_EMCY_SLOTS; ++i)
         {
@@ -1850,6 +1985,7 @@ void Slave::thread_main()
                     im.mute_emcy = true;
                     im.emcy_sync();
                     im.mute_emcy = false;
+                    im.emcy_settle();
                 }
                 std::lock_guard<PiMutex> lock(status_mutex_);
                 status_.since  = wall_ms();
