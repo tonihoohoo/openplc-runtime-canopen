@@ -1,0 +1,86 @@
+name: Board spike
+
+on:
+  push:
+    branches: [feature/canopen-add-canopen-slave-esp32]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    name: TWAI in QEMU on vcan
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: vcan0
+        run: .github/scripts/vcan-up.sh vcan0
+
+      - name: Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/qemu
+          key: board-spike-v1
+
+      - name: arduino-cli and ESP32 core
+        run: |
+          start=$(date +%s)
+          curl -fsSL https://github.com/arduino/arduino-cli/releases/download/v1.3.1/arduino-cli_1.3.1_Linux_64bit.tar.gz | tar xz -C /usr/local/bin arduino-cli 2>/dev/null || sudo tar xzf <(curl -fsSL https://github.com/arduino/arduino-cli/releases/download/v1.3.1/arduino-cli_1.3.1_Linux_64bit.tar.gz) -C /usr/local/bin arduino-cli
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32
+          arduino-cli core list
+          echo "core setup $(( $(date +%s) - start )) s"
+
+      - name: QEMU
+        run: |
+          start=$(date +%s)
+          sudo apt-get install -y --no-install-recommends libsdl2-2.0-0 libslirp0 can-utils
+          if [ ! -x ~/qemu/bin/qemu-system-xtensa ]; then
+            url=$(curl -fsSL https://raw.githubusercontent.com/espressif/esp-idf/master/tools/tools.json | python3 -c "
+          import json, sys
+          tools = json.load(sys.stdin)['tools']
+          t = next(t for t in tools if t['name'] == 'qemu-xtensa')
+          print(t['versions'][0]['linux-amd64']['url'])")
+            echo "QEMU $url"
+            mkdir -p ~/qemu-dl && curl -fsSL "$url" | tar xJ -C ~/qemu-dl
+            rm -rf ~/qemu && mv ~/qemu-dl/qemu ~/qemu
+          fi
+          ~/qemu/bin/qemu-system-xtensa --version
+          ~/qemu/bin/qemu-system-xtensa -machine esp32 -device help 2>&1 | grep -i -n "can\|twai" || true
+          echo "qemu setup $(( $(date +%s) - start )) s"
+
+      - name: Build sketch
+        run: |
+          start=$(date +%s)
+          arduino-cli compile --fqbn esp32:esp32:esp32 --export-binaries --output-dir build .github/board-spike/spike
+          ls -la build
+          echo "compile $(( $(date +%s) - start )) s"
+
+      - name: Run in QEMU and check
+        run: |
+          img=build/spike.ino.merged.bin
+          cp "$img" flash.bin
+          truncate -s 4M flash.bin
+          candump -t d vcan0 > candump.log &
+          ~/qemu/bin/qemu-system-xtensa -nographic -machine esp32 \
+            -drive file=flash.bin,if=mtd,format=raw \
+            -object can-bus,id=canbus0 \
+            -object can-host-socketcan,id=canhost0,if=vcan0,canbus=canbus0 \
+            -global driver=esp32.twai,property=canbus,value=canbus0 \
+            -serial file:serial.log -monitor none &
+          qpid=$!
+          sleep 2
+          set +e
+          timeout 90 python3 .github/board-spike/check.py vcan0
+          rc=$?
+          kill $qpid
+          echo "--- serial"; cat serial.log | tail -40
+          echo "--- candump (head)"; head -40 candump.log
+          exit $rc
