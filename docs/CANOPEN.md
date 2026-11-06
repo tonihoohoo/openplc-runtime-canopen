@@ -315,8 +315,8 @@ Behaviour:
   communication the communication objects.
 - The PLC program can control the slave through the [slave blocks](#plc-function-blocks): a local
   NMT start, stop or pre-operational (CiA 301 7.3.2.3; resets are refused), up to 31 emergencies
-  of its own, each on one manufacturer error-status bit and sent as EMCY with the program's code
-  and bytes 4-7, and a write counter per object from the master. The program's emergencies are
+  of its own, each sent as EMCY with the program's code and bytes 4-7 (byte 3 is 0 in every EMCY
+  the slave sends), and a write counter per object from the master. The program's emergencies are
   cleared (EMCY 0000h) on a PLC stop.
 - A new upload keeps a slave whose settings did not change running, without a new boot-up; a
   changed or removed slave leaves the bus and a changed one starts again with the new settings.
@@ -350,7 +350,7 @@ serial number in 0x1018 sub 4.
 | `enabled` | LSS on. Off (default), the slave ignores LSS frames and any stored LSS values. |
 | `wait_for_master` | `true`: the slave starts with no node ID and stays silent apart from LSS until a master gives it one; `node_id` is then only shown in the editor. Default `false`: it starts with `node_id`. |
 | `serial` | The serial number, 1-4294967295. Left out, the slave picks a random one the first time and keeps it in its stored file, so the LSS address stays the same across restarts and uploads. |
-| `bitrate_change` | Default `true`: the master may set a new bit rate (CiA 301 table) and store it; it is used from the next start of the slave. `false`: the request is refused. Activate bit timing is ignored: the slave never switches its bit rate on the bus. |
+| `bitrate_change` | Default `true`: the master may set a new bit rate (CiA 301 table) and store it; it is used from the next start of the slave. `false`: the request is refused with error code 1 (bit rate not supported). Activate bit timing is ignored: the slave never switches its bit rate on the bus. |
 
 - A node ID from configure node ID is taken when the master switches the slave back to waiting:
   the slave resets its communication and boots up with the new ID. The COB-IDs of the EMCY

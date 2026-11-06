@@ -1139,7 +1139,7 @@ void check_lss(const plugin_runtime_args_t &rt, const std::string &dir)
             milliseconds(1000)));
         CHECK(lss(p, {0x04, 1}));
         CHECK(lss(p, {0x5E}, &f) && f.data[1] == 5);
-        CHECK(lss(p, {0x13, 0, 3}, &f) && f.data[1] == 0xFF && f.data[2] == 1);
+        CHECK(lss(p, {0x13, 0, 3}, &f) && f.data[1] == 1);
         CHECK(lss(p, {0x17}, &f) && f.data[1] == 2);
         lss(p, {0x04, 0});
         CHECK(!fastscan(p, 0, 0x80, 0, 0)); // configured and waiting: no fastscan answer
@@ -1226,7 +1226,7 @@ void check_program(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     m = p.mark();
     CHECK(slave.plc_emcy(a, true, 0x4210, 865) == CANOPEN_PLC_NO_ERROR);
     CHECK(p.wait(m, [](const Frame &x) { return is_emcy(x, 0x4210); }, milliseconds(500), &f));
-    CHECK(f.data[2] == 0x09 && le32(f.data + 4) == 865);
+    CHECK(f.data[2] == 0x09 && f.data[3] == 0 && le32(f.data + 4) == 865);
     CHECK(slave.plc_emcy(a, true, 0x4210, 865) == CANOPEN_PLC_NO_ERROR); // unchanged: no frame
     std::this_thread::sleep_for(milliseconds(30));
     CHECK(p.count(m, 0x80 + kNode) == 1);
