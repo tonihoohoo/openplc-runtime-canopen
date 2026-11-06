@@ -142,19 +142,27 @@ jobs:
         working-directory: editor
         run: |
           curl -fsSL https://api.autonomylogic.com/vpp-catalog/v1/catalog.json -o catalog.json
-          python3 - <<'PY'
-          import json
+          url=$(python3 - <<'PY'
+          import json, sys
           c = json.load(open('catalog.json'))
-          items = c if isinstance(c, list) else c.get('packages', c)
-          for p in items:
-              print(p.get('packageId'), [v.get('version') for v in p.get('versions', [])][:3])
+          print(json.dumps(c)[:1200], file=sys.stderr)
+          found = []
+          def walk(x):
+              if isinstance(x, dict):
+                  if 'packageId' in x:
+                      found.append(x)
+                  for v in x.values():
+                      walk(v)
+              elif isinstance(x, list):
+                  for v in x:
+                      walk(v)
+          walk(c)
+          p = next(p for p in found if 'espressif' in p['packageId'])
+          print(json.dumps(p)[:800], file=sys.stderr)
+          v = p.get('versions', [p])[0]
+          print(v.get('downloadUrl') or v.get('url'))
           PY
-          url=$(python3 -c "
-          import json
-          c = json.load(open('catalog.json'))
-          items = c if isinstance(c, list) else c.get('packages', c)
-          p = next(p for p in items if 'espressif' in p.get('packageId', ''))
-          print(p['versions'][0]['downloadUrl'])")
+          )
           echo "package $url"
           curl -fsSL "$url" -o esp.vpp
           xvfb-run -a npx electron --no-sandbox ./release/app/dist/main/main.js --cli packages install esp.vpp \
