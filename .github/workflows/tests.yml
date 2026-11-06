@@ -27,6 +27,7 @@ jobs:
       pull-requests: read
     outputs:
       docs_only: ${{ steps.files.outputs.docs_only }}
+      plugin_only: ${{ steps.files.outputs.plugin_only }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,8 +43,9 @@ jobs:
   bootloader:
     name: Bootloader (Go)
     needs: changes
-    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    # Skipped (and so passing) for a pull request that changes only the CANopen plugin, its CI files,
+    # Markdown or docs/.
+    if: ${{ !cancelled() && needs.changes.outputs.plugin_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -76,8 +78,9 @@ jobs:
   webserver:
     name: Webserver (pytest)
     needs: changes
-    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    # Skipped (and so passing) for a pull request that changes only the CANopen plugin, its CI files,
+    # Markdown or docs/.
+    if: ${{ !cancelled() && needs.changes.outputs.plugin_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -150,8 +153,9 @@ jobs:
   shell:
     name: Installer scripts
     needs: changes
-    # Skipped (and so passing) only for a pull request that changes nothing but Markdown or docs/.
-    if: ${{ !cancelled() && needs.changes.outputs.docs_only != 'true' }}
+    # Skipped (and so passing) for a pull request that changes only the CANopen plugin, its CI files,
+    # Markdown or docs/.
+    if: ${{ !cancelled() && needs.changes.outputs.plugin_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
