@@ -518,10 +518,38 @@ jobs:
           python3 .github/scripts/canopen_slave_lss_e2e.py --user ci --password ci-canopen-e2e \
             --interface vcan0
 
+      - name: GPIO simulator lines for the Linux I/O blocks
+        id: gpiosim
+        run: .github/scripts/gpio-sim-up.sh
+
+      - name: Upload the Linux I/O project with the editor CLI
+        id: linuxio
+        if: steps.gpiosim.outputs.ready == 'true'
+        working-directory: editor
+        env:
+          OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
+        run: |
+          # An editor branch without the linux_io blocks has no such project; the check is skipped.
+          if [ ! -d ./e2e/fixtures/linux-io/project ]; then
+            echo "::notice::The editor branch has no Linux I/O project; skipped"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          npx electron --no-sandbox ./release/app/dist/main/main.js --cli upload \
+            ./e2e/fixtures/linux-io/project --host 127.0.0.1 --yes \
+            --user-data "$RUNNER_TEMP/editor-data" --json
+
+      - name: The Linux I/O blocks on simulated GPIO lines
+        if: steps.linuxio.outputs.present == 'true'
+        run: |
+          sudo python3 .github/scripts/linux_io_e2e.py --user ci --password ci-canopen-e2e \
+            --interface vcan0 --sim "${{ steps.gpiosim.outputs.sysfs }}"
+
       - name: Upload the first project again
         if: >-
           steps.control.outputs.present == 'true' || steps.slave.outputs.present == 'true' ||
-          steps.lss.outputs.present == 'true' || steps.slave_lss.outputs.present == 'true'
+          steps.lss.outputs.present == 'true' || steps.slave_lss.outputs.present == 'true' ||
+          steps.linuxio.outputs.present == 'true'
         working-directory: editor
         env:
           OPENPLC_CREDENTIALS: ci:ci-canopen-e2e
