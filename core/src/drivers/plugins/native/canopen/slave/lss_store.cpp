@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "lss_store.h"
+#include "../config.h"
 
 #include <cerrno>
 #include <cmath>
@@ -86,6 +87,8 @@ std::string lss_data_dir()
 
 std::string lss_store_path(const std::string &interface)
 {
+    if (!valid_interface_name(interface))
+        return std::string(); // never build a file name from an unchecked text
     return lss_data_dir() + "/canopen/lss-" + interface + ".json";
 }
 
@@ -93,6 +96,12 @@ bool lss_load(const std::string &path, LssStored &out, std::string &problem)
 {
     out = LssStored();
     problem.clear();
+    if (path.empty())
+    {
+        problem = "no valid store file for this interface";
+        return false;
+    }
+    errno = 0;
     std::ifstream f(path);
     if (!f)
     {
@@ -122,6 +131,11 @@ bool lss_load(const std::string &path, LssStored &out, std::string &problem)
 
 bool lss_save(const std::string &path, const LssStored &value, std::string &problem)
 {
+    if (path.empty())
+    {
+        problem = "no valid store file for this interface";
+        return false;
+    }
     const size_t slash = path.rfind('/');
     if (slash != std::string::npos && !make_dirs(path.substr(0, slash), problem))
         return false;
@@ -144,21 +158,36 @@ bool lss_save(const std::string &path, const LssStored &value, std::string &prob
     }
     text                  = "{" + (text.empty() ? text : text.substr(1)) + "}\n";
     const std::string tmp = path + ".tmp";
-    int fd                = open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    unlink(tmp.c_str()); // a stale or planted file: the new one is created exclusively
+    int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     if (fd < 0)
     {
         problem = "cannot write " + path + ": " + std::strerror(errno);
         return false;
     }
-    bool ok =
-        write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size()) && fsync(fd) == 0;
-    const int err = errno;
-    ok            = close(fd) == 0 && ok;
-    if (!ok || rename(tmp.c_str(), path.c_str()) != 0)
+    int err = 0;
+    bool ok = write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size());
+    if (!ok)
+        err = errno;
+    else if (fsync(fd) != 0)
+        ok = false, err = errno;
+    if (close(fd) != 0 && ok)
+        ok = false, err = errno;
+    if (ok && rename(tmp.c_str(), path.c_str()) != 0)
+        ok = false, err = errno;
+    if (!ok)
     {
-        problem = "cannot write " + path + ": " + std::strerror(ok ? errno : err);
+        problem = "cannot write " + path + ": " + std::strerror(err);
         unlink(tmp.c_str());
         return false;
+    }
+    // The rename is on disk only once the directory is.
+    const std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
+    int dfd               = open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd >= 0)
+    {
+        fsync(dfd);
+        close(dfd);
     }
     return true;
 }

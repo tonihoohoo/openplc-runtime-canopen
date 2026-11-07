@@ -1807,8 +1807,44 @@ void check_more_pdos(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
     slave.stop();
 }
 
+// Slave addresses must lie inside the runtime's tables.
+void test_slave_address_bounds()
+{
+    auto check = [](const std::string &from, const std::string &to, bool inside)
+    {
+        std::string text = kConfig;
+        size_t pos       = text.find(from);
+        CHECK(pos != std::string::npos);
+        if (pos == std::string::npos)
+            return;
+        text.replace(pos, from.size(), to);
+        Config cfg;
+        std::vector<std::string> errors;
+        CHECK(parse_config(text, cfg, errors));
+        std::vector<std::string> problems;
+        CHECK(slave_addresses_inside(cfg.devices[0], ImageSizes::uniform(kSize), problems) == inside);
+        CHECK(problems.empty() == inside);
+    };
+    check("\"%QB0\"", "\"%QB0\"", true);
+    check("\"%QB0\"", "\"%QB70000\"", false);
+    check("\"%QB0\"", "\"%QB4294967295\"", false);
+    check("\"%IB2\"", "\"%IB70000\"", false);
+    check("\"%IW2\"", "\"%IW16\"", false);
+    check("\"%IW2\"", "\"%IW15\"", true);
+    // The runtime's journal takes 16 bits: an unbounded table still stops at 65535.
+    std::vector<std::string> problems;
+    IecLocation loc;
+    loc.index = 70000;
+    CHECK(!ImageSizes().contains(loc));
+    loc.index = 65535;
+    CHECK(ImageSizes().contains(loc));
+}
+
 int main()
 {
+    test_slave_address_bounds();
+    CHECK(lss_store_path("x/../../../a").empty());
+    CHECK(!lss_store_path("can0").empty());
     set_log_sink(quiet_sink);
     route_lely_diagnostics();
     prepare_wake_signal();

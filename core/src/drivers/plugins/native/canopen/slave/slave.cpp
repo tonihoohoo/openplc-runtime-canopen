@@ -1338,6 +1338,8 @@ void Slave::publish_plc(uint8_t nmt, uint8_t node_id, bool on_bus, bool watched,
 void Slave::plc_status(canopen_plc_slave_status &out) const
 {
     // A torn read is retried a few times; the slave thread writes for a few nanoseconds only.
+    // After the last try the status is the last read, never an unwritten output.
+    out = canopen_plc_slave_status{};
     for (int tries = 0; tries < 8; ++tries)
     {
         const uint32_t before = view_.seq.load(std::memory_order_acquire);
@@ -1351,11 +1353,9 @@ void Slave::plc_status(canopen_plc_slave_status &out) const
         s.error_register = view_.error_register.load(std::memory_order_relaxed);
         s.emcy_active    = view_.emcy_active.load(std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_acquire);
+        out = s;
         if (view_.seq.load(std::memory_order_relaxed) == before)
-        {
-            out = s;
             return;
-        }
     }
 }
 
@@ -1707,6 +1707,7 @@ void Slave::thread_main()
         im.program_nmt  = false;
         im.plc_stop_nmt = false;
         im.st_known     = 0xFF;
+        im.lss_selected = false; // a reset leaves the LSS configuration state
         if (unconfigured)
             log_info("%s: no node ID; waiting for an LSS master (serial number 0x%08X)",
                      label.c_str(), serial_);
@@ -1808,6 +1809,8 @@ void Slave::thread_main()
                     }
                 }
                 im.install();
+                // The master may write 0x1014 at any time; the next emergency uses the new ID.
+                im.emcy_id = im.od_u32(0x1014, 0) & 0x7FFu;
                 if (im.reset_comm)
                 {
                     im.reset_comm = false;

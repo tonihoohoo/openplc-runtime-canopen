@@ -63,6 +63,9 @@ enum : int
 
 inline void image_write_input(const plugin_runtime_args_t &rt, const IecLocation &loc, uint64_t v)
 {
+    // The journal takes a 16-bit index: a larger one would land in another variable.
+    if (loc.index > 0xFFFF)
+        return;
     switch (loc.size)
     {
     case IecSize::X:
@@ -85,7 +88,10 @@ inline void image_write_input(const plugin_runtime_args_t &rt, const IecLocation
 
 inline uint64_t image_read_output(const plugin_runtime_args_t &rt, const IecLocation &loc)
 {
-    // A location the program does not declare has a NULL pointer: read 0.
+    // A location the program does not declare has a NULL pointer: read 0. The tables are 64 Ki
+    // entries at most; an index beyond them is read as 0.
+    if (loc.index > 0xFFFF)
+        return 0;
     switch (loc.size)
     {
     case IecSize::X:

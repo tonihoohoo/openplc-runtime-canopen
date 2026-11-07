@@ -5,6 +5,10 @@
 
 #include "can_link.h"
 
+#include <net/if_arp.h>
+
+#include <cstdlib>
+
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -49,7 +53,9 @@ struct NlRequest
 
     rtattr *add(uint16_t type, const void *data, size_t len)
     {
-        size_t at     = NLMSG_ALIGN(nh()->nlmsg_len);
+        size_t at = NLMSG_ALIGN(nh()->nlmsg_len);
+        if (at + RTA_SPACE(len) > sizeof(buf))
+            std::abort(); // callers add a few short attributes; a larger one is a coding error
         rtattr *rta   = reinterpret_cast<rtattr *>(buf + at);
         rta->rta_type = type;
         rta->rta_len  = RTA_LENGTH(len);
@@ -175,6 +181,7 @@ void parse_ifinfo(const nlmsghdr *nh, LinkInfo &out)
 {
     const ifinfomsg *ifi = static_cast<const ifinfomsg *>(NLMSG_DATA(nh));
     out.up               = (ifi->ifi_flags & IFF_UP) != 0;
+    out.not_can          = ifi->ifi_type != ARPHRD_CAN;
     int alen             = IFLA_PAYLOAD(nh);
     for (const rtattr *a = IFLA_RTA(ifi); RTA_OK(a, alen); a = RTA_NEXT(a, alen))
     {
@@ -209,6 +216,8 @@ int transact(NlRequest &req, LinkInfo *info)
                 continue;
             return -errno;
         }
+        if (n == 0)
+            return -ECONNRESET;
         int len = static_cast<int>(n);
         for (nlmsghdr *nh = reinterpret_cast<nlmsghdr *>(reply); NLMSG_OK(nh, len);
              nh           = NLMSG_NEXT(nh, len))
@@ -217,11 +226,15 @@ int transact(NlRequest &req, LinkInfo *info)
                 continue;
             if (nh->nlmsg_type == NLMSG_ERROR)
             {
+                if (nh->nlmsg_len < NLMSG_LENGTH(sizeof(nlmsgerr)))
+                    return -EBADMSG;
                 const nlmsgerr *err = static_cast<const nlmsgerr *>(NLMSG_DATA(nh));
                 return err->error; // 0 = ACK
             }
             if (info && nh->nlmsg_type == RTM_NEWLINK)
             {
+                if (nh->nlmsg_len < NLMSG_LENGTH(sizeof(ifinfomsg)))
+                    return -EBADMSG;
                 parse_ifinfo(nh, *info);
                 return 0;
             }
@@ -350,6 +363,11 @@ LinkResult prepare_link(LinkOps &ops, const std::string &name, unsigned bitrate,
     if (rc < 0)
     {
         problem = "cannot read CAN interface " + name + ": " + std::strerror(-rc);
+        return LinkResult::Failed;
+    }
+    if (li.not_can)
+    {
+        problem = "interface " + name + " is not a CAN interface";
         return LinkResult::Failed;
     }
     const LinkPlan plan = plan_link(li, bitrate, setup.restart_refused);

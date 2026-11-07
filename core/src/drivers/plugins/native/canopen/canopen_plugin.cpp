@@ -386,6 +386,16 @@ ImageSizes runtime_image_sizes()
     return sizes;
 }
 
+// A start that fails after slaves began: they report a stopped PLC and leave the bus.
+int fail_start(Running &run)
+{
+    for (Slave *sl : run.slaves)
+        sl->set_plc_running(false);
+    run.slaves.clear();
+    drop_changed_slaves(nullptr);
+    return -1;
+}
+
 int do_start_loop()
 {
     if (g_run)
@@ -413,7 +423,18 @@ int do_start_loop()
     for (const auto &w : run->cfg.warnings)
         log_warn("%s", w.c_str());
 
-    // Slaves: the unchanged ones go on, the others are replaced.
+    for (const DeviceConfig &dev : run->cfg.devices)
+        slave_addresses_inside(dev, runtime_image_sizes(), errors);
+    if (!errors.empty())
+    {
+        for (const auto &e : errors)
+            log_error("%s", e.c_str());
+        log_error("%s refused; the CANopen master does not run", path.c_str());
+        return -1;
+    }
+
+    // Slaves: the unchanged ones go on, the others are replaced. A start that fails later stops
+    // them all, so none keeps running as if the PLC ran.
     drop_changed_slaves(&run->cfg);
     for (const DeviceConfig &dev : run->cfg.devices)
     {
@@ -432,7 +453,7 @@ int do_start_loop()
             if (!slave->start(problem))
             {
                 log_error("%s: %s", dev.label().c_str(), problem.c_str());
-                return -1;
+                return fail_start(*run);
             }
             found = slave.get();
             std::lock_guard<std::mutex> lock(g_mutex);
@@ -453,7 +474,7 @@ int do_start_loop()
         {
             for (const auto &e : errors)
                 log_error("%s", e.c_str());
-            return -1;
+            return fail_start(*run);
         }
         run->images.push_back(std::move(image));
     }
@@ -465,7 +486,7 @@ int do_start_loop()
         {
             log_error("%s: cannot write the master configuration %s", net.label().c_str(),
                       dcf.c_str());
-            return -1;
+            return fail_start(*run);
         }
         run->statuses.emplace_back(new NetworkStatus(net));
         run->buses.emplace_back(

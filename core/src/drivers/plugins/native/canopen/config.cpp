@@ -2,6 +2,8 @@
 
 #include "config.h"
 
+#include <cctype>
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -21,6 +23,7 @@ namespace
 constexpr unsigned kMaxNodeId    = 127;
 constexpr unsigned kMaxPdoNumber = 512;
 constexpr unsigned kMaxPdoBits   = 64;
+constexpr size_t kMaxPdoEntries  = 8;
 constexpr size_t kMaxSdoBytes    = 1024;
 // The master's own objects for mapped entries (master_dcf.h).
 constexpr size_t kMaxMasterEntries = 4096;
@@ -189,6 +192,21 @@ bool parse_hex_bytes(const std::string &text, std::vector<uint8_t> &out)
     return true;
 }
 
+} // namespace
+
+bool valid_interface_name(const std::string &name)
+{
+    if (name.empty() || name.size() > 15)
+        return false;
+    for (char c : name)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '.' && c != '-')
+            return false;
+    return name != "." && name != "..";
+}
+
+namespace
+{
+
 // COB-IDs a PDO must not use (CiA 301 predefined connection set and LSS).
 const char *reserved_cob_id(uint32_t id)
 {
@@ -292,8 +310,9 @@ bool Parser::parse_network(const cJSON *j, size_t pos, NetworkConfig &net)
     get_string(j, "interface", where, net.interface, true);
     if (!net.interface.empty() || !net.name.empty())
         where = net.label();
-    if (net.interface.size() >= 16)
-        error(where, "interface name \"" + net.interface + "\" is longer than 15 characters");
+    if (!net.interface.empty() && !valid_interface_name(net.interface))
+        error(where, "interface name \"" + net.interface +
+                         "\" must be 1 - 15 letters, digits, '_', '.' or '-'");
 
     uint64_t v          = 0;
     const uint64_t zero = 0;
@@ -404,7 +423,8 @@ bool Parser::parse_network(const cJSON *j, size_t pos, NetworkConfig &net)
         for (const NodeConfig &other : net.nodes)
             if (node.has_lss && other.has_lss && other.lss.vendor_id == node.lss.vendor_id &&
                 other.lss.product_code == node.lss.product_code &&
-                other.lss.revision == node.lss.revision &&
+                (other.lss.revision == node.lss.revision || other.lss.revision == 0 ||
+                 node.lss.revision == 0) &&
                 other.lss.serial_number == node.lss.serial_number)
                 error(where, node.label() + " and " + other.label() +
                                  " have the same LSS address (vendor ID, product code, revision "
@@ -803,6 +823,9 @@ bool Parser::parse_pdo(const cJSON *j, const std::string &where, IecArea area, P
             else
                 pdo.entries.push_back(entry);
         }
+        if (pdo.entries.size() > kMaxPdoEntries)
+            error(w, "maps " + std::to_string(pdo.entries.size()) +
+                         " entries; a PDO holds at most 8");
         if (pdo.bits() > kMaxPdoBits)
             error(w, "maps " + std::to_string(pdo.bits()) + " bits; a PDO holds at most 64");
     }
@@ -822,14 +845,24 @@ void Parser::check_cob_ids(const NetworkConfig &net)
     };
     if (net.time_producer)
     {
-        if (net.time_cob_id == 0x080 || (net.time_cob_id >= 0x581 && net.time_cob_id <= 0x67F) ||
-            (net.time_cob_id >= 0x701 && net.time_cob_id <= 0x77F))
+        if (net.time_cob_id == 0x080 || (net.time_cob_id >= 0x081 && net.time_cob_id <= 0x0FF) ||
+            (net.time_cob_id >= 0x581 && net.time_cob_id <= 0x67F) ||
+            (net.time_cob_id >= 0x701 && net.time_cob_id <= 0x77F) || net.time_cob_id == 0x7E4 ||
+            net.time_cob_id == 0x7E5)
             error(net.label(), "TIME COB-ID " + hex(net.time_cob_id, 3) + " is reserved");
         use(net.time_cob_id, "TIME");
     }
     for (const auto &node : net.nodes)
         if (node.emcy_enabled)
-            use(node.emcy_cob_id, node.label() + " emergency");
+        {
+            const uint32_t id = node.emcy_cob_id;
+            // 0x081 - 0x0FF is the emergency range itself; the others belong to other services.
+            if (id == 0x080 || id == 0x100 || (id >= 0x581 && id <= 0x67F) ||
+                (id >= 0x701 && id <= 0x77F) || id == 0x7E4 || id == 0x7E5)
+                error(net.label(), node.label() + " emergency COB-ID " + hex(id, 3) +
+                                       " is reserved");
+            use(id, node.label() + " emergency");
+        }
     for (const auto &node : net.nodes)
     {
         for (int dir = 0; dir < 2; ++dir)
@@ -949,7 +982,8 @@ bool Parser::parse_value(const cJSON *v, const std::string &where, const char *k
     {
         const double lo = -std::ldexp(1.0, static_cast<int>(bits) - 1);
         const double hi = std::ldexp(1.0, static_cast<int>(bits) - 1) - 1;
-        if (d < lo || d > hi)
+        // 2^63 is exact as a double, so the top of a 64-bit range needs a strict test.
+        if (d < lo || d > hi || (bits == 64 && d >= std::ldexp(1.0, 63)))
             return bad("is out of range");
         const int64_t s = static_cast<int64_t>(d);
         out             = bits == 64 ? static_cast<uint64_t>(s)
@@ -957,7 +991,7 @@ bool Parser::parse_value(const cJSON *v, const std::string &where, const char *k
         return true;
     }
     const double hi = std::ldexp(1.0, static_cast<int>(bits)) - 1;
-    if (d < 0 || d > hi)
+    if (d < 0 || d > hi || (bits == 64 && d >= std::ldexp(1.0, 64)))
         return bad("is out of range");
     out = static_cast<uint64_t>(d);
     return true;
@@ -1247,8 +1281,9 @@ bool Parser::parse_device(const cJSON *j, size_t pos, DeviceConfig &dev)
     get_string(j, "interface", where, dev.interface, true);
     if (!dev.interface.empty() || !dev.name.empty())
         where = dev.label();
-    if (dev.interface.size() >= 16)
-        error(where, "interface name \"" + dev.interface + "\" is longer than 15 characters");
+    if (!dev.interface.empty() && !valid_interface_name(dev.interface))
+        error(where, "interface name \"" + dev.interface +
+                         "\" must be 1 - 15 letters, digits, '_', '.' or '-'");
     uint64_t v          = 0;
     const uint64_t zero = 0;
     if (get_uint(j, "bitrate", where, 0, 1000000, v, &zero))

@@ -186,6 +186,10 @@ enum class SlaveExchange
 };
 
 // One application object of the slave (0x2000-0x5FFF).
+// A CAN interface name: 1 - 15 characters of letters, digits, '_', '.' and '-'. It is also the
+// text of file names, so nothing else is taken.
+bool valid_interface_name(const std::string &name);
+
 struct SlaveObject
 {
     uint16_t index   = 0;

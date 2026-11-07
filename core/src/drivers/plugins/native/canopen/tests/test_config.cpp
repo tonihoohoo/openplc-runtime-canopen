@@ -373,10 +373,57 @@ void test_lss()
                        errors));
 }
 
+void test_audit_fixes()
+{
+    // Interface names are file name material: only plain names pass.
+    CHECK(valid_interface_name("can0") && valid_interface_name("vcan-1.a_b"));
+    CHECK(!valid_interface_name("") && !valid_interface_name("x/../../../a"));
+    CHECK(!valid_interface_name("a b") && !valid_interface_name("..") &&
+          !valid_interface_name("0123456789abcdef"));
+    CHECK(refused_with(with(kValid, "\"interface\": \"can0\"", "\"interface\": \"x/../../../a\""),
+                       "interface name"));
+
+    // An emergency COB-ID of another service, and a TIME COB-ID in the emergency range.
+    const std::string emcy = with(kValid, "\"on_loss\"", "\"emcy\": {\"cob_id\": 128}, \"on_loss\"");
+    CHECK(refused_with(emcy, "emergency COB-ID 0x080 is reserved"));
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(with(kValid, "\"on_loss\"", "\"emcy\": {\"cob_id\": 130}, \"on_loss\""),
+                       cfg, errors));
+    CHECK(refused_with(with(kValid, "\"heartbeat_producer_ms\": 100,",
+                            "\"heartbeat_producer_ms\": 100, \"time\": {\"cob_id\": 129, "
+                            "\"period_ms\": 1000},"),
+                       "TIME COB-ID 0x081 is reserved"));
+
+    // Nine one-bit entries in one PDO.
+    std::string entries;
+    for (int i = 0; i < 9; ++i)
+        entries += std::string(i ? "," : "") + "{\"index\": 25088, \"subindex\": " +
+                   std::to_string(i + 1) + ", \"type\": \"BOOLEAN\", \"location\": \"%QX0." +
+                   std::to_string(i % 8) + "\"}";
+    CHECK(refused_with(with(kValid,
+                            "{\"index\": 25088, \"subindex\": 1, \"type\": \"UNSIGNED8\", "
+                            "\"location\": \"%QB0\"}",
+                            entries),
+                       "at most 8"));
+
+    // Two nodes with one LSS address, one of them with any revision (0).
+    const std::string lss =
+        with(kValid, "\"supervision\":",
+             "\"lss\": {\"vendor_id\": 1, \"product_code\": 2, \"revision\": 5, "
+             "\"serial_number\": 4097}, \"supervision\":");
+    const std::string node3 =
+        "}, {\"node_id\": 3, \"start\": \"master\", \"enabled\": true, \"name\": \"io2\", "
+        "\"lss\": {\"vendor_id\": 1, \"product_code\": 2, "
+        "\"serial_number\": 4097}}]";
+    CHECK(refused_with(with(lss, "}]\n  }]", node3 + "\n  }]"), "have the same LSS address"));
+}
+
 } // namespace
 
 int main()
 {
+    test_audit_fixes();
     test_valid();
     test_refusals();
     test_node_options();

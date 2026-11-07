@@ -214,6 +214,10 @@ void Network::StopNodes()
 {
     if (service_)
         return;
+    // The last scan's outputs (zero after the runtime cleared them) go out before the nodes are
+    // told to leave operational; Exchange does nothing once running_ is false.
+    if (running_)
+        WriteOutputs(true);
     running_ = false;
     if (cfg_.sync == SyncMode::Period)
     {
@@ -1155,19 +1159,31 @@ void Network::WriteOutputs(bool all)
         const NodeState &node = nodes_[m.node_id];
         if (!node.up || node.waiting)
             continue;
-        bool send = all || resend_[num];
+        bool send   = all || resend_[num];
+        bool failed = false;
         for (size_t k = 0; k < m.pdo->entries.size(); ++k)
         {
             size_t i = m.first_entry + k;
             if (out_valid_[i] && last_out_[i] == out[i] && !resend_[num] && !all)
                 continue;
-            WriteObject(static_cast<uint16_t>(kOutputObjectBase + i), m.pdo->entries[k].type,
-                        out[i]);
+            if (!WriteObject(static_cast<uint16_t>(kOutputObjectBase + i), m.pdo->entries[k].type,
+                             out[i]))
+            {
+                // Tried again at the next exchange; logged once until a write works.
+                out_valid_[i] = false;
+                failed        = true;
+                if (!write_failed_)
+                    log_warn("%s: cannot write an output for node %u, trying again",
+                             cfg_.label().c_str(), m.node_id);
+                write_failed_ = true;
+                continue;
+            }
+            write_failed_ = false;
             last_out_[i]  = out[i];
             out_valid_[i] = true;
             send          = true;
         }
-        resend_[num] = false;
+        resend_[num] = failed;
         if (send)
         {
             TpdoEvent(static_cast<int>(m.master_number));
@@ -1176,7 +1192,7 @@ void Network::WriteOutputs(bool all)
     }
 }
 
-void Network::WriteObject(uint16_t index, CoType type, uint64_t v)
+bool Network::WriteObject(uint16_t index, CoType type, uint64_t v)
 {
     std::error_code ec;
     switch (type)
@@ -1224,6 +1240,7 @@ void Network::WriteObject(uint16_t index, CoType type, uint64_t v)
         break;
     }
     }
+    return !ec;
 }
 
 void Network::SendSync()
