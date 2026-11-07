@@ -236,7 +236,8 @@ class Network : public lely::canopen::BasicMaster
     static void OnScanEvent(struct io_poll_watch *watch, int events);
     static void OnScanTask(ev_task *task);
     void WriteOutputs(bool all);
-    void WriteObject(uint16_t index, CoType type, uint64_t value);
+    bool WriteObject(uint16_t index, CoType type, uint64_t value); // false: the write failed
+    bool write_failed_ = false; // the last output write failed (logged once)
     void SendSync();
     void ServeClient();
     // Takes and starts the next request of the PLC's blocks; false when none waits.

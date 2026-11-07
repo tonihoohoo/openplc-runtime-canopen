@@ -28,6 +28,9 @@ namespace canopen_plugin
 
 // Length of each %I and %Q table of the runtime's image, in its own unit (bytes for X, entries
 // otherwise), indexed by IecSize position X, B, W, D, L. Unbounded: no limit is checked.
+// Highest index the runtime's journal calls take (16 bits).
+constexpr uint32_t kMaxJournalIndex = 0xFFFF;
+
 struct ImageSizes
 {
     bool bounded       = false;
@@ -40,6 +43,11 @@ struct ImageSizes
     // Whether `loc` lies inside its table.
     bool contains(const IecLocation &loc) const;
 };
+
+// Whether every address of a slave's objects (packed bits included) lies inside the tables.
+// False, with a message per address, when one does not.
+bool slave_addresses_inside(const DeviceConfig &dev, const ImageSizes &sizes,
+                            std::vector<std::string> &errors);
 
 class ProcessImage
 {

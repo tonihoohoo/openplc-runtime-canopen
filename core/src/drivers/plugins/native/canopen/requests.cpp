@@ -189,7 +189,7 @@ std::string service_open(const cJSON *req, Requests &target)
     ServiceRequest s;
     const cJSON *itf   = cJSON_GetObjectItemCaseSensitive(req, "interface");
     const cJSON *nodes = cJSON_GetObjectItemCaseSensitive(req, "nodes");
-    if (!cJSON_IsString(itf) || !*itf->valuestring || std::strlen(itf->valuestring) > 15 ||
+    if (!cJSON_IsString(itf) || !valid_interface_name(itf->valuestring) ||
         !get_uint(req, "bitrate", 0, 1000000, s.bitrate) ||
         (s.bitrate && !is_standard_bitrate(s.bitrate)) ||
         !get_uint(req, "master_node_id", 1, 127, s.master_node_id) ||

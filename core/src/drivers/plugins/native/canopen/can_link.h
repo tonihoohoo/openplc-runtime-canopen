@@ -19,6 +19,7 @@ namespace canopen_plugin
 struct LinkInfo
 {
     bool up = false;
+    bool not_can = false; // the link is not a CAN link (ARPHRD type), e.g. Ethernet
     std::string kind; // IFLA_INFO_KIND: "can", "vcan", ...
     unsigned bitrate = 0;
     long restart_ms  = -1; // bus-off auto-restart delay; 0: off, -1: not reported (vcan)

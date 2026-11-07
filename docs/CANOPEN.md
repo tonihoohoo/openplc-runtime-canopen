@@ -79,8 +79,8 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
 - **TIME.** With `time`, the master sends the TIME object (CiA 301 TIME_OF_DAY: milliseconds after
   midnight and days since 1 January 1984, UTC, from the PLC's clock) on `time.cob_id` every
   `time.period_ms` while the PLC runs.
-- **PLC stop.** The runtime zeroes `%Q` and runs one more cycle, so the nodes get zero outputs;
-  then the master sends `on_plc_stop` to all nodes (`pre_operational`, the default, or `stopped`,
+- **PLC stop.** The runtime zeroes `%Q` and runs one more cycle, so the nodes get zero outputs
+  (the master sends all outputs once more as the stop begins, so they are not lost to a race); then the master sends `on_plc_stop` to all nodes (`pre_operational`, the default, or `stopped`,
   or `none`) and closes the interface.
 - The master never writes 0x1010 (store parameters), and writes 0x1011 (restore defaults) only
   through `restore_defaults`; the parser refuses configuration SDOs to either.
@@ -187,7 +187,7 @@ change both together.
 |---|---|
 | `version` | Format version, 12. Older files are refused; build the project again with a matching editor. |
 | `networks`, `devices` | The master networks and the [slave devices](#canopen-slave); either list may be empty or left out, not both. |
-| `interface` | SocketCAN interface, unique per network. |
+| `interface` | SocketCAN interface, unique per network: 1-15 letters, digits, `_`, `.` or `-`. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
 | `master_node_id` | 1-127, default 127. |
 | `heartbeat_producer_ms` | The master's own heartbeat, 0 for none. Nodes that watch it (0x1016, written as a configuration SDO) react when the runtime stops or dies. |
@@ -216,9 +216,9 @@ change both together.
 
 The plugin refuses the whole file, with one log line per problem, when anything is wrong: an
 unknown version, a duplicate interface or node ID, a node ID equal to the master's, a non-standard
-bit rate, a reserved or duplicate COB-ID (PDOs, emergencies and TIME), a configuration SDO to
+bit rate, an interface name with other characters, a reserved or duplicate COB-ID (PDOs, emergencies and TIME), a configuration SDO to
 0x1010 or 0x1011, restore defaults or configuration SDOs on a node with `configure: false`, a PDO
-over 64 bits, a type that does not fit its
+over 64 bits or with more than 8 entries, a slave object address (also a packed bit) outside the runtime's I/O image, a type that does not fit its
 location, a `%Q` location in a TPDO or a `%I` location in an RPDO, two entries on the same `%I`
 location, or a location outside the runtime's I/O image, an entry without a location that is not a
 dummy, an unknown `on_abort`, a `jump_to` that is missing or not a later item, an `lss` without
@@ -538,7 +538,7 @@ seconds and is a job like an SDO request; `job` answers with the members below a
 
 Service mode runs the online tools while the PLC is stopped, with no program uploaded. A client
 opens it with `service_open` and the CAN settings to use; the plugin then runs a master on that
-interface (under `name` in the status, `Service` when left out) that sends nothing of its own (no NMT reset, start or stop, no SYNC, no boot, no
+interface (under `name` in the status, `Service` when left out; the interface must be a CAN link) that sends nothing of its own (no NMT reset, start or stop, no SYNC, no boot, no
 configuration) and only serves the requests, with the NMT commands sent as plain frames. The nodes
 listed are the ones requests may address, all in state `service`; their `nmt` follows the commands
 sent and the heartbeats and boot-ups the plugin hears. It is refused with `plc_running`

@@ -11,7 +11,11 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <net/if.h>
+#include <stdexcept>
 #include <string>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 #include <vector>
 
 #include "bus_monitor.h"
@@ -597,8 +601,48 @@ void test_event_sources()
     CHECK(text.find("\"command\":\"stop\",\"source\":\"client\"") != std::string::npos);
 }
 
+// A handler that throws is answered with "internal" and the thread goes on.
+void test_server_exception()
+{
+    const std::string sock = "/tmp/canopen_status_throw_" + std::to_string(getpid()) + ".socket";
+    int calls              = 0;
+    StatusServer server(sock,
+                        [&calls](const std::string &) -> std::string
+                        {
+                            if (++calls == 1)
+                                throw std::runtime_error("boom");
+                            return "{\"ok\":true}";
+                        });
+    std::string problem;
+    CHECK(server.start(problem));
+    auto ask = [&sock](const std::string &req)
+    {
+        std::string answer;
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, sock.c_str(), sizeof(addr.sun_path) - 1);
+        if (connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0)
+        {
+            const std::string line = req + "\n";
+            if (write(fd, line.data(), line.size()) < 0)
+                answer = "write failed";
+            char buf[256];
+            ssize_t n = read(fd, buf, sizeof(buf));
+            if (n > 0)
+                answer.assign(buf, static_cast<size_t>(n));
+        }
+        close(fd);
+        return answer;
+    };
+    CHECK(ask("{}").find("internal") != std::string::npos);
+    CHECK(ask("{}").find("\"ok\"") != std::string::npos);
+    server.stop();
+}
+
 int main()
 {
+    test_server_exception();
     test_states_and_reasons();
     test_optional_and_held();
     test_waiting_and_off();

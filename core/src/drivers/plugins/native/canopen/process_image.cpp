@@ -2,6 +2,9 @@
 
 #include "process_image.h"
 
+#include <algorithm>
+#include <cstdio>
+
 #include <cerrno>
 #include <cstring>
 
@@ -74,7 +77,36 @@ uint32_t ImageSizes::capacity(const IecLocation &loc) const
 
 bool ImageSizes::contains(const IecLocation &loc) const
 {
-    return !bounded || loc.index < capacity(loc);
+    // The runtime's journal takes a 16-bit index: nothing above it can be written.
+    return loc.index <= kMaxJournalIndex && (!bounded || loc.index < capacity(loc));
+}
+
+bool slave_addresses_inside(const DeviceConfig &dev, const ImageSizes &sizes,
+                            std::vector<std::string> &errors)
+{
+    const size_t failed = errors.size();
+    auto check          = [&](const SlaveObject &o, const IecLocation &loc)
+    {
+        if (!sizes.contains(loc))
+        {
+            char obj[16];
+            std::snprintf(obj, sizeof obj, "%04Xh:%02X", o.index, o.subindex);
+            errors.push_back(dev.label() + ": object " + obj + " location " + loc.str() +
+                             " lies outside the runtime's I/O image (" +
+                             std::to_string(std::min<uint32_t>(sizes.capacity(loc),
+                                                                kMaxJournalIndex + 1)) +
+                             " entries in its table)");
+        }
+    };
+    for (const SlaveObject &o : dev.objects)
+    {
+        if (o.packed())
+            for (const IecLocation &b : o.bits)
+                check(o, b);
+        else if (o.exch != SlaveExchange::Constant)
+            check(o, o.location);
+    }
+    return errors.size() == failed;
 }
 
 bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,

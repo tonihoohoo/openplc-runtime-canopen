@@ -2,6 +2,8 @@
 
 #include "status_server.h"
 
+#include <exception>
+
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -137,7 +139,22 @@ void StatusServer::serve(int fd)
         size_t nl;
         while ((nl = buf.find('\n')) != std::string::npos)
         {
-            std::string answer = handler_(buf.substr(0, nl)) + "\n";
+            std::string answer;
+            try
+            {
+                answer = handler_(buf.substr(0, nl)) + "\n";
+            }
+            catch (const std::exception &e)
+            {
+                // An exception out of this thread would end the whole PLC process.
+                log_error("status socket: request failed: %s", e.what());
+                answer = "{\"error\":\"internal\"}\n";
+            }
+            catch (...)
+            {
+                log_error("status socket: request failed");
+                answer = "{\"error\":\"internal\"}\n";
+            }
             buf.erase(0, nl + 1);
             size_t off = 0;
             while (off < answer.size())
