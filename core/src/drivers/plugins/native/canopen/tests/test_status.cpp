@@ -110,6 +110,12 @@ void test_emcy_and_late()
     CHECK(!node(s, 2).warning());
     CHECK(s.events.front().kind == EventKind::EmcyReset);
 
+    st.emcy(2, 0x6200, 0x01, data);
+    CHECK(node(st.snapshot(), 2).warning());
+    st.boot_ok(2);
+    s = st.snapshot();
+    CHECK(!node(s, 2).warning() && node(s, 2).emcy.size() == NetworkStatus::kMaxEmcy);
+
     st.pdo_late(2, 1, 0x182);
     st.pdo_late(2, 1, 0x182);
     s = st.snapshot();
