@@ -167,6 +167,9 @@ void NetworkStatus::boot_ok(unsigned node, bool waits)
     ++n->boots;
     n->problem         = Problem();
     n->silent_reported = false;
+    // A node that has just booted lost its error state; its earlier emergencies are history.
+    for (Emcy &m : n->emcy)
+        m.active = false;
     change(*n, NodeRun::Operational);
     n->nmt = NmtSeen::Operational;
     Event e;
