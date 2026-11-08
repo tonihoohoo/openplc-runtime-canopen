@@ -122,7 +122,7 @@ has `lss`.
 
 ```json
 {
-  "version": 12,
+  "version": 13,
   "networks": [
     {
       "name": "CANopen 1",
@@ -185,7 +185,7 @@ change both together.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 12. Older files are refused; build the project again with a matching editor. |
+| `version` | Format version, 13. Older files are refused; build the project again with a matching editor. |
 | `networks`, `devices` | The master networks and the [slave devices](#canopen-slave); either list may be empty or left out, not both. |
 | `interface` | SocketCAN interface, unique per network: 1-15 letters, digits, `_`, `.` or `-`. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
@@ -240,7 +240,7 @@ with an object dictionary built from the file when the PLC starts.
 
 ```json
 {
-  "version": 12,
+  "version": 13,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "can1", "bitrate": 250000, "node_id": 5, "priority": 90,
@@ -252,6 +252,7 @@ with an object dictionary built from the file when the PLC starts.
     "on_plc_stop": "hold",
     "on_plc_stop_state": "none",
     "start_alone": false,
+    "store_settings": false,
     "lss": null,
     "objects": [
       {"index": 8192, "subindex": 1, "name": "Setpoint", "type": "INTEGER16",
@@ -286,6 +287,7 @@ with an object dictionary built from the file when the PLC starts.
 | `on_plc_stop` | The values to the master while the PLC is stopped: `hold` (default, the last values) or `zero`. |
 | `on_plc_stop_state` | The slave's own NMT state on a PLC stop, written to 0x1029 sub 2: `none` (it stays in its state), `pre_operational` (from operational only) or `stopped`. A master may write 0x1029 sub 2 (0-2) to change it until the next start. |
 | `start_alone` | `true`: the slave goes operational by itself after its boot-up (NMT startup); default `false`, it waits for the master's NMT start. |
+| `store_settings` | `true`: the slave has objects 0x1010 and 0x1011, and a master can [save its settings](#saved-settings). Default `false`: both objects are absent (abort 0602 0000h). |
 | `lss` | `null` (default, LSS off) or the [LSS](#lss-in-the-slave) settings `{enabled, wait_for_master, serial, bitrate_change}`. |
 | `objects` | The application objects, index 0x2000-0x5FFF, sub-index 1-254, each with a `type` as for a PDO entry or `VISIBLE_STRING`, a `direction` (`from_master`: written by the master, read by the program from a `%I` location; `to_master`: written by the program to a `%Q` location, read by the master) and an `exchange`: `pdo` (may be mapped to a PDO), `sdo` (by SDO only) or `constant` (a fixed `value`, no location). A `VISIBLE_STRING` object (at most 255 characters) is always a constant. |
 | `default`, `min`, `max` | The object's value at start (default 0) and, for objects from the master, the range a write must keep (SDO aborts 0609 0031h above and 0609 0032h below it). |
@@ -303,8 +305,9 @@ Behaviour:
   not `pdo`, an object from the master in a TPDO and a length longer than the object cannot be
   mapped (abort 0604 0041h). Transmission types 241-253 and a
   mapping count above 8 are refused (0609 0030h).
-  Writes to 0x1010 (store) and 0x1011 (restore) are refused (0602 0000h): nothing is stored, and a
-  master writes its settings again at every boot.
+  Without `store_settings` a write to 0x1010 (store) or 0x1011 (restore) is refused (0602 0000h):
+  nothing is stored, and a master writes its settings again at every boot. With it, see
+  [Saved settings](#saved-settings).
 - Event-driven TPDOs (254, 255) are sent when a mapped value changes and on entering operational;
   synchronous ones on the SYNC. RPDOs are taken in operational only. An RPDO with an event timer
   is watched once its first frame came: no frame within that time sends EMCY 8250h and sets the
@@ -376,6 +379,36 @@ serial number in 0x1018 sub 4.
   `project`, `stored`, or `lss` for one a master gave and did not store, also when it equals the
   project's), `bitrate_from` (`project` or `stored`), `bitrate`, the project's
   `project_node_id` and `project_bitrate` and the stored `stored_node_id` and `stored_bitrate`.
+
+### Saved settings
+
+With `store_settings` on, the slave has 0x1010 (store parameters) and 0x1011 (restore default
+parameters), each with sub 0 = 3 and sub 1 (all), 2 (communication) and 3 (application); a read of
+sub 1-3 gives 1 (stores on command). Sub-indexes 4 and up do not exist.
+
+- **Save.** Writing `save` (65766173h) to 0x1010 sub n writes the area's current values to
+  `<data folder>/canopen/slave-<interface>.json` (the same folder as the LSS file; the write is
+  atomic). Communication means 0x1014, 0x1016, 0x1017, 0x1029 and the communication and mapping
+  parameters of the 16 RPDOs and 16 TPDOs; application means the objects from the master that are
+  `pdo` or `sdo` (their saved values replace the project's defaults, and a PLC start puts them back).
+  Saving one area keeps the other's saved values.
+- **Restore.** Writing `load` (64616F6Ch) to 0x1011 sub n removes the area's saved values; nothing
+  changes live. The project's values return at the next reset node (a reset communication returns
+  the values saved at that moment).
+- **Refusals.** Any other value is refused with 0800 0020h. A save or restore that cannot be
+  written is refused with 0606 0000h and logged. Both work in any NMT state.
+- **Use.** The saved values are written over the project's at every start, reset node and upload,
+  until restored. They are used only for the slave configuration they were saved for (a hash of the
+  dictionary, the identity, the defaults and the switches): after a project change the slave starts
+  from the project, logs that they are not used, and the next save replaces the file. An entry the
+  project no longer allows is dropped and logged. A master's own writes still win, and a master
+  that writes its settings at every boot works as before.
+- **Forget.** The editor's request `slave_settings_forget` (`{"op": "slave_settings_forget",
+  "slave": "<name>"}`) removes the file and restarts the slave from the project's values;
+  `settings_off` answers a slave with `store_settings` off.
+- **Status.** With `store_settings` on, a slave entry has `stored_settings`: `null`, or `{comm,
+  app, entries, time}` (the areas that are saved, the number of values and the time of the last
+  save, in milliseconds since 1970).
 
 ## Status
 
@@ -725,7 +758,7 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), a node started by the program (waiting, started, waiting again after a reset) and a node turned on and off (booted, stopped, pulled without a loss, skipped by NMT to every node), the NMT command on stop, and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 | `test_plc_api` | The built plugin loaded as the runtime loads it: the blocks' lookup by SONAME and its cost per call (it fails above 50 µs), the answers with no network and with a missing interface, old handles across PLC runs and reloads, a kept table that stays the same across reloads, version 3's table serving versions 1 and 2, and the slave functions with no slave running. |
 | `test_plc_port` | The function blocks' request slots, cancel, the queue limit, a session end, stale handles, node and bus states, the emergency ring, and the node control (wanted states, run states, network counts), with no allocation on the scan's side. |
-| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, the status fields (NMT source, SDO writes and refusals, values, PDO counts and remap, active emergencies and the error register), the program's NMT requests, emergencies and write counters across a PLC restart, 0x1029 sub 2 on a PLC stop, error passive and bus-off on a stood-in link (EMCY 8120h and 8140h, the link reset without a new boot-up), the plugin's own master booting and running the slave, 16 PDOs each way with TPDO 5 off until a master writes its COB-ID, a fixed COB-ID on TPDO 6 and an RPDO receive timeout (EMCY 8250h and 0000h), the error register back to 0 after a short or long RPDO, after the master's heartbeat lost with 0x1029 sub 1 stopped and after a PLC stop with 0x1029 sub 2 stopped, PDO parameter checks in pre-operational and operational, and with LSS: silence while unconfigured, fastscan, configure, store, the stored values across restarts and reset node, reset communication taking a new node ID, forget, a refused bit rate, a failed store, and the stored file's checks. |
+| `test_slave` | The slave on Lely's in-process CAN bus against a scripted master: boot-up and heartbeat, the identity objects, SDO reads and writes with range checks, read-only and refused objects, a string constant, NMT start, event and SYNC TPDOs, RPDOs into `%I`, a remap by the CiA 301 procedure, PLC stop and start (EMCY 6200h and 0000h, defaults back), the master's heartbeat lost (EMCY 8130h, pre-operational), reset node, the status fields (NMT source, SDO writes and refusals, values, PDO counts and remap, active emergencies and the error register), the program's NMT requests, emergencies and write counters across a PLC restart, 0x1029 sub 2 on a PLC stop, error passive and bus-off on a stood-in link (EMCY 8120h and 8140h, the link reset without a new boot-up), the plugin's own master booting and running the slave, 16 PDOs each way with TPDO 5 off until a master writes its COB-ID, a fixed COB-ID on TPDO 6 and an RPDO receive timeout (EMCY 8250h and 0000h), the error register back to 0 after a short or long RPDO, after the master's heartbeat lost with 0x1029 sub 1 stopped and after a PLC stop with 0x1029 sub 2 stopped, PDO parameter checks in pre-operational and operational, with saved settings: 0x1010 and 0x1011 (signatures, areas, the file, a restart, a reset node after a restore, a changed project, an invalid entry, forget, a folder that cannot be written), and with LSS: silence while unconfigured, fastscan, configure, store, the stored values across restarts and reset node, reset communication taking a new node ID, forget, a refused bit rate, a failed store, and the stored file's checks. |
 | `test_status` | The status record, its JSON answer and requests, link parsing and the bus monitor. |
 
 `canopen_sim_slave --interface vcan0 --node 2` (built with the tests) is a simulated generic I/O

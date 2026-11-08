@@ -33,6 +33,10 @@ bool lss_load(const std::string &path, LssStored &out, std::string &problem);
 // Writes the file atomically (temp file, fsync, rename), creating its folder. False with a reason.
 bool lss_save(const std::string &path, const LssStored &value, std::string &problem);
 
+// Writes `text` to `path` atomically (temp file, fsync, rename), creating the folder. False with a
+// reason. Shared by the other store files of the plugin.
+bool store_write_atomic(const std::string &path, const std::string &text, std::string &problem);
+
 // A random serial number, never 0.
 uint32_t lss_random_serial();
 

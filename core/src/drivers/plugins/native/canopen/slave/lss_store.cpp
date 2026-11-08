@@ -131,14 +131,6 @@ bool lss_load(const std::string &path, LssStored &out, std::string &problem)
 
 bool lss_save(const std::string &path, const LssStored &value, std::string &problem)
 {
-    if (path.empty())
-    {
-        problem = "no valid store file for this interface";
-        return false;
-    }
-    const size_t slash = path.rfind('/');
-    if (slash != std::string::npos && !make_dirs(path.substr(0, slash), problem))
-        return false;
     std::string text;
     char buf[64];
     if (value.serial)
@@ -156,7 +148,20 @@ bool lss_save(const std::string &path, const LssStored &value, std::string &prob
         std::snprintf(buf, sizeof(buf), ",\"bitrate\":%u", value.bitrate);
         text += buf;
     }
-    text                  = "{" + (text.empty() ? text : text.substr(1)) + "}\n";
+    text = "{" + (text.empty() ? text : text.substr(1)) + "}\n";
+    return store_write_atomic(path, text, problem);
+}
+
+bool store_write_atomic(const std::string &path, const std::string &text, std::string &problem)
+{
+    if (path.empty())
+    {
+        problem = "no valid store file for this interface";
+        return false;
+    }
+    const size_t slash = path.rfind('/');
+    if (slash != std::string::npos && !make_dirs(path.substr(0, slash), problem))
+        return false;
     const std::string tmp = path + ".tmp";
     unlink(tmp.c_str()); // a stale or planted file: the new one is created exclusively
     int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);

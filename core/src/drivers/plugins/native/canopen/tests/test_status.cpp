@@ -290,7 +290,13 @@ struct FakeRequests : Requests
         forgotten = name;
         return name == "io" ? "" : "unknown_slave";
     }
+    std::string slave_settings_forget(const std::string &name) override
+    {
+        settings_forgotten = name;
+        return name == "io" ? "" : "unknown_slave";
+    }
     std::string forgotten;
+    std::string settings_forgotten;
 };
 
 uint64_t job_id(const std::string &answer)
@@ -426,6 +432,28 @@ void test_requests()
           "{\"error\":\"unknown_slave\"}");
     CHECK(handle_request(R"({"op":"slave_lss_forget","slave":5})", t) ==
           "{\"error\":\"bad_request\"}");
+    CHECK(handle_request(R"({"op":"slave_settings_forget","slave":"io"})", t) == "{\"ok\":true}" &&
+          t.settings_forgotten == "io");
+    CHECK(handle_request(R"({"op":"slave_settings_forget","slave":"x"})", t) ==
+          "{\"error\":\"unknown_slave\"}");
+    CHECK(handle_request(R"({"op":"slave_settings_forget"})", t) == "{\"error\":\"bad_request\"}");
+
+    // The stored settings in a slave's status: absent, null, or the stored areas.
+    {
+        SlaveSnapshot s;
+        s.name = "io";
+        const std::string none = inactive_status_json({s});
+        CHECK(none.find("stored_settings") == std::string::npos);
+        s.store_settings = true;
+        const std::string empty = inactive_status_json({s});
+        CHECK(empty.find("\"stored_settings\":null") != std::string::npos);
+        s.stored_comm    = true;
+        s.stored_entries = 12;
+        s.stored_time    = 1700000000000;
+        const std::string full = inactive_status_json({s});
+        CHECK(full.find("\"stored_settings\":{\"comm\":true,\"app\":false,\"entries\":12,") !=
+              std::string::npos);
+    }
 
     std::vector<uint8_t> bytes;
     CHECK(from_hex("00ff7F", bytes) && to_hex(bytes) == "00ff7f");

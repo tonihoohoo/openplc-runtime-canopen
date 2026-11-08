@@ -248,6 +248,23 @@ std::string slave_dcf(const DeviceConfig &dev, uint32_t serial, unsigned node_id
         stop = 2;
         break;
     }
+    if (dev.store_settings)
+    {
+        // Sub 1 all, 2 communication, 3 application; reading gives 1 (stores on command).
+        d.rec(0x1010, "Store parameters", 4, 3, true);
+        d.rec(0x1011, "Restore default parameters", 4, 3, true);
+        for (unsigned s = 1; s <= 3; ++s)
+        {
+            d.sub(0x1010, s, s == 1 ? "Save all parameters"
+                             : s == 2 ? "Save communication parameters"
+                                      : "Save application parameters",
+                  0x7, "rw", "1");
+            d.sub(0x1011, s, s == 1 ? "Restore all default parameters"
+                             : s == 2 ? "Restore communication default parameters"
+                                      : "Restore application default parameters",
+                  0x7, "rw", "1");
+        }
+    }
     d.rec(0x1029, "Error behaviour", 3, 2, true);
     d.sub(0x1029, 1, "Communication error", 0x5, "rw", std::to_string(lost));
     d.sub(0x1029, 2, "PLC stop", 0x5, "rw", std::to_string(stop));

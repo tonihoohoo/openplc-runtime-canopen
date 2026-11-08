@@ -20,7 +20,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 12,
+  "version": 13,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 250000, "master_node_id": 1,
     "heartbeat_producer_ms": 200,

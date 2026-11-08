@@ -53,6 +53,8 @@ class Requests
     virtual void service_close()                                = 0;
     // Forgets the stored LSS values of slave `name`; an empty string on success, else the reason.
     virtual std::string slave_lss_forget(const std::string &name) = 0;
+    // Forgets the settings a master saved into slave `name`; an empty string on success.
+    virtual std::string slave_settings_forget(const std::string &name) = 0;
 };
 
 // The network service mode runs: the request's interface and nodes, nothing configured or

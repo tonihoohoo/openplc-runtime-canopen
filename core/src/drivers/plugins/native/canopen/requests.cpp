@@ -281,6 +281,17 @@ std::string handle_request(const std::string &request, Requests &target)
             answer                   = reason.empty() ? "{\"ok\":true}" : error(reason.c_str());
         }
     }
+    else if (std::strcmp(op->valuestring, "slave_settings_forget") == 0)
+    {
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(req, "slave");
+        if (!cJSON_IsString(name))
+            answer = error("bad_request");
+        else
+        {
+            const std::string reason = target.slave_settings_forget(name->valuestring);
+            answer                   = reason.empty() ? "{\"ok\":true}" : error(reason.c_str());
+        }
+    }
     else
         answer = error("unknown_op");
     cJSON_Delete(req);

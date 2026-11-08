@@ -17,7 +17,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 12;
+constexpr int kConfigVersion = 13;
 
 // One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
 // location: its bits are skipped on receive and sent as zeros.
@@ -284,6 +284,7 @@ struct DeviceConfig
     SlaveOnStop on_plc_stop          = SlaveOnStop::Hold;
     SlaveStopState on_plc_stop_state = SlaveStopState::NoChange;
     bool start_alone                 = false;
+    bool store_settings              = false; // objects 0x1010 and 0x1011 exist
     SlaveLss lss;
     std::vector<SlaveObject> objects;
     std::vector<SlavePdo> rpdos;

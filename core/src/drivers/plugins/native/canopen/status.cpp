@@ -1258,6 +1258,19 @@ void add_slaves(cJSON *root, const std::vector<SlaveSnapshot> &slaves)
             if (s.stored_bitrate)
                 cJSON_AddNumberToObject(l, "stored_bitrate", s.stored_bitrate);
         }
+        if (s.store_settings)
+        {
+            if (s.stored_entries == 0)
+                cJSON_AddNullToObject(o, "stored_settings");
+            else
+            {
+                cJSON *l = cJSON_AddObjectToObject(o, "stored_settings");
+                cJSON_AddBoolToObject(l, "comm", s.stored_comm);
+                cJSON_AddBoolToObject(l, "app", s.stored_app);
+                cJSON_AddNumberToObject(l, "entries", s.stored_entries);
+                cJSON_AddNumberToObject(l, "time", static_cast<double>(s.stored_time));
+            }
+        }
         if (s.detailed)
             add_slave_details(o, s);
         cJSON_AddItemToArray(list, o);

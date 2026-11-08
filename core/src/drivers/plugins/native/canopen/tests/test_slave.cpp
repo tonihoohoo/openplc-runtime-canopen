@@ -37,6 +37,7 @@
 #include "master_dcf.h"
 #include "process_image.h"
 #include "slave.h"
+#include "settings_store.h"
 #include "status.h"
 
 using namespace canopen_plugin;
@@ -47,7 +48,7 @@ namespace
 {
 
 const char *const kConfig = R"({
-  "version": 12,
+  "version": 13,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "vcan-slave", "bitrate": 0, "node_id": 5,
@@ -993,7 +994,7 @@ void check_bus_off(const DeviceConfig &dev)
 
 // Our master boots the slave and exchanges PDOs with it.
 const char *const kMasterConfig = R"({
-  "version": 12,
+  "version": 13,
   "networks": [{
     "name": "line", "interface": "vcan-master", "bitrate": 0, "master_node_id": 127,
     "heartbeat_producer_ms": 100,
@@ -1072,7 +1073,7 @@ constexpr uint32_t kLssMaster = 0x7E5;
 constexpr uint32_t kLssSlave  = 0x7E4;
 
 const char *const kLssConfig = R"({
-  "version": 12,
+  "version": 13,
   "networks": [],
   "devices": [{
     "name": "lss", "interface": "vcan-lss", "bitrate": 500000, "node_id": 5,
@@ -1526,7 +1527,7 @@ void check_stop_state_config()
 } // namespace
 
 const char *const kPackedConfig = R"({
-  "version": 12,
+  "version": 13,
   "networks": [],
   "devices": [{
     "name": "bits", "interface": "vcan-packed", "bitrate": 0, "node_id": 5,
@@ -1685,7 +1686,7 @@ void check_packed(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
 }
 
 const char *const kMorePdosConfig = R"({
-  "version": 12,
+  "version": 13,
   "networks": [],
   "devices": [{
     "name": "many", "interface": "vcan-pdos", "bitrate": 0, "node_id": 5,
@@ -1808,6 +1809,225 @@ void check_more_pdos(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
 }
 
 // Slave addresses must lie inside the runtime's tables.
+// Settings a master saves with 0x1010 and removes with 0x1011.
+void check_store_settings(const std::string &dir)
+{
+    setenv("OPENPLC_PERSISTENT_DATA_DIR", dir.c_str(), 1);
+    const std::string file = dir + "/canopen/slave-vcan-slave.json";
+    auto read_file = [](const std::string &path)
+    {
+        std::string text;
+        if (FILE *f = std::fopen(path.c_str(), "r"))
+        {
+            char buf[4096];
+            size_t n;
+            while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0)
+                text.append(buf, n);
+            std::fclose(f);
+        }
+        return text;
+    };
+    auto parse = [](const std::string &text, Config &cfg)
+    {
+        std::vector<std::string> errors;
+        const bool ok = parse_config(text, cfg, errors);
+        for (const auto &e : errors)
+            std::fprintf(stderr, "%s\n", e.c_str());
+        return ok && errors.empty();
+    };
+    auto with = [](std::string text, const std::string &from, const std::string &to)
+    {
+        const size_t at = text.find(from);
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos)
+            text.replace(at, from.size(), to);
+        return text;
+    };
+    const std::string on = with(kConfig, "\"on_plc_stop_state\": \"none\",",
+                                "\"on_plc_stop_state\": \"none\", \"store_settings\": true,");
+    Config cfg, off_cfg, bad_cfg;
+    CHECK(parse(on, cfg) && cfg.devices[0].store_settings);
+    CHECK(parse(kConfig, off_cfg) && !off_cfg.devices[0].store_settings);
+    CHECK(!parse(with(kConfig, "\"on_plc_stop_state\": \"none\",",
+                      "\"on_plc_stop_state\": \"none\", \"store_settings\": 1,"),
+                 bad_cfg));
+    CHECK(settings_area(0x1017) == 2 && settings_area(0x1A0F) == 2 && settings_area(0x2000) == 3 &&
+          settings_area(0x1018) == 0 && settings_area(0x6000) == 0);
+    CHECK(settings_store_path("x/../a").empty());
+
+    auto vbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
+    Probe p(vbus);
+    uint32_t v = 0;
+    constexpr uint32_t kSave = 0x65766173, kLoad = 0x64616F6C;
+    // Starts a slave and waits for its boot-up.
+    auto boot = [&](Slave &slave, size_t &m)
+    {
+        std::string problem;
+        m = p.mark();
+        CHECK(slave.start(problem));
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; },
+            milliseconds(1000)));
+    };
+    size_t m = 0;
+    {
+        // Off: the objects do not exist.
+        Slave slave(off_cfg.devices[0], virtual_slave_link(vbus));
+        boot(slave, m);
+        CHECK(sdo_write(p, 0x1010, 1, kSave, 4) == 0x06020000);
+        CHECK(!sdo_read(p, 0x1011, 1, v) && v == 0x06020000);
+        CHECK(!slave.forget_settings());
+        slave.stop();
+    }
+    {
+        Slave slave(cfg.devices[0], virtual_slave_link(vbus));
+        boot(slave, m);
+        CHECK(sdo_read(p, 0x1010, 0, v) && v == 3);
+        CHECK(sdo_read(p, 0x1010, 1, v) && v == 1);
+        CHECK(sdo_read(p, 0x1011, 3, v) && v == 1);
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 100);
+        CHECK(slave.snapshot().store_settings && slave.snapshot().stored_entries == 0);
+        // A wrong signature, a sub-index that does not exist and a read-only sub 0.
+        CHECK(sdo_write(p, 0x1010, 1, 0x12345678, 4) == 0x08000020);
+        CHECK(sdo_write(p, 0x1011, 1, kSave, 4) == 0x08000020);
+        CHECK(sdo_write(p, 0x1010, 4, kSave, 4) == 0x06090011);
+        CHECK(sdo_write(p, 0x1010, 0, 3, 1) == 0x06010002);
+        CHECK(read_file(file).empty());
+        // Save all: heartbeat, a PDO mapping count and an application parameter.
+        CHECK(sdo_write(p, 0x1017, 0, 500, 2) == 0);
+        CHECK(sdo_write(p, 0x2000, 4, 7000, 2) == 0);
+        CHECK(sdo_write(p, 0x1010, 1, kSave, 4) == 0);
+        const std::string text = read_file(file);
+        CHECK(text.find("\"index\":4119,\"sub\":0,\"value\":\"500\"") != std::string::npos);
+        CHECK(text.find("\"index\":8192,\"sub\":4,\"value\":\"7000\"") != std::string::npos);
+        CHECK(snapshot_until(slave,
+                             [](const SlaveSnapshot &s)
+                             { return s.stored_comm && s.stored_app && s.stored_entries > 2; },
+                             milliseconds(500)));
+        slave.stop();
+    }
+    {
+        // A restart: the saved values are in the dictionary.
+        Slave slave(cfg.devices[0], virtual_slave_link(vbus));
+        boot(slave, m);
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 500);
+        CHECK(sdo_read(p, 0x2000, 4, v) && v == 7000);
+        CHECK(sdo_read(p, 0x1018, 1, v) && v == 4660);
+        // The range of the parameter still holds.
+        CHECK(sdo_write(p, 0x2000, 4, 50, 2) == 0x06090032);
+        // Save the communication area only, with another heartbeat; the application values stay.
+        CHECK(sdo_write(p, 0x1017, 0, 300, 2) == 0);
+        CHECK(sdo_write(p, 0x2000, 4, 9000, 2) == 0);
+        CHECK(sdo_write(p, 0x1010, 2, kSave, 4) == 0);
+        slave.stop();
+    }
+    {
+        Slave slave(cfg.devices[0], virtual_slave_link(vbus));
+        boot(slave, m);
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 300);
+        CHECK(sdo_read(p, 0x2000, 4, v) && v == 7000);
+        // Restore the application area: the file keeps the communication values.
+        CHECK(sdo_write(p, 0x2000, 4, 8000, 2) == 0);
+        CHECK(sdo_write(p, 0x1011, 3, kLoad, 4) == 0);
+        CHECK(sdo_read(p, 0x2000, 4, v) && v == 8000); // nothing changes live
+        CHECK(snapshot_until(slave,
+                             [](const SlaveSnapshot &s) { return s.stored_comm && !s.stored_app; },
+                             milliseconds(500)));
+        slave.stop();
+    }
+    {
+        Slave slave(cfg.devices[0], virtual_slave_link(vbus));
+        boot(slave, m);
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 300);
+        CHECK(sdo_read(p, 0x2000, 4, v) && v == 1000);
+        // Restore all, then a reset node: the project's values are back, the file is gone.
+        CHECK(sdo_write(p, 0x1011, 1, kLoad, 4) == 0);
+        CHECK(read_file(file).empty());
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 300);
+        m = p.mark();
+        p.send(0x000, {0x81, 5});
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; },
+            milliseconds(2000)));
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 100);
+        // Save again, then reset node: the saved value comes back.
+        CHECK(sdo_write(p, 0x1017, 0, 400, 2) == 0);
+        CHECK(sdo_write(p, 0x1010, 2, kSave, 4) == 0);
+        CHECK(sdo_write(p, 0x1017, 0, 250, 2) == 0);
+        m = p.mark();
+        p.send(0x000, {0x81, 5});
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; },
+            milliseconds(2000)));
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 400);
+        slave.stop();
+    }
+    {
+        // A project that changed does not use the saved values; the next save replaces them.
+        DeviceConfig changed = cfg.devices[0];
+        for (SlaveObject &o : changed.objects)
+            if (o.index == 0x2000 && o.subindex == 4)
+                o.value = 1500;
+        Slave slave(changed, virtual_slave_link(vbus));
+        boot(slave, m);
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 100);
+        CHECK(sdo_read(p, 0x2000, 4, v) && v == 1500);
+        CHECK(snapshot_until(slave, [](const SlaveSnapshot &s) { return s.stored_entries == 0; },
+                             milliseconds(500)));
+        CHECK(!read_file(file).empty());
+        CHECK(sdo_write(p, 0x1017, 0, 200, 2) == 0);
+        CHECK(sdo_write(p, 0x1010, 1, kSave, 4) == 0);
+        slave.stop();
+    }
+    {
+        // A value the project no longer allows is dropped; the others stay (a file edited by hand).
+        Slave first(cfg.devices[0], virtual_slave_link(vbus));
+        boot(first, m);
+        CHECK(sdo_write(p, 0x1017, 0, 250, 2) == 0);
+        CHECK(sdo_write(p, 0x2000, 4, 2000, 2) == 0);
+        CHECK(sdo_write(p, 0x1010, 1, kSave, 4) == 0);
+        first.stop();
+        std::string text = read_file(file);
+        const size_t at  = text.find("\"value\":\"2000\"");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos)
+        {
+            text.replace(at, 14, "\"value\":\"50\"");
+            FILE *f = std::fopen(file.c_str(), "w");
+            std::fputs(text.c_str(), f);
+            std::fclose(f);
+        }
+        Slave slave(cfg.devices[0], virtual_slave_link(vbus));
+        boot(slave, m);
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 250);
+        CHECK(sdo_read(p, 0x2000, 4, v) && v == 1000);
+        // Forget: the file goes and the slave starts again with the project's values.
+        m = p.mark();
+        CHECK(slave.forget_settings());
+        CHECK(p.wait(
+            m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; },
+            milliseconds(3000)));
+        CHECK(read_file(file).empty());
+        CHECK(sdo_read(p, 0x1017, 0, v) && v == 100);
+        CHECK(snapshot_until(slave, [](const SlaveSnapshot &s) { return s.stored_entries == 0; },
+                             milliseconds(500)));
+        slave.stop();
+    }
+    {
+        // A folder that cannot be written: the save is refused with a hardware failure.
+        const std::string blocked = dir + "/not-a-folder-settings";
+        FILE *f2                  = std::fopen(blocked.c_str(), "w");
+        std::fclose(f2);
+        setenv("OPENPLC_PERSISTENT_DATA_DIR", blocked.c_str(), 1);
+        Slave slave(cfg.devices[0], virtual_slave_link(vbus));
+        boot(slave, m);
+        CHECK(sdo_write(p, 0x1010, 1, kSave, 4) == 0x06060000);
+        CHECK(sdo_write(p, 0x1011, 1, kLoad, 4) == 0);
+        slave.stop();
+        setenv("OPENPLC_PERSISTENT_DATA_DIR", dir.c_str(), 1);
+    }
+}
+
 void test_slave_address_bounds()
 {
     auto check = [](const std::string &from, const std::string &to, bool inside)
@@ -1868,6 +2088,7 @@ int main()
     check_bus_off(cfg.devices[0]);
     check_lss_store(dir);
     check_lss(rt, dir);
+    check_store_settings(dir);
     check_program(cfg.devices[0], rt);
     check_stop_state_config();
     check_packed_config();
