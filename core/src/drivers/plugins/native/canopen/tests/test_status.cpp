@@ -674,8 +674,22 @@ void test_server_exception()
     server.stop();
 }
 
+void test_boot_clears_lss_not_found()
+{
+    NetworkConfig net = two_nodes();
+    NetworkStatus st(net);
+    st.lss_result(2, LssOutcome::NotFound, 0, false);
+    st.lss_result(3, LssOutcome::Given, 255, false);
+    st.boot_ok(2);
+    st.boot_ok(3);
+    NetworkSnapshot s = st.snapshot();
+    CHECK(node(s, 2).lss.outcome == LssOutcome::None);
+    CHECK(node(s, 3).lss.outcome == LssOutcome::Given);
+}
+
 int main()
 {
+    test_boot_clears_lss_not_found();
     test_server_exception();
     test_states_and_reasons();
     test_optional_and_held();
