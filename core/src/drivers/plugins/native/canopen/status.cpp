@@ -170,6 +170,9 @@ void NetworkStatus::boot_ok(unsigned node, bool waits)
     // A node that has just booted lost its error state; its earlier emergencies are history.
     for (Emcy &m : n->emcy)
         m.active = false;
+    // A node that boots has an ID, so an earlier "no device answered" no longer holds.
+    if (n->lss.outcome == LssOutcome::NotFound)
+        n->lss = LssResult();
     change(*n, NodeRun::Operational);
     n->nmt = NmtSeen::Operational;
     Event e;
