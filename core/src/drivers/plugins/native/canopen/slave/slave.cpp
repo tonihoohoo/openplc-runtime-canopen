@@ -35,6 +35,7 @@
 #include "log.h"
 #include "lss_store.h"
 #include "plc_port.h"
+#include "settings_store.h"
 #include "slave_dcf.h"
 
 namespace canopen_plugin
@@ -60,6 +61,10 @@ constexpr uint8_t kRegVoltage       = 0x04;
 constexpr uint8_t kRegTemperature   = 0x08;
 constexpr uint8_t kRegCommunication = 0x10;
 constexpr uint8_t kRegManufacturer  = 0x80;
+// The signatures of 0x1010 ("save") and 0x1011 ("load").
+constexpr uint32_t kSaveSignature = 0x65766173u;
+constexpr uint32_t kLoadSignature = 0x64616F6Cu;
+
 // 0x1029 values (CiA 301): what the slave does on a communication error.
 constexpr uint8_t kErrorPreOperational = 0;
 constexpr uint8_t kErrorNoChange       = 1;
@@ -572,6 +577,9 @@ struct Slave::Impl
             im->self->reset_node();
         else if (cs == CO_NMT_CS_RESET_COMM)
         {
+            // The stack put the communication values it built with back; the saved ones win.
+            if (!im->booting && im->self->settings_dirty_)
+                im->self->apply_settings(true, false, false);
             // Before the boot-up: the node ID applies, the error services start later.
             im->reset_comm = true;
             if (im->at_reset_comm)
@@ -640,6 +648,23 @@ struct Slave::Impl
             co_sub_dn(sub, &val);
         co_val_fini(typ, &val);
         return ac;
+    }
+
+    // 0x1010 / 0x1011: "save" / "load" in a sub-index 1 (all), 2 (communication) or 3 (application).
+    static co_unsigned32_t store_dn(co_sub_t *sub, co_sdo_req *req, void *data)
+    {
+        Impl *im           = static_cast<Impl *>(data);
+        co_unsigned32_t ac = 0;
+        co_val val;
+        if (co_sdo_req_dn_val(req, CO_DEFTYPE_UNSIGNED32, &val, &ac) == -1)
+            return ac;
+        const bool save = co_obj_get_idx(co_sub_get_obj(sub)) == 0x1010;
+        const unsigned s = co_sub_get_subidx(sub);
+        if (s < 1 || s > 3)
+            return CO_SDO_AC_NO_SUB;
+        if (val.u32 != (save ? kSaveSignature : kLoadSignature))
+            return CO_SDO_AC_DATA;
+        return save ? im->self->save_settings(s) : im->self->restore_settings(s);
     }
 
     // 0x1003 as an error history: the EMCY errors sent, newest at sub 1, never 0000h. Writing 0
@@ -1008,6 +1033,7 @@ Slave::Slave(const DeviceConfig &dev, std::unique_ptr<SlaveLink> link)
     status_.interface      = dev_.interface;
     status_.node_id        = dev_.node_id;
     status_.master_node_id = dev_.master_watch_ms ? dev_.master_node_id : 0;
+    status_.store_settings = dev_.store_settings;
 }
 
 Slave::~Slave()
@@ -1019,6 +1045,7 @@ bool Slave::start(std::string &problem)
 {
     store_path_ = lss_store_path(dev_.interface);
     load_lss_values();
+    load_settings();
     // The dictionary is loaded once here, so a file the stack refuses fails the start.
     const std::string dcf = slave_dcf(dev_, serial_, pending_node_);
     co_dev_t *check = co_dev_create_from_dcf_text(dcf.data(), dcf.data() + dcf.size(), nullptr);
@@ -1127,6 +1154,14 @@ bool Slave::forget_lss()
     if (!dev_.lss.enabled)
         return false;
     forget_.store(true);
+    return true;
+}
+
+bool Slave::forget_settings()
+{
+    if (!dev_.store_settings)
+        return false;
+    forget_settings_.store(true);
     return true;
 }
 
@@ -1247,6 +1282,249 @@ bool Slave::store_lss(uint8_t node_id, uint16_t kbit)
     return true;
 }
 
+namespace
+{
+
+// Size in bytes of a communication object's type (all of them are unsigned 8, 16 or 32 bits).
+size_t comm_size(uint16_t type)
+{
+    switch (type)
+    {
+    case CO_DEFTYPE_UNSIGNED8:
+        return 1;
+    case CO_DEFTYPE_UNSIGNED16:
+        return 2;
+    case CO_DEFTYPE_UNSIGNED32:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+// The communication objects a master may save.
+bool comm_object(uint16_t index)
+{
+    return settings_area(index) == 2;
+}
+
+} // namespace
+
+void Slave::load_settings()
+{
+    settings_ = SettingsStored();
+    settings_path_.clear();
+    settings_hash_.clear();
+    if (!dev_.store_settings)
+        return;
+    const std::string label = dev_.label();
+    settings_path_          = settings_store_path(dev_.interface);
+    settings_hash_          = settings_config_hash(dev_);
+    SettingsStored stored;
+    std::string problem;
+    const bool have = settings_load(settings_path_, stored, problem);
+    if (!problem.empty())
+        log_warn("%s: %s; it is ignored", label.c_str(), problem.c_str());
+    if (have)
+    {
+        if (stored.config_hash != settings_hash_)
+            log_info("%s: stored settings were saved for another configuration; they are not used",
+                     label.c_str());
+        else
+        {
+            for (const SettingsEntry &e : stored.entries)
+            {
+                if (settings_area(e.index))
+                    settings_.entries.push_back(e);
+                else
+                    log_warn("%s: stored setting 0x%04X:%02X is not a saved object; dropped",
+                             label.c_str(), e.index, e.subindex);
+            }
+            settings_.config_hash = settings_hash_;
+            settings_.time_ms     = stored.time_ms;
+        }
+    }
+    publish_settings();
+}
+
+void Slave::publish_settings()
+{
+    bool comm = false, app = false;
+    for (const SettingsEntry &e : settings_.entries)
+        (settings_area(e.index) == 2 ? comm : app) = true;
+    std::lock_guard<PiMutex> lock(status_mutex_);
+    status_.store_settings = dev_.store_settings;
+    status_.stored_comm    = comm;
+    status_.stored_app     = app;
+    status_.stored_entries = static_cast<unsigned>(settings_.entries.size());
+    status_.stored_time    = settings_.entries.empty() ? 0 : settings_.time_ms;
+}
+
+std::vector<SettingsEntry> Slave::collect_settings(unsigned area) const
+{
+    const Impl &im = *impl_;
+    std::vector<SettingsEntry> out;
+    if (area == 2)
+    {
+        std::vector<uint16_t> indexes = {0x1014, 0x1016, 0x1017, 0x1029};
+        for (uint16_t base : {0x1400, 0x1600, 0x1800, 0x1A00})
+            for (uint16_t n = 0; n < 16; ++n)
+                indexes.push_back(static_cast<uint16_t>(base + n));
+        for (uint16_t index : indexes)
+        {
+            co_obj_t *obj = co_dev_find_obj(im.dev, index);
+            if (!obj)
+                continue;
+            for (unsigned s = 0; s <= 8; ++s)
+            {
+                co_sub_t *sub = co_obj_find_sub(obj, static_cast<co_unsigned8_t>(s));
+                if (!sub || !(co_sub_get_access(sub) & CO_ACCESS_WRITE))
+                    continue;
+                const size_t n = comm_size(co_sub_get_type(sub));
+                if (!n)
+                    continue;
+                SettingsEntry e;
+                e.index    = index;
+                e.subindex = static_cast<uint8_t>(s);
+                std::memcpy(&e.value, co_sub_addressof_val(sub), n);
+                out.push_back(e);
+            }
+        }
+    }
+    else
+    {
+        for (const Impl::AppSub &a : im.app_subs)
+        {
+            const SlaveObject &o = *a.obj;
+            if (o.dir != SlaveDirection::FromMaster || o.exch == SlaveExchange::Constant || o.string)
+                continue;
+            co_sub_t *sub = co_dev_find_sub(im.dev, o.index, o.subindex);
+            if (!sub)
+                continue;
+            SettingsEntry e;
+            e.index    = o.index;
+            e.subindex = o.subindex;
+            std::memcpy(&e.value, co_sub_addressof_val(sub), std::min<size_t>(o.bytes(), 8));
+            out.push_back(e);
+        }
+    }
+    return out;
+}
+
+uint32_t Slave::save_settings(unsigned sub)
+{
+    const std::string label = dev_.label();
+    SettingsStored next     = settings_;
+    next.config_hash        = settings_hash_;
+    for (unsigned area : {2u, 3u})
+    {
+        if (sub != 1 && sub != area)
+            continue;
+        std::vector<SettingsEntry> kept;
+        for (const SettingsEntry &e : next.entries)
+            if (settings_area(e.index) != area)
+                kept.push_back(e);
+        for (const SettingsEntry &e : collect_settings(area))
+            kept.push_back(e);
+        next.entries = kept;
+    }
+    next.time_ms = wall_ms();
+    std::string problem;
+    if (!settings_save(settings_path_, next, problem))
+    {
+        log_error("%s: saving the settings failed: %s", label.c_str(), problem.c_str());
+        return CO_SDO_AC_HARDWARE;
+    }
+    settings_       = next;
+    settings_dirty_ = true;
+    log_info("%s: settings saved (%s): %zu values stored", label.c_str(),
+             sub == 1 ? "all" : sub == 2 ? "communication" : "application", next.entries.size());
+    publish_settings();
+    return 0;
+}
+
+uint32_t Slave::restore_settings(unsigned sub)
+{
+    const std::string label = dev_.label();
+    SettingsStored next     = settings_;
+    next.entries.clear();
+    for (const SettingsEntry &e : settings_.entries)
+    {
+        const unsigned area = settings_area(e.index);
+        if (sub != 1 && sub != area)
+            next.entries.push_back(e);
+    }
+    if (next.entries.size() == settings_.entries.size())
+        return 0; // nothing of that area is stored
+    next.time_ms = wall_ms();
+    std::string problem;
+    if (!settings_save(settings_path_, next, problem))
+    {
+        log_error("%s: restoring the default settings failed: %s", label.c_str(),
+                  problem.c_str());
+        return CO_SDO_AC_HARDWARE;
+    }
+    settings_       = next;
+    settings_dirty_ = true;
+    log_info("%s: stored settings removed (%s); the project's values apply after a reset node",
+             label.c_str(), sub == 1 ? "all" : sub == 2 ? "communication" : "application");
+    publish_settings();
+    return 0;
+}
+
+void Slave::apply_settings(bool comm, bool app, bool log)
+{
+    Impl &im = *impl_;
+    if (!dev_.store_settings || !im.dev)
+        return;
+    const std::string label = dev_.label();
+    unsigned used = 0, dropped = 0;
+    for (const SettingsEntry &e : settings_.entries)
+    {
+        const unsigned area = settings_area(e.index);
+        if ((area == 2 && !comm) || (area == 3 && !app))
+            continue;
+        bool ok = false;
+        if (area == 2 && comm_object(e.index))
+        {
+            co_obj_t *obj = co_dev_find_obj(im.dev, e.index);
+            co_sub_t *sub = obj ? co_obj_find_sub(obj, e.subindex) : nullptr;
+            const size_t n = sub ? comm_size(co_sub_get_type(sub)) : 0;
+            if (n && (co_sub_get_access(sub) & CO_ACCESS_WRITE) && (n == 8 || (e.value >> (8 * n)) == 0))
+                ok = co_sub_set_val(sub, &e.value, n) == n;
+        }
+        else if (area == 3)
+        {
+            for (const Impl::AppSub &a : im.app_subs)
+            {
+                const SlaveObject &o = *a.obj;
+                if (o.index != e.index || o.subindex != e.subindex)
+                    continue;
+                co_sub_t *sub = co_dev_find_sub(im.dev, o.index, o.subindex);
+                const size_t n = o.bytes();
+                if (!sub || o.dir != SlaveDirection::FromMaster || o.exch == SlaveExchange::Constant ||
+                    o.string || (n < 8 && (e.value >> (8 * n)) != 0))
+                    break;
+                if ((o.has_min && compare_raw(o.type, e.value, o.min) < 0) ||
+                    (o.has_max && compare_raw(o.type, e.value, o.max) > 0))
+                    break;
+                ok = co_sub_set_val(sub, &e.value, n) == n;
+                break;
+            }
+        }
+        if (ok)
+            ++used;
+        else
+        {
+            ++dropped;
+            if (log)
+                log_warn("%s: stored setting 0x%04X:%02X is not valid for this slave; dropped",
+                         label.c_str(), e.index, e.subindex);
+        }
+    }
+    if (log && (used || dropped))
+        log_info("%s: stored settings applied: %u values, %u dropped", label.c_str(), used, dropped);
+}
+
 SlaveSnapshot Slave::snapshot() const
 {
     std::lock_guard<PiMutex> lock(status_mutex_);
@@ -1286,6 +1564,9 @@ void Slave::reset_node()
     if (im.booting)
         return;
     log_info("%s: reset node", dev_.label().c_str());
+    // Saved or restored since the dictionary was built: build it again with the current values.
+    if (settings_dirty_)
+        im.restart = true;
     const unsigned opened_at = link_bitrate_;
     load_lss_values();
     co_nmt_set_id(im.nmt, pending_node_);
@@ -1660,6 +1941,13 @@ void Slave::thread_main()
                 s.sub = co_dev_find_sub(im.dev, s.obj->index, s.obj->subindex);
         if (co_obj_t *o = co_dev_find_obj(im.dev, 0x1029))
             co_obj_set_dn_ind(o, &Impl::error_dn, nullptr);
+        if (dev_.store_settings)
+            for (uint16_t index : {0x1010, 0x1011})
+                if (co_obj_t *o = co_dev_find_obj(im.dev, index))
+                    co_obj_set_dn_ind(o, &Impl::store_dn, &im);
+        apply_settings(true, true, true);
+        settings_dirty_ = false;
+        im.written      = true;
         co_dev_set_rate(im.dev, pending_kbit_);
         if (co_dev_write_dcf(im.dev, 0x2000, 0x9FFF, &im.app_dcf) == -1)
             return false;
@@ -1867,6 +2155,7 @@ void Slave::thread_main()
                     if (!first_plc)
                     {
                         co_dev_read_dcf(im.dev, nullptr, nullptr, &im.app_dcf);
+                        apply_settings(false, true, false);
                         im.written = true;
                     }
                     im.set_plc_stop(false);
@@ -1913,6 +2202,21 @@ void Slave::thread_main()
                     log_error("%s: cannot forget the stored LSS values: %s", label.c_str(),
                               problem.c_str());
                 co_nmt_cs_ind(im.nmt, CO_NMT_CS_RESET_NODE);
+            }
+            if (forget_settings_.exchange(false))
+            {
+                std::string problem;
+                if (settings_remove(settings_path_, problem))
+                {
+                    log_info("%s: stored settings forgotten; restarting with the project's",
+                             label.c_str());
+                    settings_ = SettingsStored();
+                    publish_settings();
+                    im.restart = true;
+                }
+                else
+                    log_error("%s: cannot forget the stored settings: %s", label.c_str(),
+                              problem.c_str());
             }
             im.install();
             if (im.reset_comm)

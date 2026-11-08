@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "can_link.h"
 #include "config.h"
@@ -24,6 +25,7 @@
 #include "pi_mutex.h"
 #include "plc_api.h"
 #include "plugin_types.h"
+#include "settings_store.h"
 #include "status.h"
 
 namespace lely
@@ -115,6 +117,9 @@ class Slave
     // Forgets the node ID and bit rate an LSS master stored and restarts the slave with the
     // project's values (done by the slave thread). False when the slave's LSS is off.
     bool forget_lss();
+    // Forgets the settings a master saved with 0x1010 and restarts the slave with the project's
+    // values (done by the slave thread). False when `store_settings` is off.
+    bool forget_settings();
 
     SlaveSnapshot snapshot() const;
 
@@ -141,6 +146,15 @@ class Slave
     bool store_lss(uint8_t node_id, uint16_t kbit);
     // A reset node: the stored LSS values, else the project's, for the coming reset communication.
     void reset_node();
+
+    // Settings a master saved with 0x1010 (slave thread, and start()).
+    void load_settings();
+    std::vector<SettingsEntry> collect_settings(unsigned area) const;
+    uint32_t save_settings(unsigned sub);
+    uint32_t restore_settings(unsigned sub);
+    // Writes the stored values of the communication and/or application area into the dictionary.
+    void apply_settings(bool comm, bool app, bool log);
+    void publish_settings();
 
     void publish_plc(uint8_t nmt, uint8_t node_id, bool on_bus, bool watched, bool seen,
                      BusState bus, uint8_t error_register, uint8_t emcy_active);
@@ -178,6 +192,13 @@ class Slave
     std::atomic<bool> plc_running_{false};
     std::atomic<bool> stop_{false};
     std::atomic<bool> forget_{false};
+    std::atomic<bool> forget_settings_{false};
+    // Saved settings: the file, the hash of this configuration, the values in use; `dirty` when
+    // the dictionary was built before the last save or restore. Slave thread only after start().
+    std::string settings_path_;
+    std::string settings_hash_;
+    SettingsStored settings_;
+    bool settings_dirty_ = false;
     // LSS: pending node ID (0xFF unconfigured) and bit rate (kbit/s) as the stack sees them, the
     // serial number, the stored values and the bit rate the link runs at. Slave thread only after
     // start().

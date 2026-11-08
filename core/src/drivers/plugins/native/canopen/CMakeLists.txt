@@ -69,6 +69,7 @@ set(CANOPEN_SLAVE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/slave/slave_dcf.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/slave/slave_link.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/slave/lss_store.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/slave/settings_store.cpp
 )
 
 # The plugin's code without the entry points, shared with the tests.

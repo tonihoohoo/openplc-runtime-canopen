@@ -441,6 +441,12 @@ struct SlaveSnapshot
     unsigned project_bitrate = 0;
     unsigned stored_node_id  = 0; // 0: none stored
     unsigned stored_bitrate  = 0;
+    // Settings a master saved with 0x1010, reported when `store_settings` is on.
+    bool store_settings     = false;
+    bool stored_comm        = false;
+    bool stored_app         = false;
+    unsigned stored_entries = 0;
+    int64_t stored_time     = 0; // wall time of the last save
     // Details for the editor's Online tab; `detailed` is false until the slave is first on the bus.
     bool detailed = false;
     BusStatus bus;

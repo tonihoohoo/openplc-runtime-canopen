@@ -1374,6 +1374,7 @@ bool Parser::parse_device(const cJSON *j, size_t pos, DeviceConfig &dev)
                              "\" is not one of none, pre_operational, stopped");
     }
     get_bool(j, "start_alone", where, dev.start_alone);
+    get_bool(j, "store_settings", where, dev.store_settings);
     parse_slave_lss(j, where, dev.lss);
 
     const cJSON *objects = get_array(j, "objects", where, true);
