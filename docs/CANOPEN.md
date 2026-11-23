@@ -122,7 +122,7 @@ has `lss`.
 
 ```json
 {
-  "version": 13,
+  "version": 14,
   "networks": [
     {
       "name": "CANopen 1",
@@ -185,7 +185,7 @@ change both together.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 13. Older files are refused; build the project again with a matching editor. |
+| `version` | Format version, 14. Older files are refused; build the project again with a matching editor. |
 | `networks`, `devices` | The master networks and the [slave devices](#canopen-slave); either list may be empty or left out, not both. |
 | `interface` | SocketCAN interface, unique per network: 1-15 letters, digits, `_`, `.` or `-`. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
@@ -211,6 +211,7 @@ change both together.
 | `tpdos` / `rpdos` | The node's TPDOs (received by the master, `%I` locations) and RPDOs (sent by the master, `%Q` locations): PDO number on the node, its 11-bit COB-ID, and the mapped entries in mapping order. |
 | `send_period_ms` | RPDOs only: send the PDO again when it has not been sent for this many milliseconds, 1-65535, also when no output changed; absent for none. |
 | `location` | The entry's IEC location. Only a dummy entry (index 0x0001-0x0007, sub-index 0, of the dummy's type) leaves it out: its bits are skipped in a received PDO and sent as zeros. |
+| `bits` | Instead of `location`, for an `UNSIGNED8`, `UNSIGNED16` or `UNSIGNED32` entry: one bit location per bit of the type (8, 16 or 32), bit 0 first, `%IX` in a TPDO and `%QX` in an RPDO. The node still maps and sends one value; each bit of a received value goes to its own `%IX`, and the `%QX` bits form the value sent. Not with `location`, and not on a dummy entry. |
 | `receive_timeout_ms` | TPDOs only: report the PDO late after this many milliseconds without a frame, 1-65535; absent or 0 for no timeout. It is the master RPDO's event timer (0x1400 + n sub 5). |
 | `type` | `BOOLEAN`, `INTEGER8/16/32/64`, `UNSIGNED8/16/32/64`, `REAL32`, `REAL64`. Its size must equal the location's (`BOOLEAN` `%IX/%QX`, 8 bits `B`, 16 `W`, 32 `D`, 64 `L`). |
 
@@ -219,8 +220,8 @@ unknown version, a duplicate interface or node ID, a node ID equal to the master
 bit rate, an interface name with other characters, a reserved or duplicate COB-ID (PDOs, emergencies and TIME), a configuration SDO to
 0x1010 or 0x1011, restore defaults or configuration SDOs on a node with `configure: false`, a PDO
 over 64 bits or with more than 8 entries, a slave object address (also a packed bit) outside the runtime's I/O image, a type that does not fit its
-location, a `%Q` location in a TPDO or a `%I` location in an RPDO, two entries on the same `%I`
-location, or a location outside the runtime's I/O image, an entry without a location that is not a
+location, a `%Q` location in a TPDO or a `%I` location in an RPDO, `bits` with the wrong count, area or type,
+two entries (or entry bits) on the same `%I` location, or a location outside the runtime's I/O image, an entry without a location that is not a
 dummy, an unknown `on_abort`, a `jump_to` that is missing or not a later item, an `lss` without
 vendor ID, product code or serial number, or two nodes of a network with the same LSS address. Two entries on the same `%Q` location are
 a warning.
@@ -240,7 +241,7 @@ with an object dictionary built from the file when the PLC starts.
 
 ```json
 {
-  "version": 13,
+  "version": 14,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "can1", "bitrate": 250000, "node_id": 5, "priority": 90,

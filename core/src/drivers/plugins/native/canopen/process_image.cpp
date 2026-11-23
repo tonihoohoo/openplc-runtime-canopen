@@ -109,6 +109,22 @@ bool slave_addresses_inside(const DeviceConfig &dev, const ImageSizes &sizes,
     return errors.size() == failed;
 }
 
+void ProcessImage::add_slot(const PdoEntry &e, std::vector<Slot> &slots,
+                            std::vector<IecLocation> &bit_locs)
+{
+    Slot slot;
+    slot.used = !e.dummy;
+    if (e.packed())
+    {
+        slot.first_bit = static_cast<uint32_t>(bit_locs.size());
+        slot.bits      = static_cast<uint8_t>(e.bits.size());
+        bit_locs.insert(bit_locs.end(), e.bits.begin(), e.bits.end());
+    }
+    else
+        slot.loc = e.location;
+    slots.push_back(slot);
+}
+
 bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,
                          const ImageSizes &sizes, std::vector<std::string> &errors)
 {
@@ -120,25 +136,30 @@ bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,
                              " lies outside the runtime's I/O image (" +
                              std::to_string(sizes.capacity(loc)) + " entries in its table)");
     };
-    in_locs_.clear();
-    out_locs_.clear();
-    in_used_.clear();
-    out_used_.clear();
+    auto check_entry = [&](const PdoEntry &e)
+    {
+        if (e.dummy)
+            return;
+        if (!e.packed())
+            check(e.location);
+        for (const IecLocation &b : e.bits)
+            check(b);
+    };
+    in_slots_.clear();
+    out_slots_.clear();
+    in_bits_.clear();
+    out_bits_.clear();
     for (const MasterPdo &m : layout.rpdos)
         for (const PdoEntry &e : m.pdo->entries)
         {
-            if (!e.dummy)
-                check(e.location);
-            in_locs_.push_back(e.location);
-            in_used_.push_back(e.dummy ? 0 : 1);
+            check_entry(e);
+            add_slot(e, in_slots_, in_bits_);
         }
     for (const MasterPdo &m : layout.tpdos)
         for (const PdoEntry &e : m.pdo->entries)
         {
-            if (!e.dummy)
-                check(e.location);
-            out_locs_.push_back(e.location);
-            out_used_.push_back(e.dummy ? 0 : 1);
+            check_entry(e);
+            add_slot(e, out_slots_, out_bits_);
         }
     has_state_.clear();
     state_locs_.clear();
@@ -149,8 +170,8 @@ bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,
         if (n.has_state_location)
             check(n.state_location);
     }
-    in_work_.assign(in_locs_.size() + net.nodes.size(), 0);
-    out_work_.assign(out_locs_.size(), 0);
+    in_work_.assign(in_slots_.size() + net.nodes.size(), 0);
+    out_work_.assign(out_slots_.size(), 0);
     in_.resize(in_work_.size());
     out_.resize(out_work_.size());
     scans_.store(0, std::memory_order_release);
@@ -166,7 +187,7 @@ bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,
 
 void ProcessImage::mark_all_down(const NetworkConfig &net, const MasterLayout &layout)
 {
-    for (size_t slot = 0; slot < net.nodes.size() && in_locs_.size() + slot < in_work_.size();
+    for (size_t slot = 0; slot < net.nodes.size() && in_slots_.size() + slot < in_work_.size();
          ++slot)
         set_node_state(slot, 0);
     for (const MasterPdo &m : layout.rpdos)
@@ -176,7 +197,7 @@ void ProcessImage::mark_all_down(const NetworkConfig &net, const MasterLayout &l
             zero = zero || (n.node_id == m.node_id && n.on_loss == OnLoss::Zero);
         if (!zero)
             continue;
-        for (size_t k = 0; k < m.pdo->entries.size() && m.first_entry + k < in_locs_.size(); ++k)
+        for (size_t k = 0; k < m.pdo->entries.size() && m.first_entry + k < in_slots_.size(); ++k)
             set_input(m.first_entry + k, 0);
     }
     commit();
@@ -192,19 +213,35 @@ void ProcessImage::publish(TripleBuffer &buf, const std::vector<uint64_t> &work)
 void ProcessImage::copy_to_plc(const plugin_runtime_args_t &rt)
 {
     const uint64_t *in = in_.latest();
-    for (size_t i = 0; i < in_locs_.size(); ++i)
-        if (in_used_[i])
-            image_write_input(rt, in_locs_[i], in[i]);
+    for (size_t i = 0; i < in_slots_.size(); ++i)
+    {
+        const Slot &s = in_slots_[i];
+        if (!s.used)
+            continue;
+        if (s.bits == 0)
+            image_write_input(rt, s.loc, in[i]);
+        for (unsigned k = 0; k < s.bits; ++k)
+            image_write_input(rt, in_bits_[s.first_bit + k], (in[i] >> k) & 1);
+    }
     for (size_t k = 0; k < has_state_.size(); ++k)
         if (has_state_[k])
-            image_write_input(rt, state_locs_[k], in[in_locs_.size() + k]);
+            image_write_input(rt, state_locs_[k], in[in_slots_.size() + k]);
 }
 
 void ProcessImage::copy_from_plc(const plugin_runtime_args_t &rt)
 {
     rt.image_lock();
-    for (size_t i = 0; i < out_locs_.size(); ++i)
-        out_work_[i] = out_used_[i] ? image_read_output(rt, out_locs_[i]) : 0;
+    for (size_t i = 0; i < out_slots_.size(); ++i)
+    {
+        const Slot &s = out_slots_[i];
+        uint64_t v    = 0;
+        if (s.used && s.bits == 0)
+            v = image_read_output(rt, s.loc);
+        else if (s.used)
+            for (unsigned k = 0; k < s.bits; ++k)
+                v |= (image_read_output(rt, out_bits_[s.first_bit + k]) ? uint64_t(1) : 0) << k;
+        out_work_[i] = v;
+    }
     rt.image_unlock();
     publish(out_, out_work_);
     scans_.fetch_add(1, std::memory_order_acq_rel);

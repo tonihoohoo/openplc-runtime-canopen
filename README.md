@@ -6,7 +6,8 @@
 >
 > The `canopen` plugin drives CANopen nodes on a Linux SocketCAN interface (such as `can0`): it checks
 > and configures each node at start-up with SDOs, exchanges PDOs with the PLC program's located
-> variables every scan cycle, supervises the nodes (heartbeat, reboot of a lost node, bus-off and
+> variables every scan cycle (a node's byte or word can also be split into separate bits,
+> [PDO entries](docs/CANOPEN.md#confcanopenjson)), supervises the nodes (heartbeat, reboot of a lost node, bus-off and
 > stall recovery) and reports their status to the editor. It can give LSS devices their node ID
 > at start-up ([Node IDs over LSS](docs/CANOPEN.md#node-ids-over-lss)), and find the devices without a node ID,
 > give one an ID or set its bit rate on request ([LSS tools](docs/CANOPEN.md#lss-tools)). On another interface it can make the
