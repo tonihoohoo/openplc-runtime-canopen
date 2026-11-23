@@ -97,7 +97,7 @@ class Network : public lely::canopen::BasicMaster
             lely::io::TimerBase &tick, lely::io::CanChannelBase &chan, const std::string &dcf_path,
             const NetworkConfig &cfg, const MasterLayout &layout, ProcessImage &image,
             NetworkStatus &status, ClientQueue *client = nullptr, bool service = false,
-            PlcPort *plc = nullptr);
+            PlcPort *plc = nullptr, bool plc_stopped = false);
     ~Network() override;
 
     // Resets the master, which boots every node, and starts the periodic work. In service mode it
@@ -107,6 +107,14 @@ class Network : public lely::canopen::BasicMaster
     void StopNodes();
     // Marks every node down (the session ends): state 0, inputs held or zeroed.
     void MarkAllDown();
+    // The PLC stopped and the network stays on the bus: the last outputs go out, then each node
+    // gets the PLC-stop NMT command and is supervised in that state; SYNC stops (not with
+    // none). A node that boots meanwhile is left in that state too. Idempotent.
+    void PlcStop();
+    // The PLC started again with the same bus configuration: no reset and no configuration; each
+    // node up is started (or waits for the program), held, lost and set-by-hand nodes are
+    // started or booted again. Idempotent.
+    void PlcStart();
 
     bool IsUp(unsigned node_id) const;
     // With SYNC once per PLC cycle: scans that shared a SYNC with a later scan.
@@ -170,6 +178,7 @@ class Network : public lely::canopen::BasicMaster
         bool seen_stopped    = false;     // its last reported NMT state is stopped
         bool enabled         = true;      // on; off: not booted, supervised or reported
         bool waiting         = false;     // up and pre-operational until the PLC program starts it
+        bool parked          = false;     // in the PLC-stop NMT state while the PLC is stopped
         clock::time_point looked_since{}; // the boot-up timeout runs from here (start or turn-on)
         clock::time_point up_since{};     // when the node last came up
         Problem abort;
@@ -269,6 +278,13 @@ class Network : public lely::canopen::BasicMaster
     void SetListed(const NodeState &node, uint8_t id, bool listed);
     // Starts an up node that waits for the program's start.
     void StartWaiting(NodeState &node, uint8_t id);
+    // The NMT command of the PLC stop (on_stop), parks the node; none: nothing.
+    void Park(NodeState &node, uint8_t id);
+    // Whether the PLC is stopped with a PLC-stop NMT command, so nodes are parked.
+    bool Parking() const
+    {
+        return plc_stopped_ && cfg_.on_stop != OnStop::None;
+    }
     // NMT from a client or the PLC: one node, or with 0 every node of the network.
     void RunNmt(unsigned node, NmtRequest cmd);
     void FinishSdo(uint64_t job, std::error_code ec, std::vector<uint8_t> data);
@@ -303,6 +319,7 @@ class Network : public lely::canopen::BasicMaster
     uint64_t merged_scans_ = 0;
     WriteFailures write_failures_;
     bool running_ = false;
+    bool plc_stopped_; // the PLC is stopped and the network stays on the bus
     ClientQueue *client_;
     bool service_;
     bool client_busy_ = false; // a client or PLC SDO is running

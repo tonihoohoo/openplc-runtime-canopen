@@ -687,8 +687,41 @@ void test_boot_clears_lss_not_found()
     CHECK(node(s, 3).lss.outcome == LssOutcome::Given);
 }
 
+// A PLC stop and start on a network that stays on the bus: one event each, the flag in the JSON,
+// and a parked node shown stopped without its late PDOs.
+void test_plc_stop_kept()
+{
+    NetworkConfig net = two_nodes();
+    NetworkStatus st(net);
+    st.boot_ok(2);
+    CHECK(st.snapshot().plc_running);
+    st.set_plc_running(false);
+    st.set_plc_running(false);
+    st.parked(2);
+    NetworkSnapshot s = st.snapshot();
+    CHECK(!s.plc_running && node(s, 2).state == NodeRun::Stopped && node(s, 2).losses == 0);
+    size_t plc_events = 0;
+    for (const Event &e : s.events)
+        plc_events += e.kind == EventKind::Plc;
+    CHECK(plc_events == 1);
+    CHECK(s.events.front().kind == EventKind::Plc && !s.events.front().open);
+    std::string json = status_json({s}, 0, {});
+    CHECK(json.find("\"plc_running\":false") != std::string::npos);
+    CHECK(json.find("\"kind\":\"plc\"") != std::string::npos);
+    CHECK(json.find("\"running\":false") != std::string::npos);
+    st.set_plc_running(true);
+    s = st.snapshot();
+    CHECK(s.plc_running && s.events.front().kind == EventKind::Plc && s.events.front().open);
+    json = status_json({s}, 0, {});
+    CHECK(json.find("\"plc_running\":true") != std::string::npos);
+    // Service mode has no PLC.
+    st.set_service(true);
+    CHECK(status_json({st.snapshot()}, 0, {}).find("plc_running") == std::string::npos);
+}
+
 int main()
 {
+    test_plc_stop_kept();
     test_boot_clears_lss_not_found();
     test_server_exception();
     test_states_and_reasons();

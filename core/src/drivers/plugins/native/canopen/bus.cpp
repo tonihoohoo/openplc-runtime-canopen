@@ -118,6 +118,37 @@ void Bus::enable_plc(uint8_t index)
         plc_->set_node_info(n.node_id, n.optional, n.program_start, n.enabled);
 }
 
+void Bus::hand_plc(bool stop, std::chrono::milliseconds wait)
+{
+    if (service_)
+        return;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        plc_stop_ = stop;
+    }
+    if (plc_)
+        plc_->set_running(session_running_.load() && !stop);
+    // Also shown while no session runs (the link is missing); a session's master says it again.
+    status_.set_plc_running(!stop);
+    const auto until = std::chrono::steady_clock::now() + wait;
+    while (in_session_.load() && plc_stop_seen_.load() != stop &&
+           std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+}
+
+void Bus::plc_stopped(std::chrono::milliseconds wait)
+{
+    hand_plc(true, wait);
+}
+
+void Bus::plc_started(std::chrono::milliseconds wait)
+{
+    if (plc_)
+        for (const NodeConfig &n : net_.nodes)
+            plc_->request_enable(n.node_id, n.enabled);
+    hand_plc(false, wait);
+}
+
 void Bus::publish_bus(const BusStatus &bus)
 {
     status_.set_bus(bus);
@@ -146,8 +177,9 @@ void Bus::publish_bus(const BusStatus &bus)
 void Bus::set_sessions_running(bool running)
 {
     client_.set_running(running);
+    session_running_ = running;
     if (plc_)
-        plc_->set_running(running);
+        plc_->set_running(running && !plc_stop_.load());
 }
 
 bool Bus::link_lost(bool monitor)
@@ -395,8 +427,12 @@ void Bus::run_session()
             base = chan.get();
         }
 
+        const bool plc_stop = plc_stop_.load();
         Network net(exec, poll, timer, tick, *base, dcf_path_, net_, layout_, image_, status_,
-                    &client_, service_, plc_.get());
+                    &client_, service_, plc_.get(), plc_stop);
+        plc_stop_seen_ = plc_stop;
+        if (plc_stop && !service_)
+            status_.set_plc_running(false);
         session_net_  = &net;
         session_rate_ = 0;
         stall_.clear();
@@ -406,6 +442,7 @@ void Bus::run_session()
             publish_bus(monitor_.simulated());
         net.Start();
         set_sessions_running(true);
+        in_session_ = true;
         if (!session_failure_.empty())
         {
             log_info("the CANopen session runs again");
@@ -420,6 +457,18 @@ void Bus::run_session()
             loop.run_for(kLoopSlice);
             if (loop.stopped())
                 break;
+            if (!shut_down && !service_)
+            {
+                const bool want = plc_stop_.load();
+                if (want != plc_stop_seen_.load())
+                {
+                    if (want)
+                        net.PlcStop();
+                    else
+                        net.PlcStart();
+                    plc_stop_seen_ = want;
+                }
+            }
             bool monitor = ++polls % kMonitorSlices == 0;
             if (!shut_down && (stop_ || link_lost(monitor)))
             {
@@ -448,6 +497,7 @@ void Bus::run_session()
                 break;
             }
         }
+        in_session_ = false;
         set_sessions_running(false);
         session_net_ = nullptr;
         net.MarkAllDown();
@@ -457,6 +507,7 @@ void Bus::run_session()
     }
     catch (const std::exception &e)
     {
+        in_session_  = false;
         session_net_ = nullptr;
         set_sessions_running(false);
         // As at the end of a session: no node is up, and inputs follow each node's on_loss.

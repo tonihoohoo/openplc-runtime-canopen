@@ -50,7 +50,12 @@ class Requests
     virtual bool job(uint64_t id, JobResult &out) = 0;
     // Opens service mode; an empty string on success, else the refusal reason.
     virtual std::string service_open(const ServiceRequest &req) = 0;
-    virtual void service_close()                                = 0;
+    // The number a client addresses the service mode network by, once it is open.
+    virtual size_t service_index()
+    {
+        return 0;
+    }
+    virtual void service_close() = 0;
     // Forgets the stored LSS values of slave `name`; an empty string on success, else the reason.
     virtual std::string slave_lss_forget(const std::string &name) = 0;
     // Forgets the settings a master saved into slave `name`; an empty string on success.

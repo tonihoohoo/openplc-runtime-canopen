@@ -9,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 
@@ -46,6 +47,52 @@ std::string hex(unsigned v, int width)
 std::string object_text(uint16_t index, uint8_t subindex)
 {
     return hex(index, 4) + ":" + std::to_string(subindex);
+}
+
+// Drops what only maps the network to the PLC (IEC locations, aliases, bit locations) from a
+// copy of a network's JSON; a packed entry keeps its bit count.
+void strip_plc_side(cJSON *j)
+{
+    if (!j)
+        return;
+    if (cJSON_IsObject(j))
+    {
+        cJSON_DeleteItemFromObjectCaseSensitive(j, "location");
+        cJSON_DeleteItemFromObjectCaseSensitive(j, "state_location");
+        cJSON_DeleteItemFromObjectCaseSensitive(j, "alias");
+        if (cJSON *bits = cJSON_GetObjectItemCaseSensitive(j, "bits"))
+            if (cJSON_IsArray(bits))
+                cJSON_ReplaceItemInObjectCaseSensitive(
+                    j, "bits", cJSON_CreateNumber(cJSON_GetArraySize(bits)));
+    }
+    cJSON *c = nullptr;
+    cJSON_ArrayForEach(c, j)
+    {
+        strip_plc_side(c);
+    }
+}
+
+struct JsonDeleter
+{
+    void operator()(cJSON *j) const
+    {
+        cJSON_Delete(j);
+    }
+    void operator()(char *text) const
+    {
+        cJSON_free(text);
+    }
+};
+using JsonPtr = std::unique_ptr<cJSON, JsonDeleter>;
+
+std::string network_bus_key(const cJSON *j)
+{
+    JsonPtr copy(cJSON_Duplicate(j, 1));
+    if (!copy)
+        return std::string();
+    strip_plc_side(copy.get());
+    std::unique_ptr<char, JsonDeleter> text(cJSON_PrintUnformatted(copy.get()));
+    return text ? std::string(text.get()) : std::string();
 }
 
 class Parser
@@ -307,6 +354,7 @@ bool Parser::parse_network(const cJSON *j, size_t pos, NetworkConfig &net)
         error(where, "must be an object");
         return false;
     }
+    net.bus_key = network_bus_key(j);
     get_string(j, "name", where, net.name, false);
     get_string(j, "interface", where, net.interface, true);
     if (!net.interface.empty() || !net.name.empty())
@@ -1594,16 +1642,14 @@ bool is_standard_bitrate(unsigned bitrate)
 bool parse_config(const std::string &text, Config &cfg, std::vector<std::string> &errors)
 {
     cfg         = Config();
-    cJSON *root = cJSON_ParseWithLength(text.data(), text.size());
+    JsonPtr root(cJSON_ParseWithLength(text.data(), text.size()));
     if (!root)
     {
         errors.push_back("the configuration is not valid JSON");
         return false;
     }
     Parser p(cfg, errors);
-    bool ok = p.parse(root);
-    cJSON_Delete(root);
-    return ok;
+    return p.parse(root.get());
 }
 
 bool load_config(const std::string &path, Config &cfg, std::vector<std::string> &errors)

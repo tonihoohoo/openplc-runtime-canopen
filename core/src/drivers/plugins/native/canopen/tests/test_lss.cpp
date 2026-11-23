@@ -456,7 +456,7 @@ int main()
         JobResult rate = run_job(q, lss_job(LssOnline::Action::SetBitrate, 0x5678, 0, true,
                                             250000),
                                  std::chrono::seconds(5));
-        CHECK(rate.state == JobResult::State::Failed && rate.reason == "needs_service_mode");
+        CHECK(rate.state == JobResult::State::Failed && rate.reason == "needs_plc_stopped");
 
         JobResult given = run_job(q, lss_job(LssOnline::Action::SetId, 0x5678, 4, true),
                                   std::chrono::seconds(5));
