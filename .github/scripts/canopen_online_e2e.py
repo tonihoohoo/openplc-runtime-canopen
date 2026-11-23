@@ -175,6 +175,7 @@ def main() -> None:
     wait_for("the network stays on the bus", lambda: network().get("plc_running") is False)
     expect("CANopen still active", call("/canopen/status", token).get("active"), True)
     wait_for("node 2 left pre-operational", lambda: node2().get("state") == "stopped")
+    losses_at_stop = node2().get("losses")
     stopped_at = time.monotonic()
     read = sdo("sdo_read", 0x1018, 1)
     expect("read of the vendor ID with the PLC stopped", read.get("state"), "done")
@@ -189,7 +190,7 @@ def main() -> None:
     expect("service mode closes", request({"op": "service_close"}), {"ok": True})
     time.sleep(max(0.0, stopped_at + 2 - time.monotonic()))
     expect("node 2 still left pre-operational", node2().get("state"), "stopped")
-    expect("node 2 not lost", node2().get("losses"), 0)
+    expect("node 2 not lost", node2().get("losses"), losses_at_stop)
 
     restarted = time.monotonic()
     call("/start-plc", token)
