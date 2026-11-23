@@ -220,7 +220,7 @@ std::string service_open(const cJSON *req, Requests &target)
     std::string reason = target.service_open(s);
     if (!reason.empty())
         return error(reason.c_str());
-    return "{\"ok\":true,\"network\":0}";
+    return "{\"ok\":true,\"network\":" + std::to_string(target.service_index()) + "}";
 }
 
 } // namespace

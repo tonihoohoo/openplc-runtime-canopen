@@ -3,8 +3,8 @@
 
 Needs the e2e project running with the simulated node 2 and two simulated devices without a node
 ID (serial numbers 0x5678 and 0x5679) on the bus. Finds the two devices while node 2 runs, gives
-the first node ID 4 with store, then stops the PLC, opens service mode, sets the second device's
-bit rate to 125 kbit/s, closes service mode and starts the PLC again.
+the first node ID 4 with store, then stops the PLC, sets the second device's bit rate to
+125 kbit/s on the network that stays on the bus, and starts the PLC again.
 
     canopen_lss_e2e.py --user ci --password secret --interface vcan0
 """
@@ -53,6 +53,12 @@ def main() -> None:
                 return str(n["state"])
         return ""
 
+    def plc_running() -> object:
+        nets = call("/canopen/status", token).get("networks")
+        if not isinstance(nets, list) or not nets:
+            return None
+        return nets[0].get("plc_running")
+
     wait_for("node 2 operational", lambda: node2_state() == "operational", 60)
     found = job({"op": "lss", "network": 0, "action": "find"})
     expect("find", found.get("state"), "done")
@@ -94,25 +100,13 @@ def main() -> None:
     expect(
         "bit rate refused while the PLC runs",
         job(bitrate),
-        {"state": "failed", "reason": "needs_service_mode"},
+        {"state": "failed", "reason": "needs_plc_stopped"},
     )
 
     call("/stop-plc", token)
     wait_for("PLC stopped", lambda: "STOPPED" in str(call("/status", token).get("status", "")))
-    wait_for("CANopen stopped", lambda: call("/canopen/status", token).get("active") is False)
-    service: Json = {
-        "op": "service_open",
-        "name": "canopen_1",
-        "interface": args.interface,
-        "bitrate": 0,
-        "master_node_id": 127,
-        "sdo_timeout_ms": 1000,
-        "nodes": [2],
-    }
-    expect("service mode opens", request(service), {"ok": True, "network": 0})
+    wait_for("the network stays on the bus", lambda: plc_running() is False)
     expect("bit rate set and stored", job(bitrate), {"state": "done", "stored": True})
-    expect("service mode closes", request({"op": "service_close"}), {"ok": True})
-    wait_for("service mode closed", lambda: call("/canopen/status", token).get("active") is False)
     call("/start-plc", token)
     wait_for("node 2 operational after the PLC start", lambda: node2_state() == "operational", 60)
     print("PASS")

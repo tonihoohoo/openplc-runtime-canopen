@@ -69,6 +69,16 @@ class Bus
     void start();
     // Sends the network's NMT command for a PLC stop, ends the session and joins. Idempotent.
     void stop();
+    // The PLC stopped: the network stays on the bus (Network::PlcStop) and the blocks' requests
+    // end. Waits up to `wait` for the bus thread to take it. Not in service mode.
+    void plc_stopped(std::chrono::milliseconds wait = std::chrono::milliseconds(1000));
+    // The PLC starts again on this network (Network::PlcStart); the program's node on/off
+    // requests go back to the configured settings. Waits up to `wait`, as plc_stopped().
+    void plc_started(std::chrono::milliseconds wait = std::chrono::milliseconds(1000));
+    bool plc_running() const
+    {
+        return !plc_stop_.load();
+    }
     // Client requests to this network (the online tools); served while a session runs.
     ClientQueue &client()
     {
@@ -110,6 +120,9 @@ class Bus
     // Records the bus state in the status and for the blocks.
     void publish_bus(const BusStatus &bus);
     void set_sessions_running(bool running);
+    // Hands a PLC stop or start to the session and waits until it took it, the thread is not in
+    // a session, or `wait` passed.
+    void hand_plc(bool stop, std::chrono::milliseconds wait);
 
     const NetworkConfig &net_;
     const MasterLayout &layout_;
@@ -132,6 +145,10 @@ class Bus
     bool reset_forbidden_       = false;   // not permitted to reset; said once
     std::thread thread_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> plc_stop_{false};      // the PLC is stopped (wanted state)
+    std::atomic<bool> plc_stop_seen_{false}; // the session's master took plc_stop_
+    std::atomic<bool> in_session_{false};
+    std::atomic<bool> session_running_{false}; // a session runs; with !plc_stop_, blocks served
     std::atomic<bool> realtime_{false};
     bool realtime_warned_ = false;
     bool restart_noted_   = false;

@@ -4,7 +4,8 @@
 // exception leaves them, a failed start leaves no network running and a later start works. Also:
 // service mode is refused while a start is under way (needs the plugin's socket; skipped without).
 // Also: service mode opens after a cleanup, and with per-table sizes from the runtime each
-// location is checked against its own table.
+// location is checked against its own table. Also: the networks stay on the bus after a PLC stop
+// until an init finds the plugin off, and service mode is refused on their interfaces.
 
 #include <cstdarg>
 #include <cstdio>
@@ -243,6 +244,47 @@ int main()
     cycle_start();
     cycle_end();
     stop_loop();
+
+    // The networks stay on the bus after a PLC stop. An init that finds the plugin on in the
+    // runtime's plugin list and the configuration unchanged keeps them; one that finds the plugin
+    // off ends them.
+    char cwd[512];
+    CHECK(getcwd(cwd, sizeof(cwd)) != nullptr);
+    CHECK(chdir(dir) == 0);
+    auto plugin_list = [&conf](bool on)
+    {
+        std::ofstream out("plugins.conf");
+        out << "# name,library,enabled,type,config,venv\n"
+            << "other,./other.so,1,1,./other.json,\n"
+            << "canopen,./libcanopen_plugin.so," << (on ? 1 : 0) << ",1," << conf << ",\n";
+    };
+    const bool socket = !ask(R"({"op":"status"})").empty();
+    if (socket)
+    {
+        const std::string kept = ask(R"({"op":"status"})");
+        CHECK(kept.find("\"active\":true") != std::string::npos);
+        CHECK(kept.find("\"plc_running\":false") != std::string::npos);
+        const std::string used = ask(R"({"op":"service_open","interface":"cotest-none0",)"
+                                     R"("bitrate":0,"master_node_id":1,"sdo_timeout_ms":500,)"
+                                     R"("nodes":[2]})");
+        CHECK(used.find("interface_in_use") != std::string::npos);
+    }
+    plugin_list(true);
+    CHECK(init(&rt) == 0);
+    if (socket)
+        CHECK(ask(R"({"op":"status"})").find("\"plc_running\":false") != std::string::npos);
+    CHECK(start_loop() == 0);
+    if (socket)
+        CHECK(ask(R"({"op":"status"})").find("\"plc_running\":true") != std::string::npos);
+    cycle_start();
+    cycle_end();
+    stop_loop();
+    plugin_list(false);
+    CHECK(init(&rt) == 0);
+    if (socket)
+        CHECK(ask(R"({"op":"status"})").find("\"active\":false") != std::string::npos);
+    std::remove("plugins.conf");
+    CHECK(chdir(cwd) == 0);
 
     // A start that waits on its configuration (a FIFO) keeps service mode closed until it ends.
     if (ask(R"({"op":"status"})").empty())

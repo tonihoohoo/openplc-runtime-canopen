@@ -163,7 +163,8 @@ enum class EventKind : uint8_t
     Service,    // service mode opened or closed
     NodeOn,     // the PLC program turned a node on
     NodeOff,    // the PLC program turned a node off
-    Lss         // the outcome of giving a node its ID over LSS
+    Lss,        // the outcome of giving a node its ID over LSS
+    Plc         // the PLC started or stopped while the network ran on
 };
 
 // The outcome of giving a node its node ID over LSS (CiA 305).
@@ -220,7 +221,7 @@ struct Event
     NmtRequest command = NmtRequest::Start;  // NmtCommand
     bool by_program    = false;              // NmtCommand: sent by the PLC program
     bool waits         = false;              // BootOk: waits for the PLC program's start
-    bool open          = false;              // Service
+    bool open          = false;              // Service; Plc: the PLC runs
     OnAbort policy     = OnAbort::Stop;      // SdoAbort
     LssResult lss;                           // Lss
 };
@@ -253,7 +254,8 @@ struct NodeStatus
 
 struct NetworkSnapshot
 {
-    bool service = false; // service mode
+    bool service     = false; // service mode
+    bool plc_running = true;  // false: the PLC stopped and the network stays on the bus
     std::string name;
     std::string interface;
     BusStatus bus;
@@ -309,6 +311,10 @@ class NetworkStatus
     void link_reset(ResetOutcome outcome, ResetCause cause = ResetCause::BusOff);
     // Every node stopped (the PLC stopped).
     void stop_all();
+    // The PLC stopped or started while the network stays on the bus; an event either way.
+    void set_plc_running(bool running);
+    // A node left in its PLC-stop NMT state while the PLC is stopped.
+    void parked(unsigned node);
     // Stopped or pre-operational by a client's NMT command; the NMT state comes from the node.
     void manual(unsigned node);
     // A held node released by a client: no longer held, booting.

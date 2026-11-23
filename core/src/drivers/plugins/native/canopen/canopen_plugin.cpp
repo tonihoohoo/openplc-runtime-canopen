@@ -4,21 +4,25 @@
 //
 //   init:        copies the runtime arguments, routes the log and opens the plugin's socket (one
 //                idle thread); it runs at power-on even when the plugin is disabled, so nothing
-//                touches a bus until a PLC start or a service mode request
-//   start_loop:  closes service mode, loads conf/canopen.json, builds each network's master DCF
-//                and process image and starts one bus thread per network
+//                touches a bus until a PLC start or a service mode request. Before a new start it
+//                ends the kept networks and slaves the new configuration changes or drops
+//   start_loop:  closes service mode, loads conf/canopen.json, gives each unchanged kept network
+//                the new image locations and starts its nodes again, and builds each other
+//                network's master DCF and process image and starts its bus thread
 //   cycle_start: writes the newest inputs to %I through the journal
 //   cycle_end:   reads %Q under the image lock and hands it to the bus threads
-//   stop_loop:   sends each network's NMT command for a PLC stop and joins the bus threads
-//   cleanup:     closes service mode; runs at every PLC stop, so the socket stays open for service
-//                mode while the PLC is stopped
+//   stop_loop:   detaches the networks from the image and sends each one's NMT command for a
+//                PLC stop; the networks stay on the bus (heartbeat, supervision, client requests)
+//   cleanup:     closes service mode; runs at every PLC stop, so the socket stays open
 //   canopen_plc_api: the table the canopen function block library calls (plc_api.h)
 // The library is linked with -z nodelete, so it is never unmapped and its table stays valid for
-// the blocks; its globals live across a cleanup and a new init.
+// the blocks; its globals live across a cleanup and a new init. The kept networks end at exit.
 // While the PLC is stopped, a client of the socket can open one network in service mode with the
-// settings it sends; it closes on request, at a PLC start, at cleanup and after kServiceIdle.
+// settings it sends, on an interface no kept network or slave uses; it closes on request, at a
+// PLC start, at cleanup and after kServiceIdle.
 // No exception leaves an entry point: the runtime calls them as C functions.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -49,22 +53,33 @@ using namespace canopen_plugin;
 namespace
 {
 
+// One network of the master. It stays on the bus from the PLC start that started it until its bus
+// configuration changes, an init cannot confirm it, or the process ends; a PLC stop only parks it.
+struct Net
+{
+    NetworkConfig cfg; // the bus side; the PLC side of a later run only relocates the image
+    MasterLayout layout;
+    ProcessImage image;
+    std::unique_ptr<NetworkStatus> status;
+    std::unique_ptr<Bus> bus;
+    size_t index = 0; // its place in the configuration's network list
+};
+
 struct Running
 {
     Config cfg;
-    std::vector<MasterLayout> layouts;
-    std::vector<std::unique_ptr<ProcessImage>> images;
-    std::vector<std::unique_ptr<NetworkStatus>> statuses;
-    std::vector<std::unique_ptr<Bus>> buses;
+    std::vector<Net *> nets;     // owned by g_nets
     std::vector<Slave *> slaves; // owned by g_slaves
 };
 
 plugin_runtime_args_t g_args;
 bool g_have_args = false;
-// g_run and g_service are replaced under g_mutex; the scan hooks read g_run behind g_active.
+// g_run, g_nets and g_service are replaced under g_mutex; the scan hooks read g_run behind
+// g_active. g_nets changes only in init, start_loop and at exit, never while the PLC runs.
 std::mutex g_mutex;
 std::unique_ptr<Running> g_run;
-std::unique_ptr<Running> g_service;
+std::vector<std::unique_ptr<Net>> g_nets; // in configuration order
+std::unique_ptr<Net> g_service;
 bool g_starting = false; // a PLC start is under way; service mode stays closed
 std::chrono::steady_clock::time_point g_last_request;
 std::atomic<bool> g_active{false};
@@ -74,6 +89,7 @@ std::unique_ptr<StatusServer> g_server;
 std::vector<std::unique_ptr<Slave>> g_slaves;
 
 constexpr std::chrono::minutes kServiceIdle{5};
+constexpr const char *kPluginsConf = "./plugins.conf";
 
 void runtime_sink(LogLevel level, const char *msg)
 {
@@ -120,12 +136,22 @@ std::vector<SlaveSnapshot> slave_snapshots()
     return out;
 }
 
-std::string status_answer(const Running &run)
+// The networks a client addresses, by their number from 0: the kept ones, then service mode.
+std::vector<Net *> client_nets()
+{
+    std::vector<Net *> out;
+    for (const auto &n : g_nets)
+        out.push_back(n.get());
+    if (g_service)
+        out.push_back(g_service.get());
+    return out;
+}
+
+std::string status_answer()
 {
     std::vector<NetworkSnapshot> nets;
-    nets.reserve(run.statuses.size());
-    for (const auto &s : run.statuses)
-        nets.push_back(s->snapshot());
+    for (Net *n : client_nets())
+        nets.push_back(n->status->snapshot());
     return status_json(nets, wall_ms(), slave_snapshots());
 }
 
@@ -154,71 +180,136 @@ void drop_changed_slaves(const Config *cfg)
         s->stop();
 }
 
-// After a new upload: slaves the new program no longer runs leave the bus before it starts.
-void check_slaves_at_init()
+// Ends networks taken out of g_nets or g_service: each sends its PLC-stop NMT command and leaves.
+void end_nets(std::vector<std::unique_ptr<Net>> nets)
 {
-    if (g_slaves.empty())
+    for (auto &n : nets)
+        n->bus->stop();
+    for (size_t i = 0; i < nets.size(); ++i)
+        release_wake_signal();
+}
+
+// Whether `cfg` runs the kept network `kept` unchanged on the bus side.
+bool same_network(const Config &cfg, const Net &kept)
+{
+    return kept.index < cfg.networks.size() && cfg.networks[kept.index].bus_key == kept.cfg.bus_key;
+}
+
+// Ends the kept networks the configuration `cfg` does not run unchanged (all of them without one).
+void drop_changed_networks(const Config *cfg, const char *why)
+{
+    std::vector<std::unique_ptr<Net>> gone;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (auto it = g_nets.begin(); it != g_nets.end();)
+        {
+            if (cfg && same_network(*cfg, **it))
+                ++it;
+            else
+            {
+                gone.push_back(std::move(*it));
+                it = g_nets.erase(it);
+            }
+        }
+    }
+    for (const auto &n : gone)
+        log_info("%s leaves the bus (%s)", n->cfg.label().c_str(), why);
+    end_nets(std::move(gone));
+}
+
+// Whether the runtime's plugin list enables the plugin whose configuration file is `path`: its
+// line is "name,library,enabled,type,config,venv". False when the list cannot tell.
+bool listed_enabled(const char *list, const std::string &path)
+{
+    std::ifstream in(list);
+    std::string line;
+    while (std::getline(in, line))
+    {
+        if (line.empty() || line[0] == '#')
+            continue;
+        std::vector<std::string> fields;
+        size_t from = 0;
+        for (;;)
+        {
+            size_t comma = line.find(',', from);
+            fields.push_back(
+                line.substr(from, comma == std::string::npos ? std::string::npos : comma - from));
+            if (comma == std::string::npos)
+                break;
+            from = comma + 1;
+        }
+        if (fields.size() >= 5 && fields[4] == path)
+            return fields[2] == "1";
+    }
+    return false;
+}
+
+// Before a new PLC start: the slaves and kept networks the new program no longer runs unchanged
+// leave the bus. Kept networks also leave when the plugin is off or the file cannot be read.
+void check_at_init()
+{
+    if (g_slaves.empty() && g_nets.empty())
         return;
     Config cfg;
     std::vector<std::string> errors;
     const char *path = g_args.plugin_specific_config_file_path;
-    if (path && *path && load_config(path, cfg, errors))
-        drop_changed_slaves(&cfg);
-    else
-        drop_changed_slaves(nullptr);
-}
-
-// Stops the buses of a run taken out of g_run or g_service.
-void stop_run(std::unique_ptr<Running> run)
-{
-    if (!run)
+    const bool loaded = path && *path && load_config(path, cfg, errors);
+    drop_changed_slaves(loaded ? &cfg : nullptr);
+    if (g_nets.empty())
         return;
-    for (auto &bus : run->buses)
-        bus->stop();
-    run.reset();
-    release_wake_signal();
+    if (!loaded)
+        drop_changed_networks(nullptr, "no valid CANopen configuration");
+    else if (!listed_enabled(kPluginsConf, path))
+        drop_changed_networks(nullptr, "the CANopen plugin is off");
+    else
+        drop_changed_networks(&cfg, "the new program changes it");
 }
 
 void close_service(const char *why)
 {
-    std::unique_ptr<Running> svc;
+    std::unique_ptr<Net> svc;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         svc = std::move(g_service);
     }
     if (!svc)
         return;
-    svc->statuses.front()->set_service(false);
-    stop_run(std::move(svc));
+    svc->status->set_service(false);
+    std::vector<std::unique_ptr<Net>> nets;
+    nets.push_back(std::move(svc));
+    end_nets(std::move(nets));
     log_info("CANopen service mode closed (%s)", why);
+}
+
+bool write_dcf(const Net &net, const std::string &path)
+{
+    if (write_file(path, master_dcf(net.cfg, net.layout)))
+        return true;
+    log_error("%s: cannot write the master configuration %s", net.cfg.label().c_str(),
+              path.c_str());
+    return false;
 }
 
 std::string open_service(const ServiceRequest &req)
 {
-    std::unique_ptr<Running> run(new Running);
-    run->cfg.networks.push_back(service_network(req));
-    const NetworkConfig &cfg = run->cfg.networks.front();
-    run->layouts.push_back(master_layout(cfg));
+    std::unique_ptr<Net> net(new Net);
+    net->cfg    = service_network(req);
+    net->layout = master_layout(net->cfg);
     std::vector<std::string> errors;
-    std::unique_ptr<ProcessImage> image(new ProcessImage);
-    if (!image->build(cfg, run->layouts.front(), ImageSizes(), errors))
+    if (!net->image.build(net->cfg, net->layout, ImageSizes(), errors))
         return "error";
-    run->images.push_back(std::move(image));
     std::string dir =
         g_have_args ? config_dir(g_args.plugin_specific_config_file_path) : std::string("/tmp");
     std::string dcf = dir + "/canopen_service.dcf";
-    if (!write_file(dcf, master_dcf(cfg, run->layouts.front())))
-    {
-        log_error("cannot write the service mode configuration %s", dcf.c_str());
+    if (!write_dcf(*net, dcf))
         return "error";
-    }
-    run->statuses.emplace_back(new NetworkStatus(cfg));
-    run->statuses.front()->set_service(true);
-    run->buses.emplace_back(new Bus(cfg, run->layouts.front(), *run->images.front(),
-                                    *run->statuses.front(), dcf, nullptr, nullptr, true));
+    net->status.reset(new NetworkStatus(net->cfg));
+    net->status->set_service(true);
+    net->bus.reset(
+        new Bus(net->cfg, net->layout, net->image, *net->status, dcf, nullptr, nullptr, true));
     prepare_wake_signal();
-    run->buses.front()->start();
-    g_service = std::move(run);
+    net->bus->start();
+    g_service = std::move(net);
     log_info("CANopen service mode open on %s at %u bit/s, %zu node(s)", req.interface.c_str(),
              req.bitrate, req.nodes.size());
     return "";
@@ -229,39 +320,34 @@ class PluginRequests : public Requests
   public:
     std::string status() override
     {
-        if (g_run)
-            return status_answer(*g_run);
-        if (g_service)
-            return status_answer(*g_service);
-        return inactive_status_json(slave_snapshots());
+        if (g_nets.empty() && !g_service)
+            return inactive_status_json(slave_snapshots());
+        return status_answer();
     }
 
     Lookup network(size_t net, unsigned node, ClientQueue *&queue) override
     {
-        Running *run = current();
-        if (!run)
+        const std::vector<Net *> nets = client_nets();
+        if (nets.empty())
             return Lookup::NotRunning;
-        if (net >= run->buses.size())
+        if (net >= nets.size())
             return Lookup::UnknownNetwork;
         if (node)
         {
             bool known = false;
-            for (const NodeConfig &n : run->cfg.networks[net].nodes)
+            for (const NodeConfig &n : nets[net]->cfg.nodes)
                 known = known || n.node_id == node;
             if (!known)
                 return Lookup::UnknownNode;
         }
-        queue = &run->buses[net]->client();
+        queue = &nets[net]->bus->client();
         return Lookup::Ok;
     }
 
     bool job(uint64_t id, JobResult &out) override
     {
-        Running *run = current();
-        if (!run)
-            return false;
-        for (auto &bus : run->buses)
-            if (bus->client().result(id, out))
+        for (Net *n : client_nets())
+            if (n->bus->client().result(id, out))
                 return true;
         return false;
     }
@@ -272,10 +358,18 @@ class PluginRequests : public Requests
             return "plc_running";
         if (g_service)
             return "busy";
+        for (const auto &n : g_nets)
+            if (n->cfg.interface == req.interface)
+                return "interface_in_use";
         for (const auto &s : g_slaves)
             if (s->config().interface == req.interface)
-                return "busy";
+                return "interface_in_use";
         return open_service(req);
+    }
+
+    size_t service_index() override
+    {
+        return g_nets.size();
     }
 
     void service_close() override
@@ -301,12 +395,6 @@ class PluginRequests : public Requests
 
     // A close asked by the last request, done after g_mutex is released.
     bool closing_ = false;
-
-  private:
-    Running *current()
-    {
-        return g_run ? g_run.get() : g_service.get();
-    }
 };
 
 std::string answer_request(const std::string &request)
@@ -343,7 +431,7 @@ int do_init(void *args)
     g_have_args = true;
     set_log_sink(runtime_sink);
     route_lely_diagnostics();
-    check_slaves_at_init();
+    check_at_init();
     if (!g_server)
     {
         std::unique_ptr<StatusServer> server(
@@ -394,14 +482,25 @@ ImageSizes runtime_image_sizes()
     return sizes;
 }
 
-// A start that fails after slaves began: they report a stopped PLC and leave the bus.
+// A start that fails after slaves or networks began: the slaves report a stopped PLC and leave
+// the bus, and so do the kept networks.
 int fail_start(Running &run)
 {
     for (Slave *sl : run.slaves)
         sl->set_plc_running(false);
     run.slaves.clear();
     drop_changed_slaves(nullptr);
+    drop_changed_networks(nullptr, "the PLC start failed");
     return -1;
+}
+
+Net *kept_network(size_t index)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (auto &n : g_nets)
+        if (n->index == index)
+            return n.get();
+    return nullptr;
 }
 
 int do_start_loop()
@@ -426,6 +525,7 @@ int do_start_loop()
         for (const auto &e : errors)
             log_error("%s", e.c_str());
         log_error("%s refused; the CANopen master does not run", path.c_str());
+        drop_changed_networks(nullptr, "no valid CANopen configuration");
         return -1;
     }
     for (const auto &w : run->cfg.warnings)
@@ -438,6 +538,7 @@ int do_start_loop()
         for (const auto &e : errors)
             log_error("%s", e.c_str());
         log_error("%s refused; the CANopen master does not run", path.c_str());
+        drop_changed_networks(nullptr, "the configuration was refused");
         return -1;
     }
 
@@ -471,45 +572,66 @@ int do_start_loop()
         run->slaves.push_back(found);
     }
 
-    const size_t count = run->cfg.networks.size();
-    run->layouts.reserve(count);
+    // Networks: an unchanged kept one gets the new program's image locations and goes on; a
+    // changed one leaves the bus before the new ones start, which boot every node.
+    drop_changed_networks(&run->cfg, "the new program changes it");
+    const ImageSizes sizes = runtime_image_sizes();
+    const size_t count     = run->cfg.networks.size();
+    std::vector<Net *> kept;
+    std::vector<std::unique_ptr<Net>> fresh;
     for (size_t i = 0; i < count; ++i)
     {
-        const NetworkConfig &net = run->cfg.networks[i];
-        run->layouts.push_back(master_layout(net));
-        std::unique_ptr<ProcessImage> image(new ProcessImage);
-        if (!image->build(net, run->layouts.back(), runtime_image_sizes(), errors))
+        const NetworkConfig &cfg = run->cfg.networks[i];
+        if (Net *k = kept_network(i))
+        {
+            if (!k->image.relocate(cfg, master_layout(cfg), sizes, errors))
+            {
+                for (const auto &e : errors)
+                    log_error("%s", e.c_str());
+                return fail_start(*run);
+            }
+            kept.push_back(k);
+            run->nets.push_back(k);
+            continue;
+        }
+        std::unique_ptr<Net> net(new Net);
+        net->cfg    = cfg;
+        net->index  = i;
+        net->layout = master_layout(net->cfg);
+        if (!net->image.build(net->cfg, net->layout, sizes, errors))
         {
             for (const auto &e : errors)
                 log_error("%s", e.c_str());
             return fail_start(*run);
         }
-        run->images.push_back(std::move(image));
-    }
-    for (size_t i = 0; i < count; ++i)
-    {
-        const NetworkConfig &net = run->cfg.networks[i];
-        std::string dcf = config_dir(path) + "/canopen_master_" + std::to_string(i) + ".dcf";
-        if (!write_file(dcf, master_dcf(net, run->layouts[i])))
-        {
-            log_error("%s: cannot write the master configuration %s", net.label().c_str(),
-                      dcf.c_str());
+        if (!write_dcf(*net, config_dir(path) + "/canopen_master_" + std::to_string(i) + ".dcf"))
             return fail_start(*run);
-        }
-        run->statuses.emplace_back(new NetworkStatus(net));
-        run->buses.emplace_back(
-            new Bus(net, run->layouts[i], *run->images[i], *run->statuses.back(), dcf));
-        run->buses.back()->enable_plc(static_cast<uint8_t>(i));
+        net->status.reset(new NetworkStatus(net->cfg));
+        net->bus.reset(new Bus(net->cfg, net->layout, net->image, *net->status,
+                               config_dir(path) + "/canopen_master_" + std::to_string(i) + ".dcf"));
+        net->bus->enable_plc(static_cast<uint8_t>(i));
+        run->nets.push_back(net.get());
+        fresh.push_back(std::move(net));
     }
-    prepare_wake_signal();
-    for (auto &bus : run->buses)
-        bus->start();
+    for (Net *k : kept)
+        k->bus->plc_started();
+    for (auto &n : fresh)
+    {
+        prepare_wake_signal();
+        n->bus->start();
+    }
     {
         std::lock_guard<std::mutex> lock(g_mutex);
+        for (auto &n : fresh)
+            g_nets.push_back(std::move(n));
+        std::sort(g_nets.begin(), g_nets.end(),
+                  [](const std::unique_ptr<Net> &a, const std::unique_ptr<Net> &b)
+                  { return a->index < b->index; });
         g_run = std::move(run);
     }
     g_active.store(true, std::memory_order_release);
-    log_info("CANopen running, %zu network(s), %zu slave(s)", count, g_run->slaves.size());
+    log_info("CANopen running, %zu network(s) (%zu kept on the bus), %zu slave(s)", count,
+             kept.size(), g_run->slaves.size());
     return 0;
 }
 
@@ -525,9 +647,32 @@ void do_stop_loop()
     }
     for (Slave *s : run->slaves)
         s->set_plc_running(false);
-    stop_run(std::move(run));
-    log_info("CANopen stopped");
+    for (Net *n : run->nets)
+        n->bus->plc_stopped();
+    log_info("CANopen PLC stopped; %zu network(s) stay on the bus", run->nets.size());
 }
+
+// At process exit: the kept networks and service mode end before the globals they use, logging
+// to stderr, since the runtime's log may be gone.
+struct ExitGuard
+{
+    ~ExitGuard()
+    {
+        set_log_sink(nullptr);
+        g_active.store(false, std::memory_order_release);
+        std::vector<std::unique_ptr<Net>> nets;
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            g_run.reset();
+            nets = std::move(g_nets);
+            g_nets.clear();
+            if (g_service)
+                nets.push_back(std::move(g_service));
+        }
+        end_nets(std::move(nets));
+    }
+};
+ExitGuard g_exit_guard;
 
 // The function block side. Called from the PLC scan, which only runs between start_loop and
 // stop_loop, like cycle_start and cycle_end: g_run is read behind g_active.
@@ -538,13 +683,13 @@ PlcPort *plc_port(uint8_t network, int &error)
         error = CANOPEN_PLC_NO_DRIVER;
         return nullptr;
     }
-    if (network < 1 || network > g_run->buses.size() || !g_run->buses[network - 1]->plc())
+    if (network < 1 || network > g_run->nets.size() || !g_run->nets[network - 1]->bus->plc())
     {
         error = CANOPEN_PLC_NET_ID_UNKNOWN;
         return nullptr;
     }
     error = CANOPEN_PLC_NO_ERROR;
-    return g_run->buses[network - 1]->plc();
+    return g_run->nets[network - 1]->bus->plc();
 }
 
 void plc_fail(canopen_plc_result *res, int error, uint8_t reason)
@@ -851,8 +996,8 @@ CANOPEN_EXPORT void cycle_start(void)
         return;
     try
     {
-        for (auto &image : g_run->images)
-            image->copy_to_plc(g_args);
+        for (Net *n : g_run->nets)
+            n->image.copy_to_plc(g_args);
         for (Slave *s : g_run->slaves)
             s->copy_to_plc(g_args);
     }
@@ -867,8 +1012,8 @@ CANOPEN_EXPORT void cycle_end(void)
         return;
     try
     {
-        for (auto &image : g_run->images)
-            image->copy_from_plc(g_args);
+        for (Net *n : g_run->nets)
+            n->image.copy_from_plc(g_args);
         for (Slave *s : g_run->slaves)
             s->copy_from_plc(g_args);
     }

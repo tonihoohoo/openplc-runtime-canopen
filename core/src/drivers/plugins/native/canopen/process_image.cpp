@@ -125,8 +125,8 @@ void ProcessImage::add_slot(const PdoEntry &e, std::vector<Slot> &slots,
     slots.push_back(slot);
 }
 
-bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,
-                         const ImageSizes &sizes, std::vector<std::string> &errors)
+bool ProcessImage::build_slots(const NetworkConfig &net, const MasterLayout &layout,
+                               const ImageSizes &sizes, std::vector<std::string> &errors)
 {
     size_t failed = errors.size();
     auto check    = [&](const IecLocation &loc)
@@ -170,6 +170,15 @@ bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,
         if (n.has_state_location)
             check(n.state_location);
     }
+    return errors.size() == failed;
+}
+
+bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,
+                         const ImageSizes &sizes, std::vector<std::string> &errors)
+{
+    size_t failed = errors.size();
+    build_slots(net, layout, sizes, errors);
+    in_count_ = in_slots_.size();
     in_work_.assign(in_slots_.size() + net.nodes.size(), 0);
     out_work_.assign(out_slots_.size(), 0);
     in_.resize(in_work_.size());
@@ -185,10 +194,24 @@ bool ProcessImage::build(const NetworkConfig &net, const MasterLayout &layout,
     return errors.size() == failed;
 }
 
+bool ProcessImage::relocate(const NetworkConfig &net, const MasterLayout &layout,
+                            const ImageSizes &sizes, std::vector<std::string> &errors)
+{
+    const size_t failed = errors.size();
+    const size_t outs   = out_slots_.size();
+    const size_t nodes  = has_state_.size();
+    build_slots(net, layout, sizes, errors);
+    if (in_slots_.size() != in_count_ || out_slots_.size() != outs || has_state_.size() != nodes)
+        errors.push_back(net.label() + ": the PDO layout differs from the running network's");
+    // Zero outputs until the first scan, as with a new image; the scan side writes this buffer.
+    std::fill(out_work_.begin(), out_work_.end(), 0);
+    publish(out_, out_work_);
+    return errors.size() == failed;
+}
+
 void ProcessImage::mark_all_down(const NetworkConfig &net, const MasterLayout &layout)
 {
-    for (size_t slot = 0; slot < net.nodes.size() && in_slots_.size() + slot < in_work_.size();
-         ++slot)
+    for (size_t slot = 0; slot < net.nodes.size() && in_count_ + slot < in_work_.size(); ++slot)
         set_node_state(slot, 0);
     for (const MasterPdo &m : layout.rpdos)
     {
@@ -197,7 +220,7 @@ void ProcessImage::mark_all_down(const NetworkConfig &net, const MasterLayout &l
             zero = zero || (n.node_id == m.node_id && n.on_loss == OnLoss::Zero);
         if (!zero)
             continue;
-        for (size_t k = 0; k < m.pdo->entries.size() && m.first_entry + k < in_slots_.size(); ++k)
+        for (size_t k = 0; k < m.pdo->entries.size() && m.first_entry + k < in_count_; ++k)
             set_input(m.first_entry + k, 0);
     }
     commit();

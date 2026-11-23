@@ -69,7 +69,7 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
                  lely::io::TimerBase &tick, lely::io::CanChannelBase &chan,
                  const std::string &dcf_path, const NetworkConfig &cfg, const MasterLayout &layout,
                  ProcessImage &image, NetworkStatus &status, ClientQueue *client, bool service,
-                 PlcPort *plc)
+                 PlcPort *plc, bool plc_stopped)
     : BasicMaster(exec, timer, chan, dcf_path, "", static_cast<uint8_t>(cfg.master_node_id)),
       exec_(exec), poll_(poll), tick_(tick), tick_wait_(exec,
                                                         [this](int, std::error_code ec)
@@ -77,8 +77,9 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
                                                             if (!ec)
                                                                 OnTick();
                                                         }),
-      cfg_(cfg), layout_(layout), image_(image), status_(status), client_(client),
-      service_(service), plc_(plc), lss_online_([this](const LssOnline::Frame &f) { SendLss(f); })
+      cfg_(cfg), layout_(layout), image_(image), status_(status), plc_stopped_(plc_stopped),
+      client_(client), service_(service), plc_(plc),
+      lss_online_([this](const LssOnline::Frame &f) { SendLss(f); })
 {
     for (size_t slot = 0; slot < cfg_.nodes.size(); ++slot)
     {
@@ -170,6 +171,11 @@ void Network::Start()
     for (auto &it : nodes_)
         if (it.second.held && it.second.enabled)
             StopHeld(it.first);
+    if (Parking() && cfg_.sync == SyncMode::Period)
+    {
+        std::error_code ec;
+        Write<uint32_t>(0x1005, 0, 0x80, ec);
+    }
     tick_.settime(kTick, kTick);
     tick_.submit_wait(tick_wait_);
     image_.drain_wake();
@@ -255,6 +261,102 @@ void Network::MarkAllDown()
     for (auto &it : nodes_)
         if (it.second.up)
             SetUp(it.second, false);
+    image_.commit();
+}
+
+void Network::Park(NodeState &node, uint8_t id)
+{
+    if (cfg_.on_stop == OnStop::None)
+        return;
+    node.parked = true;
+    node.manual = false;
+    status_.parked(id);
+    try
+    {
+        Command(cfg_.on_stop == OnStop::Stopped ? NmtCommand::STOP : NmtCommand::ENTER_PREOP, id);
+    }
+    catch (const std::exception &e)
+    {
+        log_warn("%s: cannot send the NMT command for PLC stop: %s", node.cfg->label().c_str(),
+                 e.what());
+    }
+}
+
+void Network::PlcStop()
+{
+    if (plc_stopped_)
+        return;
+    // The last scan's outputs (zero after the runtime cleared them) go out first.
+    if (running_)
+        WriteOutputs(true);
+    plc_stopped_ = true;
+    status_.set_plc_running(false);
+    log_info("%s: the PLC stopped; the master stays on the bus", cfg_.label().c_str());
+    if (!running_ || cfg_.on_stop == OnStop::None)
+        return;
+    if (cfg_.sync == SyncMode::Period)
+    {
+        std::error_code ec;
+        Write<uint32_t>(0x1005, 0, 0x80, ec);
+    }
+    for (auto &it : nodes_)
+    {
+        NodeState &n = it.second;
+        // Addressed to each node that is up: a broadcast would also reach devices this master
+        // does not manage. A node that comes up later is parked by its boot.
+        if (n.enabled && n.up && !n.held)
+            Park(n, static_cast<uint8_t>(it.first));
+    }
+}
+
+void Network::PlcStart()
+{
+    if (!plc_stopped_)
+        return;
+    plc_stopped_ = false;
+    status_.set_plc_running(true);
+    log_info("%s: the PLC started; the nodes start without a reset", cfg_.label().c_str());
+    if (!running_)
+        return;
+    synced_scans_ = image_.scans();
+    if (cfg_.sync == SyncMode::Period)
+    {
+        std::error_code ec;
+        Write<uint32_t>(0x1005, 0, 0x40000080, ec);
+    }
+    for (auto &it : nodes_)
+    {
+        NodeState &n   = it.second;
+        const auto id  = static_cast<uint8_t>(it.first);
+        const bool was = n.parked || n.manual || n.held;
+        n.parked       = false;
+        if (!n.enabled || !was)
+            continue;
+        if (n.up && n.cfg->program_start && !n.held)
+        {
+            n.manual  = false;
+            n.waiting = true;
+            SetState(n, static_cast<uint8_t>(NmtState::PREOP));
+            status_.waiting_start(id);
+            try
+            {
+                Command(NmtCommand::ENTER_PREOP, id);
+            }
+            catch (const std::exception &e)
+            {
+                log_warn("%s: cannot send NMT pre-operational: %s", n.cfg->label().c_str(),
+                         e.what());
+            }
+            continue;
+        }
+        ManualNmt(id, NmtRequest::Start);
+        if (n.up)
+        {
+            n.up_since = clock::now(); // a late pre-operational heartbeat is answered with a start
+            for (const MasterPdo *m : n.out_pdos)
+                resend_[m->master_number - 1] = true;
+        }
+    }
     image_.commit();
 }
 
@@ -390,7 +492,18 @@ void Network::HandleBoot(uint8_t id, NmtState st, char es, const std::string &wh
         n->waiting = n->cfg->program_start;
         status_.boot_ok(id, n->waiting);
         SetUp(*n, true);
-        if (n->waiting)
+        if (Parking())
+        {
+            // Booted while the PLC is stopped: left in the PLC-stop state until it starts.
+            Defer(
+                [this, id]
+                {
+                    if (NodeState *p = Find(id))
+                        if (p->up && Parking())
+                            Park(*p, id);
+                });
+        }
+        else if (n->waiting)
         {
             status_.waiting_start(id);
             log_info("%s waits for the PLC program's start", n->cfg->label().c_str());
@@ -719,6 +832,13 @@ void Network::HandleState(uint8_t id, NmtState st)
         HandleLoss(id, ProblemKind::Reset);
         return;
     }
+    if (n->parked && !n->manual && !n->stopped)
+    {
+        // The state the PLC stop asked for, or a start by someone else: not a loss.
+        SetState(*n, static_cast<uint8_t>(st) & 0x7F);
+        image_.commit();
+        return;
+    }
     if (n->waiting && !n->manual && !n->stopped)
     {
         if (st == NmtState::START)
@@ -867,6 +987,7 @@ void Network::SetUp(NodeState &node, bool up)
     else
     {
         node.waiting = false;
+        node.parked  = false;
         SetState(node, 0);
         if (node.cfg->on_loss == OnLoss::Zero)
             ZeroInputs(node);
@@ -1119,7 +1240,7 @@ void Network::SendTime()
 
 void Network::Exchange()
 {
-    if (!running_)
+    if (!running_ || Parking())
         return;
     if (cfg_.sync == SyncMode::PlcCycle)
     {
@@ -1157,7 +1278,7 @@ void Network::WriteOutputs(bool all)
     {
         size_t num            = m.master_number - 1;
         const NodeState &node = nodes_[m.node_id];
-        if (!node.up || node.waiting)
+        if (!node.up || node.waiting || node.parked)
             continue;
         bool send   = all || resend_[num];
         bool failed = false;

@@ -112,8 +112,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: vcan0
-        run: .github/scripts/vcan-up.sh vcan0
+      - name: vcan0 and vcan1
+        run: |
+          .github/scripts/vcan-up.sh vcan0
+          # A free interface for service mode while the network stays on vcan0.
+          .github/scripts/vcan-up.sh vcan1
 
       - name: Editor branch
         id: editor
@@ -238,7 +241,7 @@ jobs:
             exit 1
           fi
 
-      - name: Online tools while the PLC runs and in service mode
+      - name: Online tools while the PLC runs, and with it stopped on the kept network and in service mode
         if: ${{ needs.changes.outputs.master != 'false' }}
         run: |
           "$PLUGIN_DIR/build-sim/tests/canopen_sim_slave" --interface vcan0 --node 2 --steps 1 \
@@ -246,7 +249,7 @@ jobs:
           sim=$!
           status=0
           python3 .github/scripts/canopen_online_e2e.py --user ci --password ci-canopen-e2e \
-            --interface vcan0 || status=$?
+            --interface vcan0 --free-interface vcan1 || status=$?
           kill "$sim" 2>/dev/null || true
           wait "$sim" 2>/dev/null || true
           cat "$RUNNER_TEMP/sim-online.log"

@@ -468,8 +468,48 @@ void test_entry_bits()
                        "a dummy entry has no \"bits\""));
 }
 
+// The bus configuration text of a network leaves out what only maps it to the PLC.
+void test_bus_key()
+{
+    auto key = [](const std::string &text)
+    {
+        Config cfg;
+        std::vector<std::string> errors;
+        CHECK(parse_config(text, cfg, errors));
+        return cfg.networks.empty() ? std::string() : cfg.networks[0].bus_key;
+    };
+    const std::string base = R"({"version": 14, "networks": [{
+      "name": "n", "interface": "can0", "bitrate": 250000, "heartbeat_producer_ms": 100,
+      "nodes": [{"node_id": 2, "start": "master", "enabled": true, "name": "io",
+                 "state_location": "%IB10",
+                 "tpdos": [{"number": 1, "cob_id": 386, "entries": [
+                   {"index": 24576, "subindex": 1, "type": "UNSIGNED8", "location": "%IB0"},
+                   {"index": 24576, "subindex": 2, "type": "UNSIGNED8",
+                    "bits": ["%IX4.0","%IX4.1","%IX4.2","%IX4.3",
+                             "%IX4.4","%IX4.5","%IX4.6","%IX4.7"]}]}]}]}]})";
+    const std::string k    = key(base);
+    CHECK(!k.empty());
+    CHECK(k.find("%I") == std::string::npos);
+    std::string moved = base;
+    moved.replace(moved.find("%IB10"), 5, "%IB12");
+    moved.replace(moved.find("%IB0"), 4, "%IB3");
+    moved.replace(moved.find("%IX4.0"), 6, "%IX6.0");
+    CHECK(key(moved) == k);
+    std::string timed = base;
+    timed.replace(timed.find("100"), 3, "200");
+    CHECK(key(timed) != k);
+    std::string fewer = base;
+    const size_t at   = fewer.find(R"("%IX4.7")");
+    fewer.erase(at - 1, std::string(R"(,"%IX4.7")").size());
+    Config cfg;
+    std::vector<std::string> errors;
+    parse_config(fewer, cfg, errors); // 7 bits of an 8-bit entry: refused or another key
+    CHECK(cfg.networks.empty() || cfg.networks[0].bus_key != k);
+}
+
 int main()
 {
+    test_bus_key();
     test_audit_fixes();
     test_valid();
     test_refusals();

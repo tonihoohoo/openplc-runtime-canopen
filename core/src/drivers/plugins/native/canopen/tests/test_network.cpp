@@ -426,6 +426,138 @@ void check_master_watch(std::shared_ptr<lely::io::VirtualCanController> vbus,
     io.stop();
 }
 
+const char *kKeptConfig = R"({
+  "version": 14,
+  "networks": [{
+    "name": "kept", "interface": "vcan-test", "bitrate": 0,
+    "heartbeat_producer_ms": 50,
+    "on_plc_stop": "pre_operational",
+    "nodes": [
+      {"node_id": 2, "start": "master", "enabled": true, "name": "io1",
+       "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
+       "supervision": {"type": "heartbeat", "consumer_ms": 300},
+       "state_location": "%IB10",
+       "sdo": [{"index": 4118, "subindex": 1, "data": "C8007F00"}]},
+      {"node_id": 4, "start": "master", "enabled": true, "name": "late", "optional": true,
+       "supervision": {"type": "heartbeat", "consumer_ms": 300},
+       "state_location": "%IB11"}
+    ]
+  }]
+})";
+
+// A PLC stop keeps the network on the bus: heartbeat and supervision go on, the nodes stay
+// pre-operational without a loss, a node that boots meanwhile is configured and left
+// pre-operational. The next PLC start sends NMT start with no reset and no configuration SDO.
+void check_plc_stop_kept(std::shared_ptr<lely::io::VirtualCanController> vbus,
+                         const std::string &wire, const std::string &dir,
+                         const plugin_runtime_args_t &rt)
+{
+    std::string text = kKeptConfig;
+    if (!wire.empty())
+        text.replace(text.find("vcan-test"), 9, wire);
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(text, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    std::unique_ptr<ProcessImage> image(new ProcessImage);
+    CHECK(image->build(net, layout, ImageSizes::uniform(kSize), errors));
+    std::string dcf = dir + "/kept.dcf";
+    {
+        FILE *f       = std::fopen(dcf.c_str(), "w");
+        std::string t = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+    }
+    SimSlaveSpec spec;
+    spec.node_id = 2;
+    SimSlave io(spec, dir + "/kept_node2.dcf", vbus, wire);
+    io.start();
+    NetworkStatus status(net);
+    Bus bus(net, layout, *image, status, dcf, vbus);
+    bus.enable_plc(0);
+    bus.start();
+    CHECK(scan_until(*image, rt, [] { return g_byte_in[10] == 5; }, std::chrono::seconds(10)));
+    CHECK(io.last_command() == 1);
+    CHECK(status.snapshot().plc_running);
+
+    std::atomic<bool> run{true};
+    std::vector<Frame> frames;
+    std::thread listener;
+    if (vbus)
+        listener = std::thread([&] { listen(vbus, run, frames); });
+    bus.plc_stopped();
+    CHECK(!bus.plc_running());
+    CHECK(!status.snapshot().plc_running);
+    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (io.last_command() != 0x80 && std::chrono::steady_clock::now() < end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(io.last_command() == 0x80);
+    CHECK(node_status(status, 2).state == NodeRun::Stopped);
+
+    // No scan runs; a node boots while the PLC is stopped.
+    SimSlaveSpec late_spec;
+    late_spec.node_id = 4;
+    SimSlave late(late_spec, dir + "/kept_node4.dcf", vbus, wire);
+    late.start();
+    end = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (node_status(status, 4).state != NodeRun::Stopped &&
+           std::chrono::steady_clock::now() < end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK(node_status(status, 4).state == NodeRun::Stopped);
+    CHECK(late.last_command() != 1);
+    // Longer than the node's heartbeat consumer time: the master's heartbeat goes on.
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    CHECK(io.last_command() == 0x80);
+    CHECK(node_status(status, 2).losses == 0);
+    CHECK(node_status(status, 2).state == NodeRun::Stopped);
+
+    // The next run: the PLC side of the image built again for the new program, and the PLC
+    // starts again.
+    CHECK(image->relocate(net, layout, ImageSizes::uniform(kSize), errors));
+    bus.plc_started();
+    CHECK(bus.plc_running());
+    auto restarted = std::chrono::steady_clock::now();
+    CHECK(scan_until(
+        *image, rt, [&] { return io.last_command() == 1 && late.last_command() == 1; },
+        std::chrono::seconds(5)));
+    CHECK(status.snapshot().plc_running);
+    CHECK(node_status(status, 2).state == NodeRun::Operational);
+    CHECK(node_status(status, 4).state == NodeRun::Operational);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    run = false;
+    if (listener.joinable())
+        listener.join();
+    if (vbus)
+    {
+        int heartbeats = 0, resets = 0, sdos = 0;
+        for (const Frame &f : frames)
+        {
+            if (f.id == 0x77F)
+                ++heartbeats;
+            if (f.at < restarted)
+                continue;
+            if (f.id == 0x000 && (f.first == 0x81 || f.first == 0x82))
+                ++resets;
+            if (f.id == 0x602)
+                ++sdos;
+        }
+        std::printf("PLC stop kept: %d master heartbeats, %d resets and %d SDOs to node 2 after "
+                    "the restart\n",
+                    heartbeats, resets, sdos);
+        CHECK(heartbeats >= 10);
+        CHECK(resets == 0);
+        CHECK(sdos == 0);
+    }
+    // A stop for good still sends the NMT command for a PLC stop.
+    bus.stop();
+    CHECK(io.last_command() == 0x80);
+    late.stop();
+    io.stop();
+}
+
 const char *kOptionsConfig = R"({
   "version": 14,
   "networks": [{
@@ -2138,6 +2270,7 @@ int main()
     refuses.stop();
 
     check_master_watch(vbus, wire, dir, rt);
+    check_plc_stop_kept(vbus, wire, dir, rt);
     if (vbus)
     {
         check_bus_off_reset(vbus, dir, rt);

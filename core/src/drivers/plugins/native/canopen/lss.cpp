@@ -394,8 +394,8 @@ void Network::ClientLss(const ClientJob &job)
     refused.state = JobResult::State::Failed;
     if (lss_busy_ || lss_starting_ || lss_online_.running())
         refused.reason = "busy";
-    else if (req.action == LssOnline::Action::SetBitrate && !service_)
-        refused.reason = "needs_service_mode";
+    else if (req.action == LssOnline::Action::SetBitrate && !service_ && !plc_stopped_)
+        refused.reason = "needs_plc_stopped";
     else if (req.action == LssOnline::Action::SetId)
     {
         NodeState *n = Find(static_cast<uint8_t>(req.node_id));

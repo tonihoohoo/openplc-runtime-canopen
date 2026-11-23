@@ -173,6 +173,9 @@ struct NetworkConfig
     unsigned time_period_ms   = 1000;
     int priority              = kDefaultPriority; // SCHED_FIFO of the bus thread in a session
     std::vector<NodeConfig> nodes;
+    // The network's configuration without its PLC side (locations, aliases): equal keys run the
+    // same bus, so a network kept from the last PLC run goes on without a new bring-up.
+    std::string bus_key;
     std::string label() const; // "network \"CANopen 1\" (can0)"
 };
 

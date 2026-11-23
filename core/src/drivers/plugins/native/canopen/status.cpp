@@ -451,6 +451,29 @@ void NetworkStatus::set_service(bool open)
     push(e);
 }
 
+void NetworkStatus::set_plc_running(bool running)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    if (data_.plc_running == running)
+        return;
+    data_.plc_running = running;
+    ++gen_;
+    Event e;
+    e.kind = EventKind::Plc;
+    e.open = running;
+    push(e);
+}
+
+void NetworkStatus::parked(unsigned node)
+{
+    std::lock_guard<PiMutex> lock(mutex_);
+    if (NodeStatus *n = find(node))
+    {
+        change(*n, NodeRun::Stopped);
+        n->late.clear();
+    }
+}
+
 void NetworkStatus::stop_all()
 {
     std::lock_guard<PiMutex> lock(mutex_);
@@ -734,6 +757,8 @@ const char *event_name(EventKind k)
         return "node_off";
     case EventKind::Lss:
         return "lss";
+    case EventKind::Plc:
+        return "plc";
     }
     return "boot_ok";
 }
@@ -947,6 +972,9 @@ cJSON *event_json(const Event &ev)
         break;
     case EventKind::Service:
         cJSON_AddBoolToObject(o, "open", ev.open);
+        break;
+    case EventKind::Plc:
+        cJSON_AddBoolToObject(o, "running", ev.open);
         break;
     case EventKind::Lss:
         cJSON_AddItemToObject(o, "lss", lss_json(ev.lss));
@@ -1317,6 +1345,8 @@ std::string status_json(const std::vector<NetworkSnapshot> &networks, int64_t no
         cJSON_AddStringToObject(o, "interface", n.interface.c_str());
         if (n.service)
             cJSON_AddStringToObject(o, "mode", "service");
+        else
+            cJSON_AddBoolToObject(o, "plc_running", n.plc_running);
         cJSON_AddItemToObject(o, "bus", bus_json(n.bus));
         cJSON_AddBoolToObject(o, "all_mandatory_up", n.all_up(false));
         cJSON_AddBoolToObject(o, "all_optional_up", n.all_up(true));

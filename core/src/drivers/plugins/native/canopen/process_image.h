@@ -62,9 +62,16 @@ class ProcessImage
     bool build(const NetworkConfig &net, const MasterLayout &layout, const ImageSizes &sizes,
                std::vector<std::string> &errors);
 
+    // The PLC side of build() again, for a network kept from the last PLC run: the locations of
+    // `net` with the same layout. False, with a message, when a location lies outside `sizes`
+    // or the layout differs. Outputs read zero until the next scan. Only while no scan runs; the
+    // bus side is untouched.
+    bool relocate(const NetworkConfig &net, const MasterLayout &layout, const ImageSizes &sizes,
+                  std::vector<std::string> &errors);
+
     size_t inputs() const
     {
-        return in_slots_.size();
+        return in_count_;
     }
     size_t outputs() const
     {
@@ -79,7 +86,7 @@ class ProcessImage
     // `slot` is the node's position in the network's node list.
     void set_node_state(size_t slot, uint8_t state)
     {
-        in_work_[in_slots_.size() + slot] = state;
+        in_work_[in_count_ + slot] = state;
     }
     void commit()
     {
@@ -110,6 +117,8 @@ class ProcessImage
 
   private:
     static void publish(TripleBuffer &buf, const std::vector<uint64_t> &work);
+    bool build_slots(const NetworkConfig &net, const MasterLayout &layout, const ImageSizes &sizes,
+                     std::vector<std::string> &errors);
 
     // One PDO entry: one location, a run of bit locations in in_bits_/out_bits_ (bit 0 first), or
     // none for a dummy entry (read as 0, never written to the image).
@@ -123,6 +132,9 @@ class ProcessImage
     static void add_slot(const PdoEntry &e, std::vector<Slot> &slots,
                          std::vector<IecLocation> &bit_locs);
 
+    // The PLC side (slots, bit and state locations) is read only by the scan; the bus thread
+    // uses in_count_, fixed by build().
+    size_t in_count_ = 0;
     std::vector<Slot> in_slots_;
     std::vector<Slot> out_slots_;
     std::vector<IecLocation> in_bits_;
