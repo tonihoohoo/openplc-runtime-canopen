@@ -64,11 +64,11 @@ class ProcessImage
 
     size_t inputs() const
     {
-        return in_locs_.size();
+        return in_slots_.size();
     }
     size_t outputs() const
     {
-        return out_locs_.size();
+        return out_slots_.size();
     }
 
     // ---- bus thread ----
@@ -79,7 +79,7 @@ class ProcessImage
     // `slot` is the node's position in the network's node list.
     void set_node_state(size_t slot, uint8_t state)
     {
-        in_work_[in_locs_.size() + slot] = state;
+        in_work_[in_slots_.size() + slot] = state;
     }
     void commit()
     {
@@ -111,11 +111,22 @@ class ProcessImage
   private:
     static void publish(TripleBuffer &buf, const std::vector<uint64_t> &work);
 
-    std::vector<IecLocation> in_locs_;
-    std::vector<IecLocation> out_locs_;
-    // 0 for a dummy entry: no location, read as 0 and never written to the image.
-    std::vector<uint8_t> in_used_;
-    std::vector<uint8_t> out_used_;
+    // One PDO entry: one location, a run of bit locations in in_bits_/out_bits_ (bit 0 first), or
+    // none for a dummy entry (read as 0, never written to the image).
+    struct Slot
+    {
+        IecLocation loc;
+        uint32_t first_bit = 0;
+        uint8_t bits       = 0;
+        bool used          = false;
+    };
+    static void add_slot(const PdoEntry &e, std::vector<Slot> &slots,
+                         std::vector<IecLocation> &bit_locs);
+
+    std::vector<Slot> in_slots_;
+    std::vector<Slot> out_slots_;
+    std::vector<IecLocation> in_bits_;
+    std::vector<IecLocation> out_bits_;
     std::vector<bool> has_state_;
     std::vector<IecLocation> state_locs_;
     std::vector<uint64_t> in_work_;

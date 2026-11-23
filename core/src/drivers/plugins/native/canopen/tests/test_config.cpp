@@ -14,7 +14,7 @@ namespace
 {
 
 const char *kValid = R"({
-  "version": 13,
+  "version": 14,
   "networks": [{
     "name": "CANopen 1", "interface": "can0", "bitrate": 500000,
     "heartbeat_producer_ms": 100,
@@ -193,8 +193,8 @@ void test_receive_timeout()
 void test_refusals()
 {
     CHECK(refused_with("{", "not valid JSON"));
-    CHECK(refused_with(with(kValid, "\"version\": 13", "\"version\": 11"),
-                       "version 11 is not supported (this runtime reads version 13)"));
+    CHECK(refused_with(with(kValid, "\"version\": 14", "\"version\": 13"),
+                       "version 13 is not supported (this runtime reads version 14)"));
     CHECK(refused_with(with(kValid, "\"start\": \"master\", ", ""), "missing \"start\""));
     CHECK(refused_with(with(kValid, "\"start\": \"master\"", "\"start\": \"plc\""),
                        "\"start\" \"plc\" is not one of master, program"));
@@ -421,6 +421,53 @@ void test_audit_fixes()
 
 } // namespace
 
+void test_entry_bits()
+{
+    const std::string in_bits = "\"bits\": [\"%IX4.0\", \"%IX4.1\", \"%IX4.2\", \"%IX4.3\", "
+                                "\"%IX4.4\", \"%IX4.5\", \"%IX4.6\", \"%IX4.7\"]";
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(with(kValid, "\"location\": \"%IB0\"", in_bits), cfg, errors));
+    CHECK(errors.empty());
+    const PdoEntry &e = cfg.networks[0].nodes[0].tpdos[0].entries[0];
+    CHECK(e.packed() && e.bits.size() == 8 && e.bits[2].index == 4 && e.bits[2].bit == 2);
+
+    std::string word = "\"type\": \"UNSIGNED16\", \"bits\": [";
+    for (int k = 0; k < 16; ++k)
+        word += std::string(k ? ", " : "") + "\"%QX" + std::to_string(1 + k / 8) + "." +
+                std::to_string(k % 8) + "\"";
+    word += "]";
+    errors.clear();
+    Config cfg16;
+    CHECK(parse_config(with(kValid, "\"type\": \"UNSIGNED8\", \"location\": \"%QB0\"", word), cfg16,
+                       errors));
+    CHECK(cfg16.networks[0].nodes[0].rpdos[0].entries[0].bits.size() == 16);
+
+    CHECK(refused_with(with(kValid, "\"location\": \"%IB0\"", in_bits + ", \"location\": \"%IB0\""),
+                       "TPDO 1 entry 1 0x6000:1: an entry with \"bits\" has no \"location\""));
+    CHECK(refused_with(with(kValid, "\"type\": \"UNSIGNED8\", \"location\": \"%IB0\"",
+                            "\"type\": \"UNSIGNED16\", " + in_bits),
+                       "\"bits\" must list 16 locations"));
+    CHECK(refused_with(with(kValid, "\"type\": \"UNSIGNED8\", \"location\": \"%IB0\"",
+                            "\"type\": \"INTEGER8\", " + in_bits),
+                       "needs type UNSIGNED8, UNSIGNED16 or UNSIGNED32, not INTEGER8"));
+    CHECK(refused_with(with(kValid, "\"location\": \"%IB0\"", with(in_bits, "%IX4.3", "%QX4.3")),
+                       "bit location %QX4.3 must be a %IX location"));
+    CHECK(refused_with(with(kValid, "\"location\": \"%IB0\"", with(in_bits, "%IX4.3", "%IX4.2")),
+                       "bit location %IX4.2 is given twice"));
+    CHECK(
+        refused_with(with(kValid, "\"location\": \"%IB0\"",
+                          with(in_bits, "%IX4.0", "%IX10.0") +
+                              "}, {\"index\": 24576, "
+                              "\"subindex\": 2, \"type\": \"BOOLEAN\", \"location\": \"%IX10.0\""),
+                     "both use %IX10.0"));
+    CHECK(refused_with(with(kValid, "\"location\": \"%QB0\"",
+                            "\"location\": \"%QB0\"}, {\"index\": 5, \"subindex\": 0, "
+                            "\"type\": \"UNSIGNED8\", " +
+                                in_bits),
+                       "a dummy entry has no \"bits\""));
+}
+
 int main()
 {
     test_audit_fixes();
@@ -433,6 +480,7 @@ int main()
     test_priority();
     test_sdo_policies();
     test_dummy_entries();
+    test_entry_bits();
     test_send_period();
     test_lss();
     CHECK(is_standard_bitrate(125000) && is_standard_bitrate(1000000));

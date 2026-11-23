@@ -48,7 +48,7 @@ namespace
 {
 
 const char *const kConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "vcan-slave", "bitrate": 0, "node_id": 5,
@@ -994,7 +994,7 @@ void check_bus_off(const DeviceConfig &dev)
 
 // Our master boots the slave and exchanges PDOs with it.
 const char *const kMasterConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [{
     "name": "line", "interface": "vcan-master", "bitrate": 0, "master_node_id": 127,
     "heartbeat_producer_ms": 100,
@@ -1073,7 +1073,7 @@ constexpr uint32_t kLssMaster = 0x7E5;
 constexpr uint32_t kLssSlave  = 0x7E4;
 
 const char *const kLssConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [],
   "devices": [{
     "name": "lss", "interface": "vcan-lss", "bitrate": 500000, "node_id": 5,
@@ -1527,7 +1527,7 @@ void check_stop_state_config()
 } // namespace
 
 const char *const kPackedConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [],
   "devices": [{
     "name": "bits", "interface": "vcan-packed", "bitrate": 0, "node_id": 5,
@@ -1686,7 +1686,7 @@ void check_packed(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
 }
 
 const char *const kMorePdosConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [],
   "devices": [{
     "name": "many", "interface": "vcan-pdos", "bitrate": 0, "node_id": 5,

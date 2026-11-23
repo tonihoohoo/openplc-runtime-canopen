@@ -3,7 +3,7 @@
 // canopen_sim_slave - a simulated generic I/O module on a SocketCAN interface, for the
 // end-to-end check of a PLC program that copies the module's digital inputs to its outputs:
 //
-//   canopen_sim_slave --interface vcan0 [--node 2] [--steps 5] [--timeout 60]
+//   canopen_sim_slave --interface vcan0 [--node 2] [--steps 5] [--pattern 0xA5] [--timeout 60]
 //                     [--expect-parameter 0x12345678] [--expect-master-loss 5] [--linger 10]
 //                     [--blocks 1] [--parameter-read-only 1] [--expect-resends 10]
 //                     [--lss-serial 0x1001] [--expect-lss-stores 1] [--lss-store <file>]
@@ -14,7 +14,8 @@
 // and bit rate to the file ("stored node ID <id>, bit rate <bit/s>"), and a start with the file
 // present takes that node ID and prints "bit rate from the store: <bit/s>", as a device does at
 // power-on.
-// It sets its digital inputs to 1, 2, ... and waits each time until its outputs follow. With
+// It sets its digital inputs to 1, 2, ... and, with --pattern, last to that byte, and waits each
+// time until its outputs follow. With
 // --expect-master-loss it then prints "watching the master" and waits up to that many seconds
 // for its master watch (0x1016) to put it in pre-operational. With --linger it stays on the bus
 // that many seconds more, so its status can be read. With --parameter-read-only 1 it refuses
@@ -118,6 +119,7 @@ int main(int argc, char **argv)
     std::string iface;
     SimSlaveSpec spec;
     int steps           = 5;
+    int pattern         = -1;
     int timeout_s       = 60;
     bool check_param    = false;
     unsigned long param = 0;
@@ -146,6 +148,8 @@ int main(int argc, char **argv)
             expect_stores = std::atoi(val);
         else if (opt == "--steps")
             steps = std::atoi(val);
+        else if (opt == "--pattern")
+            pattern = static_cast<int>(std::strtoul(val, nullptr, 0) & 0xFF);
         else if (opt == "--timeout")
             timeout_s = std::atoi(val);
         else if (opt == "--linger")
@@ -231,20 +235,22 @@ int main(int argc, char **argv)
         }
     } join{running, store_watch};
 
-    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
-    for (int step = 1; step <= steps; ++step)
+    auto end       = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
+    const int last = pattern >= 0 ? steps + 1 : steps;
+    for (int step = 1; step <= last; ++step)
     {
-        slave.set_inputs(static_cast<uint8_t>(step), 0);
-        while (slave.outputs() != step)
+        const int value = step > steps ? pattern : step;
+        slave.set_inputs(static_cast<uint8_t>(value), 0);
+        while (slave.outputs() != static_cast<unsigned>(value))
         {
             if (std::chrono::steady_clock::now() > end)
             {
-                std::printf("FAIL: inputs %d, outputs still %u\n", step, slave.outputs());
+                std::printf("FAIL: inputs %d, outputs still %u\n", value, slave.outputs());
                 return 1;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-        std::printf("step %d: outputs follow the inputs\n", step);
+        std::printf("step %d: outputs follow the inputs (0x%02X)\n", step, value);
         std::fflush(stdout);
     }
     std::printf("node ID in use: %u\n", slave.node_id());

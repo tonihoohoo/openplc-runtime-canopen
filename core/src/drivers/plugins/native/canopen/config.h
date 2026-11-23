@@ -17,10 +17,11 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 13;
+constexpr int kConfigVersion = 14;
 
 // One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
-// location: its bits are skipped on receive and sent as zeros.
+// location: its bits are skipped on receive and sent as zeros. An UNSIGNED8/16/32 entry may give
+// one %IX/%QX location per bit instead (bit 0 first); it is still one value on the bus.
 struct PdoEntry
 {
     uint16_t index   = 0;
@@ -28,6 +29,11 @@ struct PdoEntry
     CoType type      = CoType::UNSIGNED8;
     bool dummy       = false;
     IecLocation location;
+    std::vector<IecLocation> bits;
+    bool packed() const
+    {
+        return !bits.empty();
+    }
 };
 
 // A PDO as the master sees it: a node's TPDO is received by the master (inputs, %I), a node's

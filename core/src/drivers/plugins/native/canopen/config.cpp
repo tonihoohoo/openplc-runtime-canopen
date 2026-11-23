@@ -150,6 +150,7 @@ class Parser
     void parse_lss(const cJSON *j, const std::string &where, NodeConfig &node);
     bool parse_sdo(const cJSON *j, const std::string &where, SdoWrite &sdo);
     bool parse_pdo(const cJSON *j, const std::string &where, IecArea area, PdoConfig &pdo);
+    bool parse_entry_bits(const cJSON *bits, const std::string &w, IecArea area, PdoEntry &entry);
     void check_cob_ids(const NetworkConfig &net);
     void check_locations();
     bool parse_device(const cJSON *j, size_t pos, DeviceConfig &dev);
@@ -792,9 +793,17 @@ bool Parser::parse_pdo(const cJSON *j, const std::string &where, IecArea area, P
             entry.subindex = static_cast<uint8_t>(sub);
             ew += " " + object_text(entry.index, entry.subindex);
             const bool has_location = cJSON_GetObjectItemCaseSensitive(e, "location") != nullptr;
+            const cJSON *bits       = cJSON_GetObjectItemCaseSensitive(e, "bits");
             std::string why;
             if (!parse_co_type(type, entry.type))
                 error(ew, "type \"" + type + "\" is not supported");
+            else if (bits)
+            {
+                if (has_location)
+                    error(ew, "an entry with \"bits\" has no \"location\"");
+                else if (parse_entry_bits(bits, ew, area, entry))
+                    pdo.entries.push_back(entry);
+            }
             else if (!has_location)
             {
                 CoType dummy_type = CoType::UNSIGNED8;
@@ -830,6 +839,62 @@ bool Parser::parse_pdo(const cJSON *j, const std::string &where, IecArea area, P
             error(w, "maps " + std::to_string(pdo.bits()) + " bits; a PDO holds at most 64");
     }
     return errors_.size() == failed;
+}
+
+bool Parser::parse_entry_bits(const cJSON *bits, const std::string &w, IecArea area,
+                              PdoEntry &entry)
+{
+    const size_t failed = errors_.size();
+    const unsigned n    = co_type_bits(entry.type);
+    if (entry.type != CoType::UNSIGNED8 && entry.type != CoType::UNSIGNED16 &&
+        entry.type != CoType::UNSIGNED32)
+    {
+        error(w, std::string("\"bits\" needs type UNSIGNED8, UNSIGNED16 or UNSIGNED32, not ") +
+                     co_type_name(entry.type));
+        return false;
+    }
+    CoType dummy_type = CoType::UNSIGNED8;
+    if (dummy_object_type(entry.index, entry.subindex, dummy_type))
+    {
+        error(w, "a dummy entry has no \"bits\"");
+        return false;
+    }
+    const std::string count = "\"bits\" must list " + std::to_string(n) + " locations";
+    if (!cJSON_IsArray(bits) || static_cast<unsigned>(cJSON_GetArraySize(bits)) != n)
+    {
+        error(w, count);
+        return false;
+    }
+    const char *want = area == IecArea::Input ? "%IX" : "%QX";
+    const cJSON *b   = nullptr;
+    cJSON_ArrayForEach(b, bits)
+    {
+        if (!cJSON_IsString(b))
+        {
+            error(w, count);
+            return false;
+        }
+        IecLocation loc;
+        std::string why;
+        const std::string text = b->valuestring;
+        if (!parse_iec_location(text, loc, why))
+            error(w, "bit location \"" + text + "\": " + why);
+        else if (loc.area != area || loc.size != IecSize::X)
+            error(w, "bit location " + text + " must be a " + want + " location");
+        else
+        {
+            for (const auto &other : entry.bits)
+                if (other.overlaps(loc))
+                    error(w, "bit location " + text + " is given twice");
+            entry.bits.push_back(loc);
+        }
+    }
+    if (errors_.size() != failed)
+    {
+        entry.bits.clear();
+        return false;
+    }
+    return true;
 }
 
 void Parser::check_cob_ids(const NetworkConfig &net)
@@ -894,10 +959,17 @@ void Parser::check_locations()
             for (int dir = 0; dir < 2; ++dir)
                 for (const auto &p : dir == 0 ? node.tpdos : node.rpdos)
                     for (const auto &e : p.entries)
-                        if (!e.dummy)
-                            uses.push_back({e.location, prefix + (dir == 0 ? " TPDO " : " RPDO ") +
-                                                            std::to_string(p.number) + " " +
-                                                            object_text(e.index, e.subindex)});
+                    {
+                        if (e.dummy)
+                            continue;
+                        const std::string what = prefix + (dir == 0 ? " TPDO " : " RPDO ") +
+                                                 std::to_string(p.number) + " " +
+                                                 object_text(e.index, e.subindex);
+                        if (!e.packed())
+                            uses.push_back({e.location, what});
+                        for (size_t k = 0; k < e.bits.size(); ++k)
+                            uses.push_back({e.bits[k], what + " bit " + std::to_string(k)});
+                    }
         }
     }
     for (const auto &dev : cfg_.devices)

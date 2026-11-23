@@ -75,7 +75,7 @@ namespace
 {
 
 const char *kConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [{
     "name": "test", "interface": "vcan-test", "bitrate": 0,
     "sync": {"mode": "plc_cycle"},
@@ -131,8 +131,12 @@ IEC_UINT *g_int_out_ptr[kSize];
 IEC_UDINT *g_dint_out_ptr[kSize];
 IEC_ULINT *g_lint_out_ptr[kSize];
 
-int write_bool(int, int, int, int)
+IEC_BOOL g_bool_in[kSize][8];
+IEC_BOOL g_bool_out[kSize][8];
+
+int write_bool(int, int index, int bit, int value)
 {
+    g_bool_in[index][bit] = static_cast<IEC_BOOL>(value ? 1 : 0);
     return 0;
 }
 int write_byte(int, int index, int value)
@@ -365,7 +369,7 @@ NodeStatus node_status(const NetworkStatus &status, unsigned id)
 }
 
 const char *kWatchConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [{
     "name": "watch", "interface": "vcan-test", "bitrate": 0,
     "heartbeat_producer_ms": 50,
@@ -423,7 +427,7 @@ void check_master_watch(std::shared_ptr<lely::io::VirtualCanController> vbus,
 }
 
 const char *kOptionsConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [{
     "name": "options", "interface": "vcan-test", "bitrate": 0,
     "on_node_error": "stop", "boot_timeout_ms": 1000, "sdo_timeout_ms": 500,
@@ -1129,7 +1133,7 @@ std::string nmt_request(unsigned node, const char *command)
 }
 
 const char *kPlcConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [{
     "name": "plc", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
@@ -1297,7 +1301,7 @@ void check_plc_blocks(std::shared_ptr<lely::io::VirtualCanController> vbus, cons
 }
 
 const char *kControlConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [{
     "name": "control", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
@@ -1590,7 +1594,7 @@ void check_session_failure(std::shared_ptr<lely::io::VirtualCanController> vbus,
 }
 
 const char *kBootConfig = R"({
-  "version": 13,
+  "version": 14,
   "networks": [{
     "name": "boot", "interface": "vcan-test", "bitrate": 0,
     "sdo_timeout_ms": 300,
@@ -1694,6 +1698,77 @@ void check_boot_options(std::shared_ptr<lely::io::VirtualCanController> vbus,
     io.stop();
 }
 
+const char *kBitsConfig = R"({
+  "version": 14,
+  "networks": [{
+    "name": "bits", "interface": "vcan-test", "bitrate": 0,
+    "nodes": [
+      {"node_id": 2, "start": "master", "enabled": true, "name": "io", "on_loss": "zero",
+       "tpdos": [{"number": 1, "cob_id": 386, "entries": [
+         {"index": 24576, "subindex": 1, "type": "UNSIGNED8",
+          "bits": ["%IX4.0", "%IX4.1", "%IX4.2", "%IX4.3", "%IX4.4", "%IX4.5", "%IX4.6", "%IX4.7"]},
+         {"index": 25601, "subindex": 1, "type": "INTEGER16", "location": "%IW3"}]}],
+       "rpdos": [{"number": 1, "cob_id": 514, "entries": [
+         {"index": 25088, "subindex": 1, "type": "UNSIGNED16",
+          "bits": ["%QX1.0", "%QX1.1", "%QX1.2", "%QX1.3", "%QX1.4", "%QX1.5", "%QX1.6", "%QX1.7",
+                   "%QX2.0", "%QX2.1", "%QX2.2", "%QX2.3", "%QX2.4", "%QX2.5", "%QX2.6", "%QX2.7"]},
+         {"index": 25088, "subindex": 3, "type": "UNSIGNED8", "location": "%QB5"}]}]}
+    ]
+  }]
+})";
+
+// Entries with bits: a received value reaches each %IX, the %QX bits form the sent value, and
+// zero on loss clears the bits. No bus: the slots are set and read as the bus thread would.
+void check_entry_bits(const plugin_runtime_args_t &base)
+{
+    Config cfg;
+    std::vector<std::string> errors;
+    CHECK(parse_config(kBitsConfig, cfg, errors));
+    if (!errors.empty())
+        return;
+    const NetworkConfig &net = cfg.networks[0];
+    MasterLayout layout      = master_layout(net);
+    ProcessImage image;
+    CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
+    CHECK(image.inputs() == 2 && image.outputs() == 2);
+    plugin_runtime_args_t rt = base;
+    for (int i = 0; i < kSize; ++i)
+        for (int b = 0; b < 8; ++b)
+            g_bool_out_ptr[i][b] = &g_bool_out[i][b];
+
+    image.set_input(0, 0xA5);
+    image.set_input(1, 1234);
+    image.commit();
+    image.copy_to_plc(rt);
+    bool ok = true;
+    for (int b = 0; b < 8; ++b)
+        ok = ok && g_bool_in[4][b] == ((0xA5 >> b) & 1);
+    CHECK(ok);
+    CHECK(g_int_in[3] == 1234);
+
+    std::memset(g_bool_out, 0, sizeof(g_bool_out));
+    g_bool_out[1][0] = 1;
+    g_bool_out[2][1] = 1;
+    g_byte_out[5]    = 0x33;
+    image.copy_from_plc(rt);
+    const uint64_t *out = image.latest_outputs();
+    CHECK(out[0] == 0x0201);
+    CHECK(out[1] == 0x33);
+
+    image.mark_all_down(net, layout);
+    image.copy_to_plc(rt);
+    ok = true;
+    for (int b = 0; b < 8; ++b)
+        ok = ok && g_bool_in[4][b] == 0;
+    CHECK(ok);
+
+    std::memset(g_bool_out, 0, sizeof(g_bool_out));
+    g_byte_out[5] = 0;
+    for (int i = 0; i < kSize; ++i)
+        for (int b = 0; b < 8; ++b)
+            g_bool_out_ptr[i][b] = nullptr;
+}
+
 int main()
 {
     set_log_sink(quiet_sink);
@@ -1725,6 +1800,7 @@ int main()
         std::fclose(f);
     }
     plugin_runtime_args_t rt = fake_args();
+    check_entry_bits(rt);
 
     std::shared_ptr<lely::io::VirtualCanController> vbus;
     std::string wire;
