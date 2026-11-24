@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// client.h - SDO, NMT and LSS requests from a client of the plugin's socket (the editor's online
-// tools). The socket thread queues a job per request; the network's bus thread takes the jobs one
-// at a time and records each result, which the client collects later with the job's id. Nothing
-// here runs in the PLC scan.
+// client.h - SDO, NMT, LSS and bus scan requests from a client of the plugin's socket (the editor's
+// online tools). The socket thread queues a job per request; the network's bus thread takes the
+// jobs one at a time and records each result, which the client collects later with the job's id.
+// Nothing here runs in the PLC scan.
 
 #ifndef CANOPEN_CLIENT_H
 #define CANOPEN_CLIENT_H
@@ -41,7 +41,8 @@ struct ClientJob
         Read,
         Write,
         Nmt,
-        Lss
+        Lss,
+        Scan
     };
     Kind kind        = Kind::Read;
     uint64_t id      = 0;

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // requests.h - the JSON requests of the plugin's socket (docs/CANOPEN.md): the status, SDO read
-// and write, NMT commands, LSS requests, job results, and opening and closing service mode. This
+// and write, NMT commands, LSS requests, bus scans, job results, and opening and closing service
+// mode. This
 // file parses and answers them; what they act on is behind the Requests interface, which the
 // plugin implements.
 
@@ -28,6 +29,10 @@ struct ServiceRequest
     unsigned master_node_id = 127;
     unsigned sdo_timeout_ms = 1000;
     std::vector<unsigned> nodes;
+    // Commissioning: SDO and NMT to any node ID; `take_over` ends a network kept at PLC stop on
+    // the interface.
+    bool commission = false;
+    bool take_over  = false;
 };
 
 enum class Lookup
@@ -35,7 +40,8 @@ enum class Lookup
     Ok,
     NotRunning,     // no network runs
     UnknownNetwork, // no network with that index
-    UnknownNode     // the node is not one of the network's
+    UnknownNode,    // the node is not one of the network's
+    NotCommission   // the network is not service mode for commissioning
 };
 
 class Requests
@@ -46,10 +52,18 @@ class Requests
     virtual std::string status() = 0;
     // The queue of network `net`; `node` 0 stands for every node of the network.
     virtual Lookup network(size_t net, unsigned node, ClientQueue *&queue) = 0;
+    // The queue of network `net` when it is service mode for commissioning (bus scans).
+    virtual Lookup commission_network(size_t net, ClientQueue *&queue)
+    {
+        (void)net;
+        (void)queue;
+        return Lookup::NotCommission;
+    }
     // The result of a job of any network; false for an unknown job.
     virtual bool job(uint64_t id, JobResult &out) = 0;
-    // Opens service mode; an empty string on success, else the refusal reason.
-    virtual std::string service_open(const ServiceRequest &req) = 0;
+    // Opens service mode; an empty string on success, else the refusal reason, with the name of
+    // the network or slave that refuses it in `name` when one does.
+    virtual std::string service_open(const ServiceRequest &req, std::string &name) = 0;
     // The number a client addresses the service mode network by, once it is open.
     virtual size_t service_index()
     {

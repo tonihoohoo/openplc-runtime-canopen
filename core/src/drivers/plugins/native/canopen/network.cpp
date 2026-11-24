@@ -101,12 +101,6 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
     for (const MasterPdo &m : layout_.tpdos)
         periodic_ = periodic_ || m.pdo->send_period_ms > 0;
     rpdo_error_.assign(layout_.rpdos.size(), 0);
-    bool lss = false;
-    for (const NodeConfig &n : cfg_.nodes)
-        lss = lss || n.has_lss;
-    // Without LSS nodes Lely's start-up has no LSS step and sends no LSS frame.
-    if (lss && !service_)
-        lss_.reset(new LssAssigner(exec, *this));
     scan_.watch   = IO_POLL_WATCH_INIT(&Network::OnScanEvent);
     scan_.task    = EV_TASK_INIT(exec, &Network::OnScanTask);
     scan_.net     = this;
@@ -116,8 +110,6 @@ Network::Network(ev_exec_t *exec, lely::io::Poll &poll, lely::io::TimerBase &tim
 
 Network::~Network()
 {
-    if (lss_)
-        lss_->AbortAll();
     {
         std::lock_guard<lely::util::BasicLockable> lock(*this);
         for (__can_recv *r : service_recv_)
@@ -126,6 +118,9 @@ Network::~Network()
         if (lss_recv_)
             can_recv_destroy(lss_recv_);
         lss_recv_ = nullptr;
+        for (__can_recv *r : scan_recv_)
+            can_recv_destroy(r);
+        scan_recv_.clear();
     }
     tick_.cancel_wait(tick_wait_);
     if (scan_.watched)
@@ -735,12 +730,6 @@ void Network::HandleLoss(uint8_t id, ProblemKind kind)
              stop ? "stopping it until the next PLC start" : "booting it again");
     n->last_problem = why;
     n->restored     = false;
-    // A device that lost power without a stored ID comes back without one.
-    if (n->cfg->has_lss)
-    {
-        n->lss_due  = true;
-        n->lss_next = clock::now();
-    }
     Problem p;
     p.kind = kind;
     status_.lost(id, p);
@@ -1108,8 +1097,6 @@ void Network::OnTick()
     if (!running_)
         return;
     ServeNodeControl();
-    if (lss_starting_)
-        return;
     auto now = clock::now();
     for (auto &it : nodes_)
     {
@@ -1133,13 +1120,6 @@ void Network::OnTick()
         }
         if (n.up || n.stopped || n.held || n.booting || n.manual)
             continue;
-        if (n.lss_due)
-        {
-            // The device gets its node ID first; the boot or the poll follows when it has it.
-            if (!n.lss_running)
-                LssRecover(n, it.first, now);
-            continue;
-        }
         if (!n.retry_pending)
         {
             // Also a node heard only by its heartbeat: it missed the NMT reset (frames lost) and
@@ -1404,7 +1384,103 @@ void Network::ServeClient()
     case ClientJob::Kind::Lss:
         ClientLss(job);
         break;
+    case ClientJob::Kind::Scan:
+        ClientScan(job);
+        break;
     }
+}
+
+void Network::ClientScan(const ClientJob &job)
+{
+    JobResult refused;
+    refused.state = JobResult::State::Failed;
+    if (!service_)
+        refused.reason = "not_commissioning";
+    else if (lss_busy_ || lss_online_.running())
+        refused.reason = "busy";
+    if (!refused.reason.empty())
+    {
+        client_->finish(job.id, refused);
+        return;
+    }
+    client_busy_       = true;
+    scan_job_          = job.id;
+    const auto timeout = std::chrono::milliseconds(BusScan::kTimeoutMs);
+    // Service mode sends nothing under the master's node ID, so that ID is scanned too.
+    bus_scan_.reset(new BusScan(
+        0,
+        [this, timeout](unsigned node, uint16_t index, uint8_t sub, BusScan::Done done)
+        {
+            auto con = [done](uint8_t, uint16_t, uint8_t, std::error_code ec, uint32_t v)
+            {
+                if (!ec)
+                    done(BusScan::Answer::Value, v);
+                else if (ec.category() == lely::canopen::SdoCategory() &&
+                         static_cast<uint32_t>(ec.value()) !=
+                             static_cast<uint32_t>(lely::canopen::SdoErrc::TIMEOUT))
+                    done(BusScan::Answer::Abort, 0);
+                else
+                    done(BusScan::Answer::Timeout, 0);
+            };
+            try
+            {
+                std::lock_guard<lely::util::BasicLockable> lock(*this);
+                ServiceSdo(static_cast<uint8_t>(node))
+                    .SubmitUpload<uint32_t>(exec_, index, sub, con, false, timeout);
+            }
+            catch (const std::exception &e)
+            {
+                log_debug("node %u: scan read failed: %s", node, e.what());
+                done(BusScan::Answer::Timeout, 0);
+            }
+        }));
+    {
+        std::lock_guard<lely::util::BasicLockable> lock(*this);
+        // Emergency (0x081-0x0FF) and heartbeat or boot-up (0x701-0x77F) of every node ID.
+        for (uint32_t base : {0x080u, 0x700u})
+            for (uint32_t node = 1; node <= 127; ++node)
+            {
+                __can_recv *r = can_recv_create();
+                if (!r)
+                    break;
+                can_recv_set_func(r, &Network::OnScanFrame, this);
+                can_recv_start(r, net(), base + node, 0);
+                scan_recv_.push_back(r);
+            }
+    }
+    log_info("%s: bus scan of node IDs 1-127", cfg_.label().c_str());
+    bus_scan_->start([this]
+                     { client_->progress(scan_job_, "\"devices\":" + bus_scan_->devices_json()); },
+                     [this]
+                     {
+                         EndScanWatch();
+                         client_busy_    = false;
+                         size_t answered = 0;
+                         for (const BusScan::Device &d : bus_scan_->devices())
+                             answered += d.answered ? 1 : 0;
+                         log_info("%s: bus scan ended, %zu device(s) answered, %zu ID(s) seen",
+                                  cfg_.label().c_str(), answered, bus_scan_->devices().size());
+                         JobResult r;
+                         r.state = JobResult::State::Done;
+                         r.json  = "\"devices\":" + bus_scan_->devices_json();
+                         client_->finish(scan_job_, std::move(r));
+                     });
+}
+
+void Network::EndScanWatch()
+{
+    std::lock_guard<lely::util::BasicLockable> lock(*this);
+    for (__can_recv *r : scan_recv_)
+        can_recv_destroy(r);
+    scan_recv_.clear();
+}
+
+int Network::OnScanFrame(const can_msg *msg, void *data) noexcept
+{
+    auto *self = static_cast<Network *>(data);
+    if (self->bus_scan_ && !(msg->flags & CAN_FLAG_RTR))
+        self->bus_scan_->heard(msg->id, msg->data, msg->len);
+    return 0;
 }
 
 lely::canopen::Sdo &Network::ServiceSdo(uint8_t id)
@@ -1745,8 +1821,6 @@ void Network::TurnOn(NodeState &n, uint8_t id)
     n.backoff       = kRetryMin;
     n.next_poll     = clock::now();
     n.looked_since  = n.next_poll;
-    n.lss_due       = n.cfg->has_lss;
-    n.lss_next      = n.next_poll;
     SetListed(n, id, true);
     status_.set_enabled(id, true, true);
     log_info("%s turned on by the PLC program", n.cfg->label().c_str());

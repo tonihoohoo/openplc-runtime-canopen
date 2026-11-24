@@ -1215,8 +1215,6 @@ void Slave::load_lss_values()
     const char *rfrom = "project";
     if (dev_.lss.enabled)
     {
-        if (dev_.lss.wait_for_master)
-            node = 0xFF;
         if (stored_node_)
         {
             node  = stored_node_;

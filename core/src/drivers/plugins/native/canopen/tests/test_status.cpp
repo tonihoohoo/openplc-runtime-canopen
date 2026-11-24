@@ -4,6 +4,7 @@
 // late PDOs, the event ring, the JSON answer, the status requests, rtnetlink link parsing and the
 // bus monitor.
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <linux/can/netlink.h>
@@ -11,6 +12,7 @@
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <net/if.h>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
@@ -19,6 +21,7 @@
 #include <vector>
 
 #include "bus_monitor.h"
+#include "bus_scan.h"
 #include "cJSON.h"
 #include "can_link.h"
 #include "check.h"
@@ -276,11 +279,23 @@ struct FakeRequests : Requests
     {
         return queue.result(id, out);
     }
-    std::string service_open(const ServiceRequest &req) override
+    Lookup commission_network(size_t net, ClientQueue *&q) override
+    {
+        if (!commissioning)
+            return Lookup::NotCommission;
+        if (net != 0)
+            return Lookup::UnknownNetwork;
+        q = &queue;
+        return Lookup::Ok;
+    }
+    std::string service_open(const ServiceRequest &req, std::string &name) override
     {
         opened = req;
+        name   = refused_by;
         return refuse;
     }
+    bool commissioning = false;
+    std::string refused_by;
     void service_close() override
     {
         ++closes;
@@ -425,6 +440,40 @@ void test_requests()
          R"({"op":"service_open","interface":"can0","bitrate":0,"master_node_id":127,"sdo_timeout_ms":0,"nodes":[2]})",
          R"({"op":"service_open","interface":"","bitrate":0,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[2]})"})
         CHECK(handle_request(bad, t) == "{\"error\":\"bad_request\"}");
+    // Commissioning: no node list needed, take_over only with commission, the refusing name.
+    t.refuse = "";
+    CHECK(
+        handle_request(
+            R"({"op":"service_open","interface":"can0","bitrate":125000,"master_node_id":127,"sdo_timeout_ms":500,"commission":true,"take_over":true})",
+            t) == "{\"ok\":true,\"network\":0}");
+    CHECK(t.opened.commission && t.opened.take_over && t.opened.nodes.empty());
+    CHECK(
+        handle_request(
+            R"({"op":"service_open","interface":"can0","bitrate":125000,"master_node_id":127,"sdo_timeout_ms":500,"nodes":[],"take_over":true})",
+            t) == "{\"error\":\"bad_request\"}");
+    CHECK(
+        handle_request(
+            R"({"op":"service_open","interface":"can0","bitrate":125000,"master_node_id":127,"sdo_timeout_ms":500,"commission":1})",
+            t) == "{\"error\":\"bad_request\"}");
+    CHECK(
+        handle_request(
+            R"({"op":"service_open","interface":"can0","bitrate":125000,"master_node_id":127,"sdo_timeout_ms":500})",
+            t) == "{\"error\":\"bad_request\"}");
+    t.refuse     = "slave_on_interface";
+    t.refused_by = "io";
+    CHECK(
+        handle_request(
+            R"({"op":"service_open","interface":"can0","bitrate":125000,"master_node_id":127,"sdo_timeout_ms":500,"commission":true})",
+            t) == "{\"error\":\"slave_on_interface\",\"name\":\"io\"}");
+    t.refuse     = "";
+    t.refused_by = "";
+    // Bus scan: only in commissioning service mode.
+    t.queue.set_running(true);
+    CHECK(handle_request(R"({"op":"scan","network":0})", t) == "{\"error\":\"not_commissioning\"}");
+    t.commissioning = true;
+    CHECK(handle_request(R"({"op":"scan","network":0})", t).find("\"job\":") == 1);
+    CHECK(handle_request(R"({"op":"scan","network":1})", t) == "{\"error\":\"unknown_network\"}");
+    CHECK(handle_request(R"({"op":"scan"})", t) == "{\"error\":\"bad_request\"}");
     CHECK(handle_request("{\"op\":\"service_close\"}", t) == "{\"ok\":true}" && t.closes == 1);
     CHECK(handle_request(R"({"op":"slave_lss_forget","slave":"io"})", t) == "{\"ok\":true}" &&
           t.forgotten == "io");
@@ -674,17 +723,73 @@ void test_server_exception()
     server.stop();
 }
 
-void test_boot_clears_lss_not_found()
+// A bus scan's sequence: 8 IDs at a time, the identity read after an answer (an abort counts),
+// no read of the master's ID, heard frames, and the result in ID order.
+void test_bus_scan()
 {
-    NetworkConfig net = two_nodes();
-    NetworkStatus st(net);
-    st.lss_result(2, LssOutcome::NotFound, 0, false);
-    st.lss_result(3, LssOutcome::Given, 255, false);
-    st.boot_ok(2);
-    st.boot_ok(3);
-    NetworkSnapshot s = st.snapshot();
-    CHECK(node(s, 2).lss.outcome == LssOutcome::None);
-    CHECK(node(s, 3).lss.outcome == LssOutcome::Given);
+    struct Pending
+    {
+        unsigned node;
+        uint16_t index;
+        uint8_t sub;
+        BusScan::Done done;
+    };
+    std::vector<Pending> pending;
+    size_t most = 0;
+    std::set<unsigned> asked;
+    BusScan scan(127,
+                 [&](unsigned node, uint16_t index, uint8_t sub, BusScan::Done done)
+                 {
+                     pending.push_back({node, index, sub, done});
+                     asked.insert(node);
+                 });
+    bool finished = false;
+    int progress  = 0;
+    scan.start([&] { ++progress; }, [&] { finished = true; });
+    scan.heard(0x70C, (const uint8_t *)"\x05", 1);
+    scan.heard(0x085, (const uint8_t *)"\x00\x10\x01\x00\x00\x00\x00\x00", 8);
+    scan.heard(0x080, (const uint8_t *)"", 0); // SYNC, not a node
+    while (!pending.empty())
+    {
+        std::set<unsigned> open;
+        for (const Pending &p : pending)
+            open.insert(p.node);
+        most      = std::max(most, open.size());
+        Pending p = pending.front();
+        pending.erase(pending.begin());
+        if (p.node == 3 && p.index == 0x1000)
+            p.done(BusScan::Answer::Value, 0x191);
+        else if (p.node == 3)
+            p.done(BusScan::Answer::Value, 100 + p.sub);
+        else if (p.node == 4 && p.index == 0x1000)
+            p.done(BusScan::Answer::Abort, 0);
+        else if (p.node == 4 && p.sub == 4)
+            p.done(BusScan::Answer::Value, 44);
+        else if (p.node == 4)
+            p.done(BusScan::Answer::Abort, 0);
+        else
+            p.done(BusScan::Answer::Timeout, 0);
+    }
+    CHECK(finished && !scan.running());
+    CHECK(most == BusScan::kParallel);
+    CHECK(asked.size() == 126 && !asked.count(127) && !asked.count(0));
+    CHECK(progress == 126);
+    const std::string json = scan.devices_json();
+    CHECK(json ==
+          "[{\"node_id\":3,\"answered\":true,\"heard\":[],\"device_type\":401,\"vendor_id\":101,"
+          "\"product_code\":102,\"revision\":103,\"serial_number\":104},"
+          "{\"node_id\":4,\"answered\":true,\"heard\":[],\"device_type\":null,\"vendor_id\":null,"
+          "\"product_code\":null,\"revision\":null,\"serial_number\":44},"
+          "{\"node_id\":5,\"answered\":false,\"heard\":[\"emcy\"],\"device_type\":null,"
+          "\"vendor_id\":null,\"product_code\":null,\"revision\":null,\"serial_number\":null},"
+          "{\"node_id\":12,\"answered\":false,\"heard\":[\"heartbeat\"],\"device_type\":null,"
+          "\"vendor_id\":null,\"product_code\":null,\"revision\":null,\"serial_number\":null}]");
+    // Answers that come back at once still end the scan.
+    BusScan quick(1, [](unsigned, uint16_t, uint8_t, BusScan::Done done)
+                  { done(BusScan::Answer::Timeout, 0); });
+    bool quick_done = false;
+    quick.start(nullptr, [&] { quick_done = true; });
+    CHECK(quick_done && quick.devices().empty());
 }
 
 // A PLC stop and start on a network that stays on the bus: one event each, the flag in the JSON,
@@ -722,7 +827,7 @@ void test_plc_stop_kept()
 int main()
 {
     test_plc_stop_kept();
-    test_boot_clears_lss_not_found();
+    test_bus_scan();
     test_server_exception();
     test_states_and_reasons();
     test_optional_and_held();

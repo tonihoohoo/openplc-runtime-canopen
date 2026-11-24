@@ -48,7 +48,7 @@ namespace
 {
 
 const char *const kConfig = R"({
-  "version": 14,
+  "version": 15,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "vcan-slave", "bitrate": 0, "node_id": 5,
@@ -994,7 +994,7 @@ void check_bus_off(const DeviceConfig &dev)
 
 // Our master boots the slave and exchanges PDOs with it.
 const char *const kMasterConfig = R"({
-  "version": 14,
+  "version": 15,
   "networks": [{
     "name": "line", "interface": "vcan-master", "bitrate": 0, "master_node_id": 127,
     "heartbeat_producer_ms": 100,
@@ -1073,7 +1073,7 @@ constexpr uint32_t kLssMaster = 0x7E5;
 constexpr uint32_t kLssSlave  = 0x7E4;
 
 const char *const kLssConfig = R"({
-  "version": 14,
+  "version": 15,
   "networks": [],
   "devices": [{
     "name": "lss", "interface": "vcan-lss", "bitrate": 500000, "node_id": 5,
@@ -1081,7 +1081,7 @@ const char *const kLssConfig = R"({
                  "revision": 65536},
     "heartbeat_ms": 100,
     "on_plc_stop_state": "none",
-    "lss": {"enabled": true, "wait_for_master": true, "serial": 23},
+    "lss": {"enabled": true, "serial": 23},
     "objects": [
       {"index": 8448, "subindex": 1, "name": "Status", "type": "UNSIGNED16",
        "direction": "to_master", "exchange": "pdo", "location": "%QW0"}
@@ -1189,11 +1189,27 @@ void check_lss(const plugin_runtime_args_t &rt, const std::string &dir)
     if (!errors.empty())
         return;
     const DeviceConfig &dev = cfg.devices[0];
+    {
+        // The slave no longer waits for a master's node ID.
+        std::string waits = kLssConfig;
+        waits.replace(waits.find("\"serial\": 23"), 12,
+                      "\"wait_for_master\": true, \"serial\": 23");
+        Config refused;
+        std::vector<std::string> why;
+        CHECK(!parse_config(waits, refused, why));
+        CHECK(!why.empty() &&
+              why[0].find("unknown field \"wait_for_master\"") != std::string::npos);
+    }
     auto vbus = std::make_shared<lely::io::VirtualCanController>(lely::io::clock_monotonic);
     Probe p(vbus);
     Frame f;
     uint32_t v = 0;
     {
+        // Node ID 255 stored by a tool: the slave starts unconfigured.
+        LssStored none;
+        none.node_id = 0xFF;
+        std::string stored_problem;
+        CHECK(lss_save(file, none, stored_problem));
         Slave slave(dev, virtual_slave_link(vbus));
         std::string problem;
         CHECK(slave.start(problem));
@@ -1266,24 +1282,16 @@ void check_lss(const plugin_runtime_args_t &rt, const std::string &dir)
         CHECK(p.wait(
             m, [](const Frame &x) { return x.id == 0x70C && x.data[0] == 0x00; },
             milliseconds(2000)));
-        // Forget: back to the project, which waits for the master.
+        // Forget: back to the project's node ID 5.
+        m = p.mark();
         CHECK(slave.forget_lss());
         CHECK(scan_until(
-            slave, rt, [&] { return slave.snapshot().unconfigured; }, milliseconds(2000)));
+            slave, rt, [&]
+            { return std::string(slave.snapshot().node_from) == "project" && p.count(m, 0x705); },
+            milliseconds(2000)));
         const std::string text = read_file(file);
         CHECK(text.find("node_id") == std::string::npos);
         CHECK(text.find("\"serial\":23") == std::string::npos);
-        // The project's node ID 5 given by a master without a store still counts as from the master.
-        CHECK(lss(p, {0x04, 1}));
-        CHECK(lss(p, {0x11, 5}, &f) && f.data[1] == 0);
-        m = p.mark();
-        lss(p, {0x04, 0});
-        CHECK(p.wait(
-            m, [](const Frame &x) { return x.id == 0x705 && x.data[0] == 0x00; },
-            milliseconds(1000)));
-        CHECK(scan_until(
-            slave, rt, [&] { return std::string(slave.snapshot().node_from) == "lss"; },
-            milliseconds(1000)));
         slave.stop();
     }
     {
@@ -1293,7 +1301,6 @@ void check_lss(const plugin_runtime_args_t &rt, const std::string &dir)
         std::fclose(f2);
         setenv("OPENPLC_PERSISTENT_DATA_DIR", blocked.c_str(), 1);
         DeviceConfig fixed        = dev;
-        fixed.lss.wait_for_master = false;
         fixed.lss.bitrate_change  = false;
         Slave slave(fixed, virtual_slave_link(vbus));
         std::string problem;
@@ -1527,7 +1534,7 @@ void check_stop_state_config()
 } // namespace
 
 const char *const kPackedConfig = R"({
-  "version": 14,
+  "version": 15,
   "networks": [],
   "devices": [{
     "name": "bits", "interface": "vcan-packed", "bitrate": 0, "node_id": 5,
@@ -1686,7 +1693,7 @@ void check_packed(const DeviceConfig &dev, const plugin_runtime_args_t &rt)
 }
 
 const char *const kMorePdosConfig = R"({
-  "version": 14,
+  "version": 15,
   "networks": [],
   "devices": [{
     "name": "many", "interface": "vcan-pdos", "bitrate": 0, "node_id": 5,

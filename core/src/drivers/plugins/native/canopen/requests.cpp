@@ -41,6 +41,8 @@ const char *lookup_error(Lookup l)
         return "unknown_network";
     case Lookup::UnknownNode:
         return "unknown_node";
+    case Lookup::NotCommission:
+        return "not_commissioning";
     case Lookup::Ok:
         break;
     }
@@ -153,6 +155,36 @@ std::string lss(const cJSON *req, Requests &target)
     return queue_job(req, target, std::move(job), false);
 }
 
+std::string scan(const cJSON *req, Requests &target)
+{
+    unsigned net = 0;
+    if (!get_uint(req, "network", 0, 255, net))
+        return error("bad_request");
+    ClientQueue *queue = nullptr;
+    Lookup l           = target.commission_network(net, queue);
+    if (l != Lookup::Ok)
+        return error(lookup_error(l));
+    ClientJob job;
+    job.kind = ClientJob::Kind::Scan;
+    std::string reason;
+    uint64_t id = queue->submit(std::move(job), reason);
+    if (!id)
+        return error(reason.c_str());
+    return "{\"job\":" + std::to_string(id) + "}";
+}
+
+// An optional true or false; false when present and not a boolean.
+bool get_flag(const cJSON *o, const char *key, bool &out)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (!v)
+        return true;
+    if (!cJSON_IsBool(v))
+        return false;
+    out = cJSON_IsTrue(v);
+    return true;
+}
+
 std::string with_json(std::string head, const std::string &json)
 {
     if (!json.empty())
@@ -193,7 +225,9 @@ std::string service_open(const cJSON *req, Requests &target)
         !get_uint(req, "bitrate", 0, 1000000, s.bitrate) ||
         (s.bitrate && !is_standard_bitrate(s.bitrate)) ||
         !get_uint(req, "master_node_id", 1, 127, s.master_node_id) ||
-        !get_uint(req, "sdo_timeout_ms", 1, 60000, s.sdo_timeout_ms) || !cJSON_IsArray(nodes))
+        !get_uint(req, "sdo_timeout_ms", 1, 60000, s.sdo_timeout_ms) ||
+        !get_flag(req, "commission", s.commission) || !get_flag(req, "take_over", s.take_over) ||
+        (s.take_over && !s.commission) || (!cJSON_IsArray(nodes) && !(s.commission && !nodes)))
         return error("bad_request");
     s.interface       = itf->valuestring;
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(req, "name");
@@ -217,9 +251,21 @@ std::string service_open(const cJSON *req, Requests &target)
                 return error("bad_request");
         s.nodes.push_back(id);
     }
-    std::string reason = target.service_open(s);
-    if (!reason.empty())
+    std::string who;
+    std::string reason = target.service_open(s, who);
+    if (!reason.empty() && who.empty())
         return error(reason.c_str());
+    if (!reason.empty())
+    {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "error", reason.c_str());
+        cJSON_AddStringToObject(o, "name", who.c_str());
+        char *text      = cJSON_PrintUnformatted(o);
+        std::string out = text ? text : "{\"error\":\"error\"}";
+        cJSON_free(text);
+        cJSON_Delete(o);
+        return out;
+    }
     return "{\"ok\":true,\"network\":" + std::to_string(target.service_index()) + "}";
 }
 
@@ -261,6 +307,8 @@ std::string handle_request(const std::string &request, Requests &target)
         answer = nmt(req, target);
     else if (std::strcmp(op->valuestring, "lss") == 0)
         answer = lss(req, target);
+    else if (std::strcmp(op->valuestring, "scan") == 0)
+        answer = scan(req, target);
     else if (std::strcmp(op->valuestring, "job") == 0)
         answer = job_answer(req, target);
     else if (std::strcmp(op->valuestring, "service_open") == 0)

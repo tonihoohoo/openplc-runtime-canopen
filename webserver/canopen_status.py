@@ -32,6 +32,7 @@ REQUEST_OPS = frozenset(
         "service_open",
         "service_close",
         "lss",
+        "scan",
         "slave_lss_forget",
     }
 )
