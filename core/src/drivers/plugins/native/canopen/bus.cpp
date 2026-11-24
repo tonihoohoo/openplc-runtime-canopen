@@ -87,6 +87,12 @@ void Bus::start()
     thread_ = std::thread([this] { thread_main(); });
 }
 
+void Bus::leave()
+{
+    quiet_ = true;
+    stop();
+}
+
 void Bus::stop()
 {
     {
@@ -474,7 +480,8 @@ void Bus::run_session()
             {
                 if (stop_)
                 {
-                    net.StopNodes();
+                    if (!quiet_)
+                        net.StopNodes();
                     loop.run_for(kStopDrain);
                 }
                 else

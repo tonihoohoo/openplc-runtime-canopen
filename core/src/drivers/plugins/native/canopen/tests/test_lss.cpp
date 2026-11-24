@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Node IDs over LSS on Lely's in-process virtual CAN bus (or on the SocketCAN interface named by
-// CANOPEN_TEST_INTERFACE), against simulated generic I/O modules that are LSS devices: a device
-// without a node ID gets the node's and boots; one that already has it is left as it is; one with
-// another ID gets the node's and is reset to boot with it; a device not on the bus is reported and
-// looked for again; store only when asked, and once when the ID was already right; a revision
-// that is not configured is found with a slowscan; the result in the status JSON. Then a client's
-// LSS requests: find two devices without a node ID on a running network, give one a node ID with
-// store, refuse an ID in use, a bit rate outside service mode and any request during the start-up
-// assignment; in service mode set and store a device's bit rate.
+// A client's LSS requests and bus scans on Lely's in-process virtual CAN bus (or on the SocketCAN
+// interface named by CANOPEN_TEST_INTERFACE), against simulated generic I/O modules that are LSS
+// devices: find two devices without a node ID on a running network, give one a node ID with
+// store, refuse an ID in use and a bit rate while the PLC runs; in service mode set and store a
+// device's bit rate. In service mode for commissioning: SDO to a node ID no network lists, a bus
+// scan that finds devices with their identity and the IDs only heard, a scan of an empty bus, and
+// the refusal of a scan outside it. The master gives no node ID by itself.
 
 #include <chrono>
 #include <cstdlib>
@@ -109,45 +107,26 @@ void sink(LogLevel level, const char *msg)
     g_log.push_back(msg);
 }
 
-size_t logged(const std::string &text)
+// Node 2 with its state in %IB10 and its digital inputs in %IB0 (with its analogue input in %IW0).
+std::string config_text(const std::string &wire)
 {
-    std::lock_guard<std::mutex> lock(g_log_mutex);
-    size_t n = 0;
-    for (const auto &l : g_log)
-        n += l.find(text) != std::string::npos;
-    return n;
-}
-
-// Node 2 found by its LSS address (serial 0x1001), its state in %IB10 and its digital inputs in
-// %IB0 (with its analogue input in %IW0); node 3 (serial 0x1003) only with `absent`.
-std::string config_text(const std::string &wire, const std::string &lss2, bool absent)
-{
-    std::string t = R"({
-  "version": 14,
+    return R"({
+  "version": 15,
   "networks": [{
     "name": "lss", "interface": ")" +
-                    wire + R"(", "bitrate": 0,
+           wire + R"(", "bitrate": 0,
     "sdo_timeout_ms": 300,
     "nodes": [
       {"node_id": 2, "start": "master", "enabled": true, "name": "io1",
        "identity": {"device_type": 401, "vendor_id": 1, "product_code": 2, "revision": 3},
-       "lss": {)" + lss2 +
-                    R"(},
        "supervision": {"type": "heartbeat", "consumer_ms": 300},
        "state_location": "%IB10",
        "tpdos": [{"number": 1, "cob_id": 386, "entries": [
          {"index": 24576, "subindex": 1, "type": "UNSIGNED8", "location": "%IB0"},
-         {"index": 25601, "subindex": 1, "type": "INTEGER16", "location": "%IW0"}]}]})";
-    if (absent)
-        t += R"(,
-      {"node_id": 3, "start": "master", "enabled": true, "optional": true, "name": "missing",
-       "lss": {"vendor_id": 1, "product_code": 2, "revision": 3, "serial_number": 4099},
-       "state_location": "%IB11"})";
-    t += R"(
+         {"index": 25601, "subindex": 1, "type": "INTEGER16", "location": "%IW0"}]}]}
     ]
   }]
 })";
-    return t;
 }
 
 struct Run
@@ -175,7 +154,7 @@ std::unique_ptr<Run> start_master(const std::string &text, const std::string &di
     CHECK(r->image.build(net, r->layout, ImageSizes::uniform(kSize), errors));
     const std::string dcf = dir + "/master.dcf";
     const std::string t   = master_dcf(net, r->layout);
-    CHECK(t.find("LSS_Supported=1") != std::string::npos);
+    CHECK(t.find("LSS_Supported=0") != std::string::npos);
     FILE *f = std::fopen(dcf.c_str(), "w");
     std::fwrite(t.data(), 1, t.size(), f);
     std::fclose(f);
@@ -199,23 +178,6 @@ bool scan_until(Run &r, const plugin_runtime_args_t &rt, std::function<bool()> d
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     return false;
-}
-
-NodeStatus node_status(const Run &r, unsigned id)
-{
-    NetworkSnapshot s = r.status->snapshot();
-    for (const NodeStatus &n : s.nodes)
-        if (n.node_id == id)
-            return n;
-    return NodeStatus();
-}
-
-size_t lss_events(const Run &r, unsigned id)
-{
-    size_t n = 0;
-    for (const Event &e : r.status->snapshot().events)
-        n += e.node == id && e.kind == EventKind::Lss;
-    return n;
 }
 
 SimSlaveSpec lss_spec(unsigned node_id, uint32_t serial)
@@ -265,8 +227,49 @@ ClientJob lss_job(LssOnline::Action action, uint32_t serial = 0, unsigned node_i
     return j;
 }
 
-const std::string kAddr2 =
-    R"("vendor_id": 1, "product_code": 2, "revision": 3, "serial_number": 4097)";
+// A service mode bus as the plugin opens it.
+struct Service
+{
+    NetworkConfig net;
+    MasterLayout layout;
+    ProcessImage image;
+    std::unique_ptr<NetworkStatus> status;
+    std::unique_ptr<Bus> bus;
+
+    Service(const std::string &name, const std::string &dir,
+            std::shared_ptr<lely::io::VirtualCanController> vbus, bool commission)
+    {
+        ServiceRequest req;
+        req.interface  = name;
+        req.commission = commission;
+        if (!commission)
+            req.nodes = {2};
+        net    = service_network(req);
+        layout = master_layout(net);
+        std::vector<std::string> errors;
+        CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
+        const std::string dcf = dir + "/service.dcf";
+        FILE *f               = std::fopen(dcf.c_str(), "w");
+        const std::string t   = master_dcf(net, layout);
+        std::fwrite(t.data(), 1, t.size(), f);
+        std::fclose(f);
+        status.reset(new NetworkStatus(net));
+        status->set_service(true);
+        bus.reset(new Bus(net, layout, image, *status, dcf, vbus, nullptr, true));
+        bus->start();
+    }
+    ~Service()
+    {
+        bus->stop();
+    }
+};
+
+ClientJob scan_job()
+{
+    ClientJob j;
+    j.kind = ClientJob::Kind::Scan;
+    return j;
+}
 
 } // namespace
 
@@ -288,143 +291,16 @@ int main()
     plugin_runtime_args_t rt = fake_args();
     auto operational         = [](unsigned at) { return [at] { return g_byte_in[at] == 5; }; };
 
-    // 1. A device without a node ID gets node 2's, boots and runs its PDOs. Store is off. The
-    //    absent node 3 is reported, without holding node 2 back, and looked for again.
+    // 1. A client finds the two devices without a node ID while node 2 runs, gives one node ID 4
+    //    with store; node 2's ID and a bit rate while the PLC runs are refused.
     {
-        SimSlave dev(lss_spec(255, 0x1001), dir + "/dev1.dcf", vbus, wire);
-        dev.set_inputs(0x21, 0);
-        dev.start();
-        auto r = start_master(config_text(name, kAddr2, true), dir, vbus);
-        if (!r)
-            return TEST_RESULT();
-        CHECK(scan_until(*r, rt, operational(10), std::chrono::seconds(15)));
-        CHECK(scan_until(*r, rt, [] { return g_byte_in[0] == 0x21; }, std::chrono::seconds(2)));
-        CHECK(dev.node_id() == 2);
-        CHECK(dev.lss_stores() == 0);
-        NodeStatus n2 = node_status(*r, 2);
-        CHECK(n2.has_lss && n2.lss.outcome == LssOutcome::Given);
-        CHECK(n2.lss.previous_id == 255 && !n2.lss.stored);
-        CHECK(logged("LSS gave the device node ID 2 (it had: none)") == 1);
-        CHECK(scan_until(
-            *r, rt, [&] { return node_status(*r, 3).lss.outcome == LssOutcome::NotFound; },
-            std::chrono::seconds(5)));
-        CHECK(logged("node 3 (missing): no device with") >= 1);
-        // Looked for again with a growing pause; a repeat is not a new event.
-        const size_t first = logged("node 3 (missing): no device with");
-        scan_until(*r, rt, [] { return false; }, std::chrono::milliseconds(2500));
-        CHECK(logged("node 3 (missing): no device with") > first);
-        CHECK(lss_events(*r, 3) == 1);
-        CHECK(g_byte_in[10] == 5);
-        // The status JSON carries the result.
-        const std::string json = status_json({r->status->snapshot()}, 1);
-        CHECK(json.find("\"result\":\"given\"") != std::string::npos ||
-              json.find("\"result\": \"given\"") != std::string::npos);
-        r->bus->stop();
-        dev.stop();
-    }
-
-    // 2. Store on: the ID is given and stored once; at the next PLC start the device already has
-    //    it and nothing is stored again.
-    {
-        SimSlave dev(lss_spec(255, 0x1001), dir + "/dev2.dcf", vbus, wire);
-        dev.start();
-        {
-            auto r =
-                start_master(config_text(name, kAddr2 + ", \"store\": true", false), dir, vbus);
-            if (!r)
-                return TEST_RESULT();
-            CHECK(scan_until(*r, rt, operational(10), std::chrono::seconds(15)));
-            CHECK(dev.lss_stores() == 1);
-            NodeStatus n2 = node_status(*r, 2);
-            CHECK(n2.lss.outcome == LssOutcome::Given && n2.lss.stored);
-            r->bus->stop();
-        }
-        {
-            auto r =
-                start_master(config_text(name, kAddr2 + ", \"store\": true", false), dir, vbus);
-            if (!r)
-                return TEST_RESULT();
-            CHECK(scan_until(*r, rt, operational(10), std::chrono::seconds(15)));
-            NodeStatus n2 = node_status(*r, 2);
-            CHECK(n2.lss.outcome == LssOutcome::Already && !n2.lss.stored);
-            CHECK(dev.lss_stores() == 1);
-            r->bus->stop();
-        }
-        dev.stop();
-    }
-
-    // 3. A device that already has the node's ID and store on that was never stored since load:
-    //    stored once, since LSS cannot tell whether the ID is in its memory.
-    {
-        SimSlave dev(lss_spec(2, 0x1005), dir + "/dev3.dcf", vbus, wire);
-        dev.start();
-        const std::string addr =
-            R"("vendor_id": 1, "product_code": 2, "revision": 3, "serial_number": 4101, "store": true)";
-        auto r = start_master(config_text(name, addr, false), dir, vbus);
-        if (!r)
-            return TEST_RESULT();
-        CHECK(scan_until(*r, rt, operational(10), std::chrono::seconds(15)));
-        NodeStatus n2 = node_status(*r, 2);
-        CHECK(n2.lss.outcome == LssOutcome::Already && n2.lss.stored);
-        CHECK(dev.lss_stores() == 1);
-        r->bus->stop();
-        dev.stop();
-    }
-
-    // 4. A device with another node ID (7) gets node 2's and is reset to boot with it. The
-    //    revision is not configured and the device file's (3) is tried first.
-    {
-        SimSlave dev(lss_spec(7, 0x1007), dir + "/dev4.dcf", vbus, wire);
-        dev.set_inputs(0x47, 0);
-        dev.start();
-        const std::string addr = R"("vendor_id": 1, "product_code": 2, "serial_number": 4103)";
-        auto r                 = start_master(config_text(name, addr, false), dir, vbus);
-        if (!r)
-            return TEST_RESULT();
-        CHECK(scan_until(*r, rt, operational(10), std::chrono::seconds(15)));
-        CHECK(scan_until(*r, rt, [] { return g_byte_in[0] == 0x47; }, std::chrono::seconds(2)));
-        CHECK(dev.node_id() == 2);
-        NodeStatus n2 = node_status(*r, 2);
-        CHECK(n2.lss.outcome == LssOutcome::Given && n2.lss.previous_id == 7);
-        CHECK(dev.lss_stores() == 0);
-        r->bus->stop();
-        dev.stop();
-    }
-
-    // 5. Revision not configured and not the device file's: found with a slowscan over it.
-    {
-        SimSlaveSpec spec = lss_spec(255, 0x1009);
-        spec.revision     = 0x00020005;
-        SimSlave dev(spec, dir + "/dev5.dcf", vbus, wire);
-        dev.start();
-        std::string text =
-            config_text(name, R"("vendor_id": 1, "product_code": 2, "serial_number": 4105)", false);
-        // The identity check would refuse the other revision.
-        text.replace(text.find(", \"revision\": 3}"), 16, "}");
-        auto r = start_master(text, dir, vbus);
-        if (!r)
-            return TEST_RESULT();
-        // The start-up assignment runs (its slowscan takes seconds): a client waits.
-        JobResult busy = run_job(r->bus->client(), lss_job(LssOnline::Action::Find),
-                                 std::chrono::seconds(5));
-        CHECK(busy.state == JobResult::State::Failed && busy.reason == "busy");
-        CHECK(scan_until(*r, rt, operational(10), std::chrono::seconds(30)));
-        CHECK(dev.node_id() == 2);
-        CHECK(node_status(*r, 2).lss.outcome == LssOutcome::Given);
-        r->bus->stop();
-        dev.stop();
-    }
-
-    // 6. A client finds the two devices without a node ID while node 2 runs, gives one node ID 4
-    //    with store; node 2's ID and a bit rate outside service mode are refused.
-    {
-        SimSlave dev(lss_spec(255, 0x1001), dir + "/dev6.dcf", vbus, wire);
+        SimSlave dev(lss_spec(2, 0x1001), dir + "/dev6.dcf", vbus, wire);
         SimSlave new1(lss_spec(255, 0x5678), dir + "/new1.dcf", vbus, wire);
         SimSlave new2(lss_spec(255, 0x5679), dir + "/new2.dcf", vbus, wire);
         dev.start();
         new1.start();
         new2.start();
-        auto r = start_master(config_text(name, kAddr2, false), dir, vbus);
+        auto r = start_master(config_text(name), dir, vbus);
         if (!r)
             return TEST_RESULT();
         CHECK(scan_until(*r, rt, operational(10), std::chrono::seconds(15)));
@@ -475,28 +351,13 @@ int main()
         dev.stop();
     }
 
-    // 7. Service mode: a device's bit rate set and stored; its node ID given without store.
+    // 2. Service mode: a device's bit rate set and stored; its node ID given without store.
     {
         SimSlave dev(lss_spec(255, 0x5678), dir + "/dev7.dcf", vbus, wire);
         dev.start();
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        ServiceRequest req;
-        req.interface           = name;
-        req.nodes               = {2};
-        const NetworkConfig net = service_network(req);
-        MasterLayout layout     = master_layout(net);
-        ProcessImage image;
-        std::vector<std::string> errors;
-        CHECK(image.build(net, layout, ImageSizes::uniform(kSize), errors));
-        const std::string dcf = dir + "/service.dcf";
-        FILE *f               = std::fopen(dcf.c_str(), "w");
-        const std::string t   = master_dcf(net, layout);
-        std::fwrite(t.data(), 1, t.size(), f);
-        std::fclose(f);
-        NetworkStatus status(net);
-        status.set_service(true);
-        Bus bus(net, layout, image, status, dcf, vbus, nullptr, true);
-        bus.start();
+        Service svc(name, dir, vbus, false);
+        Bus &bus       = *svc.bus;
         JobResult rate = run_job(bus.client(), lss_job(LssOnline::Action::SetBitrate, 0x5678, 0,
                                                        true, 250000),
                                  std::chrono::seconds(5));
@@ -510,8 +371,72 @@ int main()
         while (dev.node_id() != 2 && std::chrono::steady_clock::now() < end)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         CHECK(dev.node_id() == 2 && dev.lss_stores() == 1);
-        bus.stop();
         dev.stop();
+    }
+
+    // 3. Commissioning: a scan finds node 10 and node 127 with their identity, and a device
+    //    without a node ID is not in it; SDO reaches node 127, which no network lists.
+    {
+        SimSlave a(lss_spec(10, 0x0A0A), dir + "/scan10.dcf", vbus, wire);
+        SimSlave b(lss_spec(127, 0x7F7F), dir + "/scan127.dcf", vbus, wire);
+        SimSlave none(lss_spec(255, 0x5555), dir + "/scan255.dcf", vbus, wire);
+        a.start();
+        b.start();
+        none.start();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        Service svc(name, dir, vbus, true);
+        ClientQueue &q = svc.bus->client();
+        const auto t0  = std::chrono::steady_clock::now();
+        JobResult r    = run_job(q, scan_job(), std::chrono::seconds(10));
+        CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
+        CHECK(r.state == JobResult::State::Done);
+        CHECK(r.json.find("\"node_id\":10,\"answered\":true") != std::string::npos);
+        CHECK(r.json.find("\"node_id\":127,\"answered\":true") != std::string::npos);
+        CHECK(r.json.find("\"serial_number\":2570") != std::string::npos);
+        CHECK(r.json.find("\"serial_number\":32639") != std::string::npos);
+        CHECK(r.json.find("\"vendor_id\":1,\"product_code\":2,\"revision\":3") !=
+              std::string::npos);
+        CHECK(r.json.find("\"device_type\":401") != std::string::npos);
+        CHECK(r.json.find("\"heartbeat\"") != std::string::npos);
+        CHECK(r.json.find("21845") == std::string::npos);
+        // Any node ID in commissioning.
+        ClientJob read;
+        read.kind     = ClientJob::Kind::Read;
+        read.node     = 127;
+        read.index    = 0x1018;
+        read.subindex = 4;
+        JobResult v   = run_job(q, read, std::chrono::seconds(5));
+        CHECK(v.state == JobResult::State::Done && v.data.size() == 4 && v.data[0] == 0x7F &&
+              v.data[1] == 0x7F);
+        // The spare at 127 gets node ID 20 with store, and boots with it after a reset node.
+        ClientJob give  = lss_job(LssOnline::Action::SetId, 0x7F7F, 20, true);
+        JobResult given = run_job(q, give, std::chrono::seconds(5));
+        CHECK(given.state == JobResult::State::Done);
+        CHECK(given.json == "\"previous_id\":127,\"stored\":true");
+        ClientJob reset;
+        reset.kind    = ClientJob::Kind::Nmt;
+        reset.node    = 127;
+        reset.command = NmtRequest::ResetNode;
+        CHECK(run_job(q, reset, std::chrono::seconds(5)).state == JobResult::State::Done);
+        auto end = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (b.node_id() != 20 && std::chrono::steady_clock::now() < end)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(b.node_id() == 20);
+        JobResult again = run_job(q, scan_job(), std::chrono::seconds(10));
+        CHECK(again.json.find("\"node_id\":20,\"answered\":true") != std::string::npos);
+        CHECK(again.json.find("\"node_id\":127,") == std::string::npos);
+        none.stop();
+        b.stop();
+        a.stop();
+    }
+
+    // 4. A scan of an empty bus ends within 5 seconds with nothing found.
+    {
+        Service svc(name, dir, vbus, true);
+        const auto t0 = std::chrono::steady_clock::now();
+        JobResult r   = run_job(svc.bus->client(), scan_job(), std::chrono::seconds(10));
+        CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
+        CHECK(r.state == JobResult::State::Done && r.json == "\"devices\":[]");
     }
 
     CHECK(system(("rm -rf " + dir).c_str()) == 0);

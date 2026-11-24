@@ -84,7 +84,7 @@ namespace
 
 // A missing interface: the bus threads start and wait for it.
 const char *kConfig = R"({
-  "version": 14,
+  "version": 15,
   "networks": [
     {"name": "a", "interface": "cotest-none0", "bitrate": 0, "heartbeat_producer_ms": 100,
      "sync": {"mode": "plc_cycle"},
@@ -268,6 +268,23 @@ int main()
                                      R"("bitrate":0,"master_node_id":1,"sdo_timeout_ms":500,)"
                                      R"("nodes":[2]})");
         CHECK(used.find("interface_in_use") != std::string::npos);
+        // Commissioning names the kept network, and with take_over ends it: the status then has
+        // only network b and service mode; the next PLC start boots a again.
+        const std::string commission = R"({"op":"service_open","interface":"cotest-none0",)"
+                                       R"("bitrate":125000,"master_node_id":127,)"
+                                       R"("sdo_timeout_ms":500,"commission":true)";
+        CHECK(ask(commission + "}").find("{\"error\":\"network_on_interface\",\"name\":\"a\"}") ==
+              0);
+        CHECK(ask(commission + ",\"take_over\":true}").find("{\"ok\":true,\"network\":1}") == 0);
+        const std::string taken = ask(R"({"op":"status"})");
+        CHECK(taken.find("\"name\":\"a\"") == std::string::npos);
+        CHECK(taken.find("\"name\":\"b\"") != std::string::npos);
+        // No such interface here: the requests pass the lookup and wait for a bus session.
+        CHECK(ask(R"({"op":"scan","network":1})").find("not_running") != std::string::npos);
+        CHECK(ask(R"({"op":"scan","network":0})").find("{\"error\":\"not_commissioning\"}") == 0);
+        CHECK(ask(R"({"op":"sdo_read","network":1,"node":99,"index":4096,"subindex":0})")
+                  .find("not_running") != std::string::npos);
+        ask(R"({"op":"service_close"})");
     }
     plugin_list(true);
     CHECK(init(&rt) == 0);

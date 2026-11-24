@@ -97,45 +97,15 @@ uploads no `conf/canopen.json`, and the plugin stays disabled.
   first start. The network also ends when the runtime exits.
 - The master never writes 0x1010 (store parameters), and writes 0x1011 (restore defaults) only
   through `restore_defaults`; the parser refuses configuration SDOs to either.
-- **Node IDs over LSS.** A node with `lss` gets its node ID from the master before it boots; see
-  [Node IDs over LSS](#node-ids-over-lss).
-
-## Node IDs over LSS
-
-A device that supports LSS (CiA 305, `LSS_Supported=1` in its device file) can get its node ID from
-the master instead of from switches or its own memory. The node in the configuration names the
-device by its LSS address, the four values of its 0x1018: vendor ID, product code, revision and
-serial number (the serial number tells two identical devices apart). The revision may be left
-out (0): the master then tries the identity's revision first and otherwise searches the revision
-with an LSS slowscan, the other three values fixed.
-
-- **At every PLC start**, before any node boots, the master looks for each enabled node with `lss`
-  in turn: it switches the device with that address to LSS configuration, asks for its node ID
-  and sets the node's ID only when it differs. Then it switches every device back to waiting, so a
-  device that had no node ID (255) starts with the new one; a device that had another ID is sent
-  NMT reset communication on its old ID, so that it boots with the new one. The boot then goes on
-  as for any node.
-- **Store.** With `store: true` the master also asks the device to store its node ID (LSS store
-  configuration), so it keeps it after a power-off. It does so when it changed the ID, and once
-  while the plugin is loaded when the device already had the right ID, since LSS cannot tell
-  whether that ID is in the device's memory; it is not stored again at every PLC start. A refused
-  store is logged and reported (`store_refused`); the node still boots with its ID until the next
-  power-off. Without `store` the device loses the ID at power-off and gets it again at the next
-  PLC start.
-- **Not found.** When no device answers with the address, the master logs it, reports
-  `not_found` and looks again before every boot attempt of the node, with the same growing pause
-  (1 s up to 16 s); the other nodes are not held back. A node that is lost, or turned on by the
-  program, gets the assignment again before it boots.
-- **Refused.** A device that refuses the node ID is reported (`refused`) and tried again as above.
-
-The master never changes a device's bit rate over LSS by itself (see [LSS tools](#lss-tools)), and only nodes with `lss` take part. Lely's LSS master is created only when at least one node
-has `lss`.
+- **No node IDs over LSS.** The master gives no device a node ID or bit rate by itself. Devices
+  are commissioned once, one at a time, with a tool (the editor's device commissioning window uses
+  [service mode for commissioning](#service-mode-for-commissioning)) and keep their stored values.
 
 ## conf/canopen.json
 
 ```json
 {
-  "version": 14,
+  "version": 15,
   "networks": [
     {
       "name": "CANopen 1",
@@ -198,7 +168,7 @@ change both together.
 
 | Field | Meaning |
 |---|---|
-| `version` | Format version, 14. Older files are refused; build the project again with a matching editor. |
+| `version` | Format version, 15. Older files are refused; build the project again with a matching editor. |
 | `networks`, `devices` | The master networks and the [slave devices](#canopen-slave); either list may be empty or left out, not both. |
 | `interface` | SocketCAN interface, unique per network: 1-15 letters, digits, `_`, `.` or `-`. |
 | `bitrate` | Bit/s, one of the CiA 301 rates (10k to 1M); 0 leaves the link as it is (vcan, or a link set up outside the runtime). |
@@ -218,7 +188,6 @@ change both together.
 | `restore_defaults` | 0x1011 sub-index to restore before the configuration, 1-127; 0 or absent for none. Not with `configure: false`. |
 | `emcy` | `enabled` (default `true`) and `cob_id` (11-bit, default 0x80 + node ID) of the node's emergency messages. |
 | `identity` | Expected 0x1000 and 0x1018 sub 1-3 values; a missing or 0 value is not checked. |
-| `lss` | Absent for a node with a fixed node ID. Else the device's LSS address and options: `vendor_id`, `product_code` and `serial_number` (required, the serial number not 0), `revision` (0 or absent: any revision) and `store` (`true`: store the node ID in the device; default `false`). See [Node IDs over LSS](#node-ids-over-lss). |
 | `supervision` | `{"type": "none"}`, `{"type": "heartbeat", "consumer_ms": n}` or `{"type": "guarding", "guard_time_ms": n, "life_time_factor": n}` (1-65535 and 1-255). The node's own heartbeat producer (0x1017) or guard time and life time factor (0x100C, 0x100D) are set by SDOs in `sdo`. |
 | `sdo` | Configuration SDO downloads, in order: `data` is the value's bytes in hexadecimal, least significant byte first, 1 to 1024 bytes. Typically the node's PDO communication and mapping parameters and its heartbeat producer time. An item may give `on_abort`: `stop` (default: a refusal fails the node's boot), `continue` (go on with the next item) or `jump` with `jump_to`, the 0-based index of a later item of the same list. A refusal with `continue` or `jump` is logged, recorded as an `sdo_abort` event with its `policy`, and listed under the node's `sdo_skipped`. |
 | `tpdos` / `rpdos` | The node's TPDOs (received by the master, `%I` locations) and RPDOs (sent by the master, `%Q` locations): PDO number on the node, its 11-bit COB-ID, and the mapped entries in mapping order. |
@@ -235,9 +204,8 @@ bit rate, an interface name with other characters, a reserved or duplicate COB-I
 over 64 bits or with more than 8 entries, a slave object address (also a packed bit) outside the runtime's I/O image, a type that does not fit its
 location, a `%Q` location in a TPDO or a `%I` location in an RPDO, `bits` with the wrong count, area or type,
 two entries (or entry bits) on the same `%I` location, or a location outside the runtime's I/O image, an entry without a location that is not a
-dummy, an unknown `on_abort`, a `jump_to` that is missing or not a later item, an `lss` without
-vendor ID, product code or serial number, or two nodes of a network with the same LSS address. Two entries on the same `%Q` location are
-a warning.
+dummy, an unknown `on_abort`, or a `jump_to` that is missing or not a later item. Two entries on the
+same `%Q` location are a warning.
 
 The runtime tells the plugin how long each table of its I/O image is (`%IX`, `%IB`, ... `%QL`), sized
 from the `image.conf` the editor uploads and from the program's own located variables, and each
@@ -254,7 +222,7 @@ with an object dictionary built from the file when the PLC starts.
 
 ```json
 {
-  "version": 14,
+  "version": 15,
   "networks": [],
   "devices": [{
     "name": "io", "interface": "can1", "bitrate": 250000, "node_id": 5, "priority": 90,
@@ -302,7 +270,7 @@ with an object dictionary built from the file when the PLC starts.
 | `on_plc_stop_state` | The slave's own NMT state on a PLC stop, written to 0x1029 sub 2: `none` (it stays in its state), `pre_operational` (from operational only) or `stopped`. A master may write 0x1029 sub 2 (0-2) to change it until the next start. |
 | `start_alone` | `true`: the slave goes operational by itself after its boot-up (NMT startup); default `false`, it waits for the master's NMT start. |
 | `store_settings` | `true`: the slave has objects 0x1010 and 0x1011, and a master can [save its settings](#saved-settings). Default `false`: both objects are absent (abort 0602 0000h). |
-| `lss` | `null` (default, LSS off) or the [LSS](#lss-in-the-slave) settings `{enabled, wait_for_master, serial, bitrate_change}`. |
+| `lss` | `null` (default, LSS off) or the [LSS](#lss-in-the-slave) settings `{enabled, serial, bitrate_change}`. |
 | `objects` | The application objects, index 0x2000-0x5FFF, sub-index 1-254, each with a `type` as for a PDO entry or `VISIBLE_STRING`, a `direction` (`from_master`: written by the master, read by the program from a `%I` location; `to_master`: written by the program to a `%Q` location, read by the master) and an `exchange`: `pdo` (may be mapped to a PDO), `sdo` (by SDO only) or `constant` (a fixed `value`, no location). A `VISIBLE_STRING` object (at most 255 characters) is always a constant. |
 | `default`, `min`, `max` | The object's value at start (default 0) and, for objects from the master, the range a write must keep (SDO aborts 0609 0031h above and 0609 0032h below it). |
 | `bits` | Instead of `location`: the object is an `UNSIGNED8` packed as 8 bits, and `bits` lists the 8 bit locations, bit 0 first (`%IX` from the master, `%QX` to the master). The master sees one byte; the program reads or writes each bit at its own location. Not with `location`, `min`, `max` or exchange `constant`. |
@@ -360,25 +328,27 @@ Behaviour:
 
 ### LSS in the slave
 
-With `lss.enabled` the slave is also a CiA 305 LSS slave, so an LSS master can find it and give it
-its node ID and bit rate. The slave answers switch state global and selective, configure node ID,
+With `lss.enabled` the slave is also a CiA 305 LSS slave, so an LSS master, such as the editor's
+device commissioning window, can find it and give it its node ID and bit rate. It starts with the
+project's `node_id`, or with the stored one. The slave answers switch state global and selective, configure node ID,
 configure bit timing, store configuration, the inquire services and, while it has no node ID and
 is in the waiting state, LSS fastscan (once a master has selected it, it no longer takes part). Its LSS address is the vendor ID, product code and revision from `identity` and the
 serial number in 0x1018 sub 4.
 
 ```json
-"lss": {"enabled": true, "wait_for_master": true, "serial": 23, "bitrate_change": true}
+"lss": {"enabled": true, "serial": 23, "bitrate_change": true}
 ```
 
 | Field | Meaning |
 |---|---|
 | `enabled` | LSS on. Off (default), the slave ignores LSS frames and any stored LSS values. |
-| `wait_for_master` | `true`: the slave starts with no node ID and stays silent apart from LSS until a master gives it one; `node_id` is then only shown in the editor. Default `false`: it starts with `node_id`. |
 | `serial` | The serial number, 1-4294967295. Left out, the slave picks a random one the first time and keeps it in its stored file, so the LSS address stays the same across restarts and uploads. |
 | `bitrate_change` | Default `true`: the master may set a new bit rate (CiA 301 table) and store it; it is used from the next start of the slave. `false`: the request is refused with error code 1 (bit rate not supported). Activate bit timing is ignored: the slave never switches its bit rate on the bus. |
 
-- A node ID from configure node ID is taken when the master switches the slave back to waiting:
-  the slave resets its communication and boots up with the new ID. The COB-IDs of the EMCY
+- A node ID from configure node ID is taken at the slave's next reset communication (a reset node
+  or power-on included); a slave without a node ID takes it at once when the master switches it
+  back to waiting. A stored node ID 255 starts the slave without a node ID (unconfigured, silent
+  apart from LSS) until a tool gives it one. The COB-IDs of the EMCY
   (0x1014), the SDO server and PDOs 1-4 follow the node ID when they are the CiA 301 defaults
   (0x80, 0x180, 0x200, ... plus the node ID); other COB-IDs stay as set.
 - Store configuration writes the node ID and bit rate to
@@ -494,7 +464,6 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `nodes[].warning` | An operational node with an active emergency or a late PDO. |
 | `nodes[].emcy` | The last 8 emergencies, newest first; an emergency with code 0 (error reset) marks them inactive. |
 | `nodes[].late_pdos` | TPDOs with a receive timeout whose frames are late. |
-| `nodes[].lss` | Only for a node with `lss`: `result` is `none` (not run yet), `given` (the device had another node ID or none and got the node's), `already` (it had the node's ID), `not_found`, `refused` or `store_refused`; then `previous_id` (the device's node ID before, 255 for none), `stored` (the ID was stored in the device this time) and `time`. |
 | `nodes[].sdo_skipped` | Configuration SDOs the node refused in its current boot that had `on_abort` `continue` or `jump`, with `index`, `subindex` and `abort_code`. |
 | `slaves[]` | One per [slave device](#canopen-slave): `state` is the slave's own NMT state (`boot_up`, `pre_operational`, `operational`, `stopped`) or `offline` while its interface is not open (with the reason in `problem`); `master_seen` whether the watched master heartbeat is there; `last_emcy` the code of the last emergency it sent. While no master network runs, the answer is `{"version": 1, "active": false, "now": ..., "slaves": [...]}`. |
 | `slaves[].bus` | The slave's link, as `bus` of a network. |
@@ -506,7 +475,7 @@ the CANopen device only when `status` is listed, and its online tools only when 
 | `slaves[].pdos` | Every PDO with its parameters in use: `dir` `rx` or `tx`, `pdo` 1-16, `cob_id`, `valid`, `transmission`, `inhibit_100us` (TPDOs), `event_ms`, the `mapping` and the `frames` received or sent with the time of the `last` one. |
 | `slaves[].values` | The current value of every object except strings, `data` as little-endian hex bytes. |
 | `slaves[].events` | The last 50 events of the slave, newest first: `on_bus`, `nmt` (with `state` and `by`), `reset` (`what` `node` or `communication`), `sdo_write` (a master's SDO download, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `heartbeat` (the master's heartbeat, `seen` or lost), `emcy` (with `code`, `register` and `program` true for the program's own), `emcy_reset`, `plc` (`running`), `bus_state` and `bus_reset` (with `outcome`). |
-| `events` | The last 64 events of the network, newest first: `boot_ok` (with `waits` true when the node waits for the PLC program's start), `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort` (with `policy` `stop`, `continue` or `jump`), `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link, with `outcome` `done`, `not_permitted` or `failed`, and `cause` `bus_off`, `bit_rate` or `tx_stalled`), `sdo_write` (a client's SDO write, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `nmt_command` (an NMT command, with `command` and `source` `client` or `program`), `service` (service mode opened or closed, with `open`), `node_on` and `node_off` (the PLC program turned the node on or off), `plc` (the PLC stopped or started while the network stayed on the bus, with `running`), `lss` (a node ID given over LSS or the device not found, with the node's `lss` fields; a device still not found is not repeated). |
+| `events` | The last 64 events of the network, newest first: `boot_ok` (with `waits` true when the node waits for the PLC program's start), `boot_failed`, `silent`, `absent`, `lost`, `emcy`, `emcy_reset`, `sdo_abort` (with `policy` `stop`, `continue` or `jump`), `pdo_late`, `pdo_back`, `pdo_length`, `bus_state`, `bus_reset` (the master reset the link, with `outcome` `done`, `not_permitted` or `failed`, and `cause` `bus_off`, `bit_rate` or `tx_stalled`), `sdo_write` (a client's SDO write, with `index`, `subindex`, `ok` and the `abort_code` of a refusal), `nmt_command` (an NMT command, with `command` and `source` `client` or `program`), `service` (service mode opened or closed, with `open`), `node_on` and `node_off` (the PLC program turned the node on or off), `plc` (the PLC stopped or started while the network stayed on the bus, with `running`). |
 
 Counters and lists start again when the PLC starts. The status thread never blocks the PLC scan
 or the bus: each answer is built from a copy taken under a short lock.
@@ -527,9 +496,12 @@ gives no usable answer.
 | `{"op": "job", "job": 41}` | `{"state": "pending"}`, `{"state": "done", "data": "34120000"}` (a read), `{"state": "done"}` (a write or NMT), `{"state": "failed", "abort_code": 134217762}` (the node's SDO abort, or 0x05040000 for a timeout) or `{"state": "failed", "reason": "booting"}` |
 | `{"op": "nmt", "network": 0, "node": 2, "command": "pre_operational"}` | `{"ok": true}` |
 | `{"op": "service_open", "name": "CANopen 1", "interface": "can0", "bitrate": 250000, "master_node_id": 127, "sdo_timeout_ms": 1000, "nodes": [2, 3]}` | `{"ok": true, "network": 0}` |
+| `{"op": "service_open", "interface": "can0", "bitrate": 125000, "master_node_id": 127, "sdo_timeout_ms": 500, "commission": true, "take_over": true}` | `{"ok": true, "network": 0}` |
+| `{"op": "scan", "network": 0}` | `{"job": 43}`; its `job` answer adds `devices` |
 | `{"op": "service_close"}` | `{"ok": true}` |
 
-- `network` is the network's index in `canopen.json`; `node` must be one of its nodes (1 to 127).
+- `network` is the network's index in `canopen.json`; `node` must be one of its nodes (1 to 127),
+  or any node ID in service mode for commissioning.
   `data` is the value's bytes in hex, little-endian as on the bus, at most 64 KiB.
 - An SDO request is a job: the answer comes at once with the job's id, and the client asks for its
   result with `job` until it is no longer `pending`. Results are kept 30 seconds. The bus thread
@@ -537,7 +509,8 @@ gives no usable answer.
   request never collides with the master's boot SDOs. A node that the master is booting is answered
   `reason: booting`; try again once it is up.
 - Refusals: `bad_request`, `unknown_op`, `too_large`, `not_running` (no network runs),
-  `unknown_network`, `unknown_node`, `queue_full` (16 requests waiting), `unknown_job`.
+  `unknown_network`, `unknown_node`, `not_commissioning` (a scan outside service mode for
+  commissioning), `queue_full` (16 requests waiting), `unknown_job`.
 - `command` is `start`, `stop`, `pre_operational`, `reset_node` or `reset_communication`; `node` 0
   sends it to each node of the network in turn. A node that a client stops or puts in
   pre-operational is `manual`: its missing PDOs are not reported as late, its inputs follow
@@ -546,7 +519,8 @@ gives no usable answer.
   not a loss: the master boots and configures the node again when its boot-up arrives.
 - Each write and NMT command is logged and recorded as an `sdo_write` or `nmt_command` event.
 - Saving to and restoring from a node's non-volatile memory is a plain write to 0x1010 ("save",
-  73617665) or 0x1011 ("load", 6c6f6164). The master itself never writes 0x1010.
+  73617665) or 0x1011 ("load", 6c6f6164). The master itself never writes 0x1010. The editor writes
+  them only from its device commissioning window.
 
 ### LSS tools
 
@@ -579,7 +553,7 @@ seconds and is a job like an SDO request; `job` answers with the members below a
   `incomplete` (find stopped because a device answered out of turn: some devices answer a
   fastscan while selected, which hides the devices after them). A failed find still lists the
   devices found; give them a node ID and search again to find the rest.
-  Refused at once: `busy` (another LSS sequence, the start-up assignment included, is running),
+  Refused at once: `busy` (another LSS sequence or a bus scan is running),
   `needs_plc_stopped` (set_bitrate while the PLC runs), `node_in_use`, `bad_request`.
 - Each request and its result are logged.
 
@@ -596,6 +570,37 @@ while the PLC runs CANopen or is starting it, `busy` while it is already open, a
 interface can be opened). Its network number in the answer and the status follows the kept networks. A PLC start closes it first, as do
 `service_close` and five minutes without a request. Opening and closing it are logged and recorded
 as `service` events.
+
+### Service mode for commissioning
+
+With `"commission": true` service mode is for commissioning one device at a time (the editor's
+device commissioning window): `nodes` may be left out, SDO and NMT requests may name any node ID 1
+to 127 (the master sends nothing under its own ID there), and the `scan` request runs. It is
+refused like service mode, except on an interface in use:
+
+- A network kept on the bus at PLC stop on the interface: refused with
+  `{"error": "network_on_interface", "name": "<network>"}`; with `"take_over": true` the network
+  leaves the bus without sending an NMT command and boots every node at the next PLC start, as
+  after a changed upload. `take_over` needs `commission`.
+- A slave of the runtime on the interface: refused with
+  `{"error": "slave_on_interface", "name": "<slave>"}`; a slave is never taken over.
+
+The `scan` request reads 0x1000 and then 0x1018 sub 1-4 of each node ID 1-127, at most 8 IDs at a
+time, 200 ms per read, no retry (about 3.2 s on an empty bus), and notes the IDs it hears heartbeat,
+boot-up or emergency frames from. It sends no NMT command and writes nothing. An SDO abort counts as
+an answer. While the job is `pending`, `devices` lists the IDs found so far; it fails with
+`not_running` when service mode closes.
+
+```json
+{"state": "done", "devices": [
+  {"node_id": 10, "answered": true, "heard": ["heartbeat"], "device_type": 401, "vendor_id": 1,
+   "product_code": 2, "revision": 3, "serial_number": 2570},
+  {"node_id": 12, "answered": false, "heard": ["heartbeat"], "device_type": null, "vendor_id": null,
+   "product_code": null, "revision": null, "serial_number": null}]}
+```
+
+A value is `null` when it was not read. Devices without a node ID are found with the `lss` find
+request.
 
 ## PLC function blocks
 
@@ -770,7 +775,7 @@ in `lely-prefix/` next to `CMakeLists.txt` is used by default (the release workf
 | `test_config` | Parser and validator of `conf/canopen.json`, and the bus configuration text that decides whether a network stays on the bus. |
 | `test_entry_points` | The plugin's C entry points with an allocation failure injected at each point of `start_loop`: no exception leaves them and a failed start leaves nothing running. The networks stay on the bus after a PLC stop, service mode is refused on their interfaces, and an init that finds the plugin off ends them. |
 | `test_link_stall` | When a link counts as stalled: no frame sent for 3 s with drops or failing writes, never while quiet, error-passive or bus-off. |
-| `test_lss` | Node IDs over LSS on Lely's in-process CAN bus against simulated LSS devices: a device without a node ID gets the node's and boots, one with the node's ID is left as it is, one with another ID gets it and is reset, a device not on the bus is reported and looked for again, store only when asked and once when the ID was already right, a revision found with a slowscan, the result in the status. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
+| `test_lss` | A client's LSS requests and bus scans on Lely's in-process CAN bus against simulated LSS devices: find two devices without a node ID on a running network, give one a node ID with store, refuse an ID in use and a bit rate while the PLC runs, set and store a bit rate in service mode; in service mode for commissioning a scan with identities and heartbeats, an SDO read of a node no network lists, a node ID given to node 127 that boots as node 20 after a reset node, and an empty bus scanned within 5 seconds. With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
 | `test_master_dcf` | The master's own object dictionary (loaded into Lely), the concise DCF of the configuration SDOs, PDO bit packing. |
 | `test_network` | The master against simulated generic I/O modules on Lely's in-process CAN bus: boot with identity check and configuration SDO, inputs, outputs, one SYNC right after each cycle's outputs with no allocation in the scan hooks, node state, loss and recovery, a node with the wrong identity, a refused configuration SDO, a node that never answers, a running node that missed the master's reset, emergencies, late PDOs, the status and its socket, the online tools (SDO reads and writes, a refused write,
 pre-operational, save, start and reset of a node), service mode, the function blocks' requests (reads of every size, a write with read-back, an abort, a timeout, NMT, emergencies), a node started by the program (waiting, started, waiting again after a reset) and a node turned on and off (booted, stopped, pulled without a loss, skipped by NMT to every node), the NMT command on stop, a PLC stop that keeps the network on the bus (heartbeat on, a node booting meanwhile left pre-operational, the next start with no reset and no configuration SDO), and the reset of a link that is bus-off, at a wrong bit rate or stalled (on a stood-in link state). With `CANOPEN_TEST_INTERFACE=vcan0` it runs on a SocketCAN interface instead. |
@@ -801,18 +806,22 @@ that makes the runtime a slave on `vcan0`, and `.github/scripts/canopen_slave_e2
 master over raw SocketCAN: SDOs with range checks, NMT start, an RPDO through the program back in a
 TPDO and in a TPDO 5 the master gave a COB-ID, the master's heartbeat lost, and a PLC stop and start, checking `slaves` in the status
 (NMT source, SDO writes and refusals, values, PDO counts, active emergencies).
-With `e2e/fixtures/canopen-lss` the simulated module starts without a node ID, and the check waits
-until the master has given it node 2 over LSS, stored it once and booted it.
-`e2e/fixtures/canopen-slave-lss` is the same slave with LSS on, waiting for the master, and
-`.github/scripts/canopen_slave_lss_e2e.py` plays an LSS master: fastscan, node ID 12 configured
-and stored, the boot-up as node 12 with its COB-IDs following, a reset node, and the forget request.
+`e2e/fixtures/canopen-slave-lss` is the same slave with LSS on, as node 5, and
+`.github/scripts/canopen_slave_lss_e2e.py` plays a commissioning tool's LSS master: no fastscan
+answer from the configured slave, a switch selective by its address, node ID 12 configured and
+stored, the boot-up as node 12 after a reset communication with its COB-IDs following, a reset
+node, and the forget request. Then `.github/scripts/canopen_commission_e2e.py`, with the PLC
+stopped, has service mode for commissioning refused on the slave's `vcan0` and opened on `vcan1`,
+where two simulated LSS devices run as nodes 10 and 127: a scan finds both with their identity,
+node 127 gets node ID 20 over LSS with store and boots with it after a reset node, and a second
+scan finds nodes 10 and 20.
 
 On a pull request the end-to-end check runs only the step groups its changed files need
 (`.github/scripts/docs-only.sh`): the master group (inputs to outputs, online tools, PLC blocks,
 boot SDO, node control, the runtime dying) for the master files and their scripts, the slave group
 (slave, slave blocks, Linux I/O blocks) for `slave/` and its scripts, and the LSS group (LSS tools,
-out of turn, master LSS, slave LSS) for `lss.cpp`, `lss_online.*`, `slave/lss_store.*` and their
-scripts. Any other plugin file, a file outside the plugin, the workflow, a same-named editor branch,
+out of turn, slave LSS, commissioning) for `lss.cpp`, `lss_online.*`, `bus_scan.*`,
+`slave/lss_store.*` and their scripts. Any other plugin file, a file outside the plugin, the workflow, a same-named editor branch,
 pushes to `canopen` and runs started by hand run every group; a change to the plugin's tests alone
 runs none, and the job is skipped. The built editor is cached by its commit and the hash of
 `.github/scripts/editor-build.sh`. The upstream `Tests` workflow skips its jobs when a pull

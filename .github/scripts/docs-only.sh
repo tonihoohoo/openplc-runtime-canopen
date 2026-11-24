@@ -22,7 +22,7 @@ groups() {
         "$plugin"/tests/*) ;;
         "$plugin"/slave/lss_store.*) echo slave lss ;;
         "$plugin"/slave/*) echo slave ;;
-        "$plugin"/lss.cpp | "$plugin"/lss_online.*) echo lss ;;
+        "$plugin"/lss.cpp | "$plugin"/lss_online.* | "$plugin"/bus_scan.*) echo lss ;;
         "$plugin"/network.* | "$plugin"/client.* | "$plugin"/requests.* | "$plugin"/master_dcf.* | \
             "$plugin"/bus_monitor.* | "$plugin"/bus_off_recovery.* | "$plugin"/link_stall.* | \
             "$plugin"/plc_port.*) echo master ;;
@@ -30,7 +30,8 @@ groups() {
         .github/scripts/canopen_slave_e2e.py | .github/scripts/canopen_slave_blocks_e2e.py | \
             .github/scripts/linux_io_e2e.py | .github/scripts/gpio-sim-up.sh) echo slave ;;
         .github/scripts/canopen_lss_e2e.py | .github/scripts/canopen_lss_out_of_turn_e2e.py | \
-            .github/scripts/lss_out_of_turn_device.py | .github/scripts/canopen_slave_lss_e2e.py) echo lss ;;
+            .github/scripts/lss_out_of_turn_device.py | .github/scripts/canopen_slave_lss_e2e.py | \
+            .github/scripts/canopen_commission_e2e.py) echo lss ;;
         .github/workflows/canopen.yml | .github/scripts/docs-only.sh | .github/scripts/vcan-up.sh) echo all ;;
         .github/*) ;;
         *) echo all ;;

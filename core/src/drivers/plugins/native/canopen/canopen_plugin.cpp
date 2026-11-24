@@ -19,7 +19,9 @@
 // the blocks; its globals live across a cleanup and a new init. The kept networks end at exit.
 // While the PLC is stopped, a client of the socket can open one network in service mode with the
 // settings it sends, on an interface no kept network or slave uses; it closes on request, at a
-// PLC start, at cleanup and after kServiceIdle.
+// PLC start, at cleanup and after kServiceIdle. Service mode for commissioning addresses any node
+// ID and may take over a kept network's interface: that network leaves the bus and boots fully at
+// the next PLC start.
 // No exception leaves an entry point: the runtime calls them as C functions.
 
 #include <algorithm>
@@ -62,7 +64,8 @@ struct Net
     ProcessImage image;
     std::unique_ptr<NetworkStatus> status;
     std::unique_ptr<Bus> bus;
-    size_t index = 0; // its place in the configuration's network list
+    size_t index    = 0;     // its place in the configuration's network list
+    bool commission = false; // service mode for commissioning: any node ID, bus scans
 };
 
 struct Running
@@ -305,13 +308,18 @@ std::string open_service(const ServiceRequest &req)
         return "error";
     net->status.reset(new NetworkStatus(net->cfg));
     net->status->set_service(true);
+    net->commission = req.commission;
     net->bus.reset(
         new Bus(net->cfg, net->layout, net->image, *net->status, dcf, nullptr, nullptr, true));
     prepare_wake_signal();
     net->bus->start();
     g_service = std::move(net);
-    log_info("CANopen service mode open on %s at %u bit/s, %zu node(s)", req.interface.c_str(),
-             req.bitrate, req.nodes.size());
+    if (req.commission)
+        log_info("CANopen service mode for commissioning open on %s at %u bit/s",
+                 req.interface.c_str(), req.bitrate);
+    else
+        log_info("CANopen service mode open on %s at %u bit/s, %zu node(s)", req.interface.c_str(),
+                 req.bitrate, req.nodes.size());
     return "";
 }
 
@@ -332,7 +340,8 @@ class PluginRequests : public Requests
             return Lookup::NotRunning;
         if (net >= nets.size())
             return Lookup::UnknownNetwork;
-        if (node)
+        // Commissioning: any node ID; the master sends nothing under its own ID there.
+        if (node && !nets[net]->commission)
         {
             bool known = false;
             for (const NodeConfig &n : nets[net]->cfg.nodes)
@@ -340,6 +349,19 @@ class PluginRequests : public Requests
             if (!known)
                 return Lookup::UnknownNode;
         }
+        queue = &nets[net]->bus->client();
+        return Lookup::Ok;
+    }
+
+    Lookup commission_network(size_t net, ClientQueue *&queue) override
+    {
+        const std::vector<Net *> nets = client_nets();
+        if (nets.empty())
+            return Lookup::NotCommission;
+        if (net >= nets.size())
+            return Lookup::UnknownNetwork;
+        if (!nets[net]->commission)
+            return Lookup::NotCommission;
         queue = &nets[net]->bus->client();
         return Lookup::Ok;
     }
@@ -352,18 +374,46 @@ class PluginRequests : public Requests
         return false;
     }
 
-    std::string service_open(const ServiceRequest &req) override
+    std::string service_open(const ServiceRequest &req, std::string &name) override
     {
         if (g_run || g_starting)
             return "plc_running";
         if (g_service)
             return "busy";
-        for (const auto &n : g_nets)
-            if (n->cfg.interface == req.interface)
-                return "interface_in_use";
         for (const auto &s : g_slaves)
             if (s->config().interface == req.interface)
+            {
+                if (!req.commission)
+                    return "interface_in_use";
+                name = s->config().name;
+                return "slave_on_interface";
+            }
+        std::vector<std::unique_ptr<Net>> taken;
+        for (auto it = g_nets.begin(); it != g_nets.end();)
+        {
+            if ((*it)->cfg.interface != req.interface)
+            {
+                ++it;
+                continue;
+            }
+            if (!req.commission)
                 return "interface_in_use";
+            if (!req.take_over)
+            {
+                name = (*it)->cfg.name;
+                return "network_on_interface";
+            }
+            taken.push_back(std::move(*it));
+            it = g_nets.erase(it);
+        }
+        for (const auto &n : taken)
+            log_info("%s leaves the bus for commissioning; it boots again at the next PLC start",
+                     n->cfg.label().c_str());
+        // The kept network was parked by the PLC stop; it leaves without another NMT command.
+        for (auto &n : taken)
+            n->bus->leave();
+        for (size_t i = 0; i < taken.size(); ++i)
+            release_wake_signal();
         return open_service(req);
     }
 

@@ -208,7 +208,6 @@ int main(int argc, char **argv)
             unsigned seen = 0;
             while (running)
             {
-                // The node ID once the device has switched to it.
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 if (store_file.empty() || slave.lss_stores() == seen)
                     continue;
@@ -216,10 +215,10 @@ int main(int argc, char **argv)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 if (FILE *f = std::fopen(store_file.c_str(), "w"))
                 {
-                    std::fprintf(f, "%u %d\n", slave.node_id(), slave.lss_bitrate());
+                    std::fprintf(f, "%u %d\n", slave.lss_stored_id(), slave.lss_bitrate());
                     std::fclose(f);
                 }
-                std::printf("stored node ID %u, bit rate %d\n", slave.node_id(),
+                std::printf("stored node ID %u, bit rate %d\n", slave.lss_stored_id(),
                             slave.lss_bitrate());
                 std::fflush(stdout);
             }

@@ -69,6 +69,8 @@ class Bus
     void start();
     // Sends the network's NMT command for a PLC stop, ends the session and joins. Idempotent.
     void stop();
+    // Ends the session and joins without sending an NMT command (the nodes keep their state).
+    void leave();
     // The PLC stopped: the network stays on the bus (Network::PlcStop) and the blocks' requests
     // end. Waits up to `wait` for the bus thread to take it. Not in service mode.
     void plc_stopped(std::chrono::milliseconds wait = std::chrono::milliseconds(1000));
@@ -145,6 +147,7 @@ class Bus
     bool reset_forbidden_       = false;   // not permitted to reset; said once
     std::thread thread_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> quiet_{false};         // the stop sends no NMT command
     std::atomic<bool> plc_stop_{false};      // the PLC is stopped (wanted state)
     std::atomic<bool> plc_stop_seen_{false}; // the session's master took plc_stop_
     std::atomic<bool> in_session_{false};

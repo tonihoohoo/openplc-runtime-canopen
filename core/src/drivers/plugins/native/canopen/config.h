@@ -17,7 +17,7 @@
 namespace canopen_plugin
 {
 
-constexpr int kConfigVersion = 14;
+constexpr int kConfigVersion = 15;
 
 // One object mapped into a PDO, bound to one IEC location. A dummy entry (0x0001-0x0007) has no
 // location: its bits are skipped on receive and sent as zeros. An UNSIGNED8/16/32 entry may give
@@ -81,17 +81,6 @@ enum class OnLoss
     Zero
 };
 
-// A node whose device gets its node ID from the master over LSS (CiA 305), found by its LSS
-// address: the four values of its object 0x1018. Revision 0 means any revision.
-struct LssConfig
-{
-    uint32_t vendor_id     = 0;
-    uint32_t product_code  = 0;
-    uint32_t revision      = 0;
-    uint32_t serial_number = 0;
-    bool store             = false; // LSS 'store configuration' after giving the ID
-};
-
 struct NodeConfig
 {
     unsigned node_id = 0;
@@ -109,9 +98,6 @@ struct NodeConfig
     bool program_start = false;
     // false: the node is off at PLC start (not booted, supervised or reported) until turned on.
     bool enabled = true;
-    // Node ID given over LSS before the boot.
-    bool has_lss = false;
-    LssConfig lss;
     // 0x1011 sub-index written with "load" before the configuration SDOs; 0 for none.
     unsigned restore_defaults      = 0;
     Supervision supervision        = Supervision::None;
@@ -267,10 +253,9 @@ constexpr unsigned kSlavePdos = 16; // RPDOs and TPDOs each
 // The slave's LSS (CiA 305) settings.
 struct SlaveLss
 {
-    bool enabled         = false;
-    bool wait_for_master = false; // start with no node ID until an LSS master gives one
-    uint32_t serial      = 0;     // 0x1018 sub 4; 0 for the automatic serial
-    bool bitrate_change  = true;  // an LSS master may configure the bit rate
+    bool enabled        = false;
+    uint32_t serial     = 0;    // 0x1018 sub 4; 0 for the automatic serial
+    bool bitrate_change = true; // an LSS master may configure the bit rate
 };
 
 struct DeviceConfig

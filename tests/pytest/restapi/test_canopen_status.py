@@ -202,6 +202,16 @@ def test_lss_request_is_forwarded(tmp_path: Path) -> None:
         plugin.close()
 
 
+def test_scan_request_is_forwarded(tmp_path: Path) -> None:
+    sock_path = tmp_path / "canopen.socket"
+    plugin = FakePlugin(sock_path, b'{"job":9}\n')
+    try:
+        assert send_canopen_request({"op": "scan", "network": 0}, sock_path) == ({"job": 9}, 200)
+        assert plugin.received() == [b'{"op":"scan","network":0}\n']
+    finally:
+        plugin.close()
+
+
 def test_plugin_refusal_is_returned(tmp_path: Path) -> None:
     sock_path = tmp_path / "canopen.socket"
     plugin = FakePlugin(sock_path, b'{"error":"unknown_node"}\n')

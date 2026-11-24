@@ -78,6 +78,7 @@ add_library(canopen_core STATIC
     ${CMAKE_CURRENT_SOURCE_DIR}/bus.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/bus_monitor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/bus_off_recovery.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/bus_scan.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/can_link.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/client.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/config.cpp
