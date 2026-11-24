@@ -262,12 +262,14 @@ class Slave : public lely::canopen::BasicSlave
     // LSS device: counts accepted 'store configuration' requests, and watches the master's
     // 'switch state global: waiting' (0x7E5 04 00), at which a device that had no node ID starts
     // with the one it was given (CiA 305); Lely's LSS slave needs a reset communication for that.
-    void WatchLss(std::atomic<unsigned> &stores, std::atomic<int> &bitrate)
+    void WatchLss(std::atomic<unsigned> &stores, std::atomic<int> &bitrate,
+                  std::atomic<unsigned> &stored_id)
     {
         std::lock_guard<lely::util::BasicLockable> lock(*this);
-        stores_  = &stores;
-        bitrate_ = &bitrate;
-        recv_   = can_recv_create();
+        stores_    = &stores;
+        bitrate_   = &bitrate;
+        stored_id_ = &stored_id;
+        recv_      = can_recv_create();
         if (!recv_)
             return;
         can_recv_set_func(recv_, &Slave::OnLssFrame, this);
@@ -293,9 +295,12 @@ class Slave : public lely::canopen::BasicSlave
     {
         nmt_ = static_cast<uint8_t>(cs);
     }
-    // LSS 'store configuration': counted with the bit rate stored; nothing is kept on disk.
-    void OnStore(uint8_t, int bitrate) override
+    // LSS 'store configuration': counted with the node ID and bit rate stored; nothing is kept
+    // on disk.
+    void OnStore(uint8_t id, int bitrate) override
     {
+        if (stored_id_)
+            *stored_id_ = id;
         if (bitrate_)
             *bitrate_ = bitrate;
         if (stores_)
@@ -312,7 +317,8 @@ class Slave : public lely::canopen::BasicSlave
 
     std::atomic<uint8_t> &nmt_;
     std::atomic<unsigned> *stores_ = nullptr;
-    std::atomic<int> *bitrate_     = nullptr;
+    std::atomic<int> *bitrate_        = nullptr;
+    std::atomic<unsigned> *stored_id_ = nullptr;
     std::atomic<bool> waiting_{false};
     __can_recv *recv_ = nullptr;
 };
@@ -342,6 +348,7 @@ void SimSlave::start()
     saves_      = 0;
     lss_stores_ = 0;
     lss_bitrate_ = 0;
+    lss_stored_id_ = 0;
     thread_     = std::thread([this] { thread_main(); });
     while (!ready_ && !stop_)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -407,7 +414,7 @@ void SimSlave::thread_main()
         Slave slave(exec, timer, *base, dcf_path_, nmt_state_, restores_, saves_, output_writes_,
                     spec_.restore_refused);
         if (spec_.lss)
-            slave.WatchLss(lss_stores_, lss_bitrate_);
+            slave.WatchLss(lss_stores_, lss_bitrate_, lss_stored_id_);
         slave.Reset();
         node_id_ = spec_.node_id;
         ready_   = true;
