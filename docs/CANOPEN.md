@@ -404,7 +404,8 @@ false}`. The other requests are the [online tools](#online-tools). An unknown op
 `{"error": "unknown_op"}` and a malformed request `{"error": "bad_request"}`. The plugin needs
 nothing else for it, so the socket works the same in a runtime without the web routes below.
 
-The web server returns the same answer at `GET /api/canopen/status` (login required), or
+The web server returns the same answer at `GET /api/canopen/status` (login as an admin or engineer;
+operator and viewer accounts get 403), or
 `{"active": false}` when the plugin is not loaded, and lists `"features": ["status", "sdo", "nmt",
 "service"]` in the `canopen` entry of `/api/capabilities`. The OpenPLC Editor shows the status on
 the CANopen device only when `status` is listed, and its online tools only when the others are.
@@ -484,7 +485,7 @@ or the bus: each answer is built from a copy taken under a short lock.
 
 The OpenPLC Editor reads and writes a node's objects (SDO) and sends it NMT commands while a
 network runs, with the PLC running or stopped, and in service mode while no network runs. The requests go over the plugin's socket, or through
-`POST /api/canopen/request` (login required), which forwards a JSON body with one of the ops below
+`POST /api/canopen/request` (admin or engineer login, like the status route), which forwards a JSON body with one of the ops below
 and returns the plugin's answer unchanged, its refusals included; `{"active": false}` when the
 plugin is not loaded, 400 for another op or a body that is not a JSON object, 502 when the plugin
 gives no usable answer.
