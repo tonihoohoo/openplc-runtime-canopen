@@ -10,6 +10,7 @@ node node_modules/electron/install.js
 flags='--no-optimization-minimize --no-devtool --no-optimization-concatenate-modules'
 # The steps of `npm run build`, with the flags on the webpack runs only and without package-trust
 # verify-bundle, which needs a minified bundle.
+npm run setup:hmi-widgets
 npm run build:hmi-objects
 main="TS_NODE_TRANSPILE_ONLY=true npx ts-node scripts/prepare-yowasp-clang.ts \
 && npx ts-node --transpile-only scripts/package-trust/cli.ts prepare \
