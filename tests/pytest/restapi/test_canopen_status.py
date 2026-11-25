@@ -288,3 +288,14 @@ def test_request_route_forwards(client, monkeypatch, tmp_path: Path) -> None:
         assert resp.status_code == 400
     finally:
         plugin.close()
+
+
+@pytest.mark.parametrize("role", ["operator", "viewer"])
+def test_routes_refuse_hmi_accounts(client, role: str) -> None:
+    create_user(client, "admin", "admin-pass")
+    admin = token_for(client, "admin", "admin-pass")
+    assert create_user(client, role, f"{role}-pass", token=admin, role=role).status_code == 201
+    token = token_for(client, role, f"{role}-pass")
+    assert client.get("/api/canopen/status", headers=auth(token)).status_code == 403
+    resp = client.post("/api/canopen/request", json={"op": "nmt"}, headers=auth(token))
+    assert resp.status_code == 403
