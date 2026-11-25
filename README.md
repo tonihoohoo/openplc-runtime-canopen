@@ -28,6 +28,19 @@
 
 OpenPLC Runtime v4 is a headless industrial Programmable Logic Controller (PLC) runtime that can run IEC 61131-3 programs on standard computing hardware. It is designed to be controlled by the [OpenPLC Editor v4](https://github.com/tonihoohoo/openplc-editor-canopen) (CANopen edition) desktop application via a REST API or via the [Autonomy Edge Cloud](https://autonomy-edge.com)
 
+## Changes from upstream OpenPLC Runtime
+
+Everything not listed here works as in upstream OpenPLC Runtime.
+
+- The `canopen` native plugin: a CANopen master on a SocketCAN interface (boot with SDOs, PDOs to and from located variables, supervision, recovery): [docs/CANOPEN.md](docs/CANOPEN.md#what-the-master-does)
+- The master stays on the bus while the PLC is stopped: [docs/CANOPEN.md](docs/CANOPEN.md#what-the-master-does)
+- CANopen slave on another interface, with LSS and saved settings: [docs/CANOPEN.md](docs/CANOPEN.md#canopen-slave)
+- CANopen status and online tools (SDO, NMT, LSS, service mode for commissioning) at `/api/canopen/status` and `/api/canopen/request`, for admin and engineer accounts: [docs/CANOPEN.md](docs/CANOPEN.md#status)
+- A `canopen` entry in `/api/capabilities` with the accepted configuration formats: [docs/CANOPEN.md](docs/CANOPEN.md#status)
+- PLC function blocks for SDO, NMT and the slave, served by the plugin: [docs/CANOPEN.md](docs/CANOPEN.md#plc-function-blocks)
+- The build tools the CAN library needs (autoconf, automake, libtool) in `install.sh`: [docs/CANOPEN.md](docs/CANOPEN.md#building-and-testing)
+- Releases and the Docker image of this fork: [docs/CANOPEN_RELEASES.md](docs/CANOPEN_RELEASES.md)
+
 ## OpenPLC Runtime Components
 
 OpenPLC Runtime v4 consists of two main components:
