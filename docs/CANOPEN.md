@@ -500,6 +500,7 @@ gives no usable answer.
 | `{"op": "service_open", "interface": "can0", "bitrate": 125000, "master_node_id": 127, "sdo_timeout_ms": 500, "commission": true, "take_over": true}` | `{"ok": true, "network": 0}` |
 | `{"op": "scan", "network": 0}` | `{"job": 43}`; its `job` answer adds `devices` |
 | `{"op": "service_close"}` | `{"ok": true}` |
+| `{"op": "interfaces"}` | `{"interfaces": [{"name": "can0", "kind": "can", "up": true, "bitrate": 250000}]}` |
 
 - `network` is the network's index in `canopen.json`; `node` must be one of its nodes (1 to 127),
   or any node ID in service mode for commissioning.
@@ -509,6 +510,9 @@ gives no usable answer.
   serves one request at a time, between its own work, through the master's own SDO client, so a
   request never collides with the master's boot SDOs. A node that the master is booting is answered
   `reason: booting`; try again once it is up.
+- `interfaces` lists the computer's CAN links (SocketCAN), sorted by name, with their kind
+  (`can`, `vcan`, ...), whether they are up and their bit rate (0 when none is set or reported). It
+  answers whether the PLC runs or not; the editor's device commissioning window offers them.
 - Refusals: `bad_request`, `unknown_op`, `too_large`, `not_running` (no network runs),
   `unknown_network`, `unknown_node`, `not_commissioning` (a scan outside service mode for
   commissioning), `queue_full` (16 requests waiting), `unknown_job`.

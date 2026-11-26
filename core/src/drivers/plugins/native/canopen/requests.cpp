@@ -290,6 +290,26 @@ NetworkConfig service_network(const ServiceRequest &req)
     return net;
 }
 
+std::string interfaces_answer(const std::vector<CanLinkEntry> &links)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *list = cJSON_AddArrayToObject(root, "interfaces");
+    for (const CanLinkEntry &l : links)
+    {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", l.name.c_str());
+        cJSON_AddStringToObject(o, "kind", l.kind.c_str());
+        cJSON_AddBoolToObject(o, "up", l.up);
+        cJSON_AddNumberToObject(o, "bitrate", l.bitrate);
+        cJSON_AddItemToArray(list, o);
+    }
+    char *text         = cJSON_PrintUnformatted(root);
+    std::string answer = text ? text : "{\"interfaces\":[]}";
+    cJSON_free(text);
+    cJSON_Delete(root);
+    return answer;
+}
+
 std::string handle_request(const std::string &request, Requests &target)
 {
     cJSON *req      = cJSON_Parse(request.c_str());
@@ -299,6 +319,8 @@ std::string handle_request(const std::string &request, Requests &target)
         answer = error("bad_request");
     else if (std::strcmp(op->valuestring, "status") == 0)
         answer = target.status();
+    else if (std::strcmp(op->valuestring, "interfaces") == 0)
+        answer = interfaces_answer(list_can_links());
     else if (std::strcmp(op->valuestring, "sdo_read") == 0)
         answer = sdo(req, target, false);
     else if (std::strcmp(op->valuestring, "sdo_write") == 0)

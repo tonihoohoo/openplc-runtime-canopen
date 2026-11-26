@@ -189,6 +189,19 @@ def test_slave_lss_forget_is_forwarded(tmp_path: Path) -> None:
         plugin.close()
 
 
+def test_interfaces_request_is_forwarded(tmp_path: Path) -> None:
+    sock_path = tmp_path / "canopen.socket"
+    plugin = FakePlugin(
+        sock_path, b'{"interfaces":[{"name":"can0","kind":"can","up":true,"bitrate":0}]}\n'
+    )
+    try:
+        answer = {"interfaces": [{"name": "can0", "kind": "can", "up": True, "bitrate": 0}]}
+        assert send_canopen_request({"op": "interfaces"}, sock_path) == (answer, 200)
+        assert plugin.received() == [b'{"op":"interfaces"}\n']
+    finally:
+        plugin.close()
+
+
 def test_lss_request_is_forwarded(tmp_path: Path) -> None:
     sock_path = tmp_path / "canopen.socket"
     plugin = FakePlugin(sock_path, b'{"job":8}\n')

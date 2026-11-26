@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace canopen_plugin
 {
@@ -50,6 +51,18 @@ int link_set_up(const std::string &name, bool up);
 // `bitrate` 0 keeps the link's bit rate; `restart_ms` -1 keeps its restart delay. The link must
 // be down.
 int link_set_bitrate(const std::string &name, unsigned bitrate, long restart_ms);
+
+// One CAN link of this computer, as listed for the commissioning window's interface picker.
+struct CanLinkEntry
+{
+    std::string name;
+    std::string kind; // IFLA_INFO_KIND: "can", "vcan", ...
+    bool up          = false;
+    unsigned bitrate = 0; // 0: none reported (vcan) or not configured
+};
+
+// The CAN links (ARPHRD_CAN) of this computer, sorted by name. Reading needs no privilege.
+std::vector<CanLinkEntry> list_can_links();
 
 // The link calls, behind an interface so tests can stand in for a CAN interface.
 class LinkOps

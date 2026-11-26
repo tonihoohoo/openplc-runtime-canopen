@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "can_link.h"
 #include "client.h"
 #include "config.h"
 
@@ -81,6 +82,9 @@ class Requests
 NetworkConfig service_network(const ServiceRequest &req);
 
 // Answers one request line with one JSON answer.
+// The `interfaces` answer for these CAN links: {"interfaces":[{name, kind, up, bitrate}, ...]}.
+std::string interfaces_answer(const std::vector<CanLinkEntry> &links);
+
 std::string handle_request(const std::string &request, Requests &target);
 
 } // namespace canopen_plugin
