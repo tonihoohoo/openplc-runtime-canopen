@@ -30,7 +30,16 @@ def test_reports_the_version_from_the_plugin_header(tmp_path: Path) -> None:
     )
     assert canopen_capability(library=_library(tmp_path), header=header) == {
         "configVersions": [7],
-        "features": ["status", "sdo", "nmt", "service", "lss", "slave_lss", "commission"],
+        "features": [
+            "status",
+            "sdo",
+            "nmt",
+            "service",
+            "lss",
+            "slave_lss",
+            "commission",
+            "interfaces",
+        ],
     }
 
 

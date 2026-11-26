@@ -14,6 +14,7 @@
 #include "check.h"
 #include "fake_link.h"
 #include "log.h"
+#include "requests.h"
 
 using namespace canopen_plugin;
 using canopen_test::FakeLink;
@@ -124,9 +125,29 @@ void check_parse_stats()
     CHECK(li.has_stats && li.tx_frames == 1488 && li.tx_dropped == 182 && li.rx_dropped == 2);
 }
 
+// The interface picker's list: only CAN links, and its answer on the socket.
+void check_list_links()
+{
+    for (const CanLinkEntry &l : list_can_links())
+        CHECK(l.name != "lo" && !l.kind.empty());
+    CHECK(interfaces_answer({}) == "{\"interfaces\":[]}");
+    CanLinkEntry a;
+    a.name    = "can0";
+    a.kind    = "can";
+    a.up      = true;
+    a.bitrate = 250000;
+    CanLinkEntry b;
+    b.name = "vcan0";
+    b.kind = "vcan";
+    CHECK(interfaces_answer({a, b}) ==
+          "{\"interfaces\":[{\"name\":\"can0\",\"kind\":\"can\",\"up\":true,\"bitrate\":250000},"
+          "{\"name\":\"vcan0\",\"kind\":\"vcan\",\"up\":false,\"bitrate\":0}]}");
+}
+
 int main()
 {
     set_log_sink(count_sink);
+    check_list_links();
     check_parse_stats();
     check_prepare();
 

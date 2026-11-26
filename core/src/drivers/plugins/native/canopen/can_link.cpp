@@ -9,6 +9,7 @@
 
 #include <cstdlib>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -421,6 +422,30 @@ fail:
     }
     problem = "cannot configure CAN interface " + name + ": " + std::strerror(-rc);
     return LinkResult::Failed;
+}
+
+std::vector<CanLinkEntry> list_can_links()
+{
+    std::vector<CanLinkEntry> out;
+    struct if_nameindex *names = if_nameindex();
+    if (names == nullptr)
+        return out;
+    for (struct if_nameindex *n = names; n->if_index != 0 && n->if_name != nullptr; ++n)
+    {
+        LinkInfo li;
+        if (link_get(n->if_name, li) != 0 || li.not_can)
+            continue;
+        CanLinkEntry e;
+        e.name    = n->if_name;
+        e.kind    = li.kind;
+        e.up      = li.up;
+        e.bitrate = li.bitrate;
+        out.push_back(e);
+    }
+    if_freenameindex(names);
+    std::sort(out.begin(), out.end(),
+              [](const CanLinkEntry &a, const CanLinkEntry &b) { return a.name < b.name; });
+    return out;
 }
 
 } // namespace canopen_plugin
